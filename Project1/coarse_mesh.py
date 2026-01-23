@@ -267,7 +267,7 @@ def main():
     )
     # Plot mesh in GRI
     nodes, elements, boundary_groups, periodic_pairs = plotgri.read_gri_file('data/coarse_blade_mesh.gri')
-    plotgri.plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs)
+    # plotgri.plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs)
     plotgri.plot_mesh_with_centroids(nodes, elements, boundary_groups, periodic_pairs)
 
 if __name__ == "__main__":
