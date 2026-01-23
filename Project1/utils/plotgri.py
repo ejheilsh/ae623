@@ -89,8 +89,100 @@ def read_gri_file(filename):
                 idx += 1
         except:
             pass
-    
+
     return nodes, elements, boundary_groups, periodic_pairs
+
+def centroid(nodes_6):
+    # nodes_6 is 2D array: [[x1,y1], [x2,y2], [x3,y3]]
+    n1 = nodes_6[0]
+    n2 = nodes_6[1]
+    n3 = nodes_6[2]
+
+    x_c = (n1[0] + n2[0] + n3[0]) / 3
+    y_c = (n1[1] + n2[1] + n3[1]) / 3
+
+    return [x_c, y_c]
+
+def plot_mesh_with_centroids(nodes, elements, boundary_groups, periodic_pairs):
+    """Plot the mesh with boundary groups colored differently."""
+    fig, ax = plt.subplots(1, 1, figsize=(14, 6))
+    
+    # Plot all elements (light gray)
+    for elem in elements:
+        pts = nodes[elem - 1, :]  # convert to 0-based
+        triangle = plt.Polygon(pts, fill=False, edgecolor='lightgray', linewidth=0.3)
+        ax.add_patch(triangle)
+
+        cent = centroid(pts)
+
+        plt.scatter([cent[0]], [cent[1]], color="r")
+        
+
+        # plt.scatter(centroid([nodes(e) for e in elements]), color="r")
+    
+    # Define colors for each boundary type
+    colors = {
+        'Wall': 'black',
+        'Inflow': 'blue',
+        'Outflow': 'red',
+        'PeriodicBottom': 'green',
+        'PeriodicTop': 'orange'
+    }
+    
+    # Plot boundary edges
+    for bname, edges in boundary_groups.items():
+        color = colors.get(bname, 'gray')
+        for edge in edges:
+            p1 = nodes[edge[0] - 1, :]  # convert to 0-based
+            p2 = nodes[edge[1] - 1, :]
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=color, linewidth=2, label=bname)
+    
+    # Remove duplicate labels
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc='upper right')
+    
+    ax.set_aspect('equal')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_title('Mesh with Boundary Groups')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('data/blade_mesh_boundaries.png', dpi=600)
+    print("Saved data/blade_mesh_boundaries.png")
+    
+    # Plot periodic pairs
+    if periodic_pairs:
+        fig2, ax2 = plt.subplots(1, 1, figsize=(14, 6))
+        
+        # Plot mesh outline
+        for bname, edges in boundary_groups.items():
+            for edge in edges:
+                p1 = nodes[edge[0] - 1, :]
+                p2 = nodes[edge[1] - 1, :]
+                ax2.plot([p1[0], p2[0]], [p1[1], p2[1]], 'k-', linewidth=1)
+        
+        # Plot periodic pairs as vertical lines
+        for pair in periodic_pairs:
+            p_bottom = nodes[pair[0] - 1, :]
+            p_top = nodes[pair[1] - 1, :]
+            ax2.plot([p_bottom[0], p_top[0]], [p_bottom[1], p_top[1]], 
+                    'r--', linewidth=1, alpha=0.5)
+            ax2.plot(p_bottom[0], p_bottom[1], 'go', markersize=4)
+            ax2.plot(p_top[0], p_top[1], 'bo', markersize=4)
+        
+        ax2.set_aspect('equal')
+        ax2.set_xlabel('x')
+        ax2.set_ylabel('y')
+        ax2.set_title(f'Periodic Node Pairs ({len(periodic_pairs)} pairs)')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('data/blade_mesh_periodic.png', dpi=600)
+        print("Saved data/blade_mesh_periodic.png")
+    
+    #plt.show()
 
 
 def plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs):
