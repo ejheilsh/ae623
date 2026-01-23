@@ -7,7 +7,8 @@ from utils import plotgri
 We have two txt files of blade upper and lower in data form in xy coordinate format
 We want to first read these files and then plot them to see the blade shape.
 Then we want to create connectivity of these using Delaunay triangulation and plot the mesh.
-Finally we want to save the mesh in a .gri file format. 
+ to save the mesh in a .gri file format. 
+This is a new line
 """
 
 def read_xy_file(fname):
