@@ -3,6 +3,9 @@ import matplotlib.pyplot as plt
 import pygmsh as pg
 from utils import config, plotgri, E2N, normals_area, write_gri
 from utils import plotgri
+from utils import refine_mesh
+import time
+
 """
 We have two txt files of blade upper and lower in data form in xy coordinate format
 We want to first read these files and then plot them to see the blade shape.
@@ -231,10 +234,13 @@ def mesh_verification(N_interior, N_boundary, Area, I2E_matrix, B2E_matrix, Mesh
 
 #-----------------------------------------------------------
 def main():
+    # start timer
+    t_start = time.perf_counter()
+
     # GATHER V, E DATA FROM MSH FILE
     poly_xy, geom_info = initialize_xy_splines()
     V, E = mesh_with_pygmsh(poly_xy, mesh_size=config.initial_mesh_size)
-    
+
     B = ['Periodic', 'Wall']  # Boundary data can be added if needed
     Bname = []  # Boundary names can be added if needed
     Mesh_obj = Mesh(V, E, B, Bname)
@@ -269,7 +275,69 @@ def main():
     # Plot mesh in GRI
     nodes, elements, boundary_groups, periodic_pairs = plotgri.read_gri_file('data/coarse_blade_mesh.gri')
     # plotgri.plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs)
-    plotgri.plot_mesh_with_centroids(nodes, elements, boundary_groups, periodic_pairs)
+    plotgri.plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs)
+
+    # ---- Tasks 4 and 5: Sizing Function & Local Refinement ----
+    num_refine = 5 # Change this parameter to control number of refinement iterations
+    ctr = 1
+    for k in range(num_refine):
+        print("\n--- Tasks 4 & 5: Sizing Function & Local Refinement ---")
+
+        # 1. Setup Sizing Function
+        sf = refine_mesh.SizingFunction(poly_xy, pitch=geom_info['H_box'], h_min=0.15, h_max=config.initial_mesh_size, alpha=0.15)
+
+        # 2. Run Sizing Function
+        marked_list, tri_marks = refine_mesh.mark_edges_for_refinement(Mesh_obj.V, Mesh_obj.E, sf, periodic_pairs)
+        
+        # 3. Handle Periodic Symmetry
+        # Load original periodic pairs to ensure symmetry
+        _, _, _, periodic_pairs = plotgri.read_gri_file('data/coarse_blade_mesh.gri')
+        p_map = {p[0]-1: p[1]-1 for p in periodic_pairs}
+        p_map.update({p[1]-1: p[0]-1 for p in periodic_pairs})
+        
+        print(f"Initial mesh: {Mesh_obj.E.shape[0]} elements.")
+        print(f"Sizing Function marked {len(marked_list)} edges for refinement.")
+
+        if len(marked_list) > 0:
+            # 4. Refine
+            V_ref, E_ref, periodic_pairs_new = refine_mesh.refine_mesh_locally(Mesh_obj, sf, periodic_pairs)
+            
+            # 5. Update Mesh Object
+            Mesh_obj.V = V_ref
+            Mesh_obj.E = E_ref
+            
+            # 6. Rebuild Boundary Connectivity
+            [I2E_ref, B2E_ref] = E2N.edgehash(Mesh_obj.E + 1)
+            
+            print(f"Refined mesh: {Mesh_obj.E.shape[0]} elements, {Mesh_obj.V.shape[0]} nodes.")
+
+            # 7. Write and Plot
+            output_file = 'data/locally_refined_blade_mesh.gri'
+            
+            write_gri.save_mesh_from_coarse_mesh(
+                Mesh_obj, I2E_ref, B2E_ref,
+                y_bottom_left=geom_info['y_bottom_left_box'],
+                y_top_left=geom_info['y_top_left_box'],
+                y_bottom_right=geom_info['y_bottom_right_box'],
+                y_top_right=geom_info['y_top_right_box'],
+                x_left=geom_info['x_left_box'],
+                x_right=geom_info['x_right_box'],
+                airfoil_x_min=geom_info['x_left_upper_airfoil'], # Map here
+                airfoil_x_max=geom_info['x_right_upper_airfoil'], # Map here
+                filename=output_file
+            )
+            
+            nodes, elements, groups, pairs = plotgri.read_gri_file(output_file)
+            plotgri.plot_refined_mesh_with_boundaries(nodes, elements, groups, pairs, ctr)
+            ctr += 1
+        # ---- END TEST ----
+    refine_mesh.plot_sizing_function_on_mesh(Mesh_obj.V, Mesh_obj.E, sf, fname="data/sizing_function_most_refined.png")
+
+    # display total runtime
+    t_end = time.perf_counter()
+    print(f"\nTotal runtime: {t_end - t_start:.3f} seconds")
+
+
 
 if __name__ == "__main__":
     main()
