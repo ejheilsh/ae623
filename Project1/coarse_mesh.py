@@ -311,60 +311,122 @@ def main():
     plotgri.plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs)
 
     # ---- Tasks 4 and 5: Sizing Function & Local Refinement ----
-    num_refine = 5 # Change this parameter to control number of refinement iterations
+    refine_level = 1 # putting 0 makes it all h_max?
     ctr = 1
-    for k in range(num_refine):
+    k = 0
+    while True:
+        k += 1
         print("\n--- Tasks 4 & 5: Sizing Function & Local Refinement ---")
 
         # 1. Setup Sizing Function
-        sf = refine_mesh.SizingFunction(poly_xy, pitch=geom_info['H_box'], h_min=0.15, h_max=config.initial_mesh_size, alpha=0.15)
+        # sf = refine_mesh.SizingFunction(poly_xy, pitch=geom_info['H_box'], h_min=0.15, h_max=config.initial_mesh_size, alpha=0.15, use_spline_distance=True)
+        sf = refine_mesh.SizingFunction(
+            poly_xy,
+            pitch=geom_info['H_box'],
+            h_min=0.05,
+            h_max=2,
+            use_spline_distance=True,
+            le_te_sigma=3,
+            refine_level=refine_level,
+        )
+        # Debug plots for sizing function (one-time)
+        if k == 1:
+            sf.plot_debug()
+
+        # Plot sizing function on current mesh (before refinement)
+        refine_mesh.plot_sizing_function_on_mesh(
+            Mesh_obj.V,
+            Mesh_obj.E,
+            sf,
+            fname=f"data/sizing_function_before_refine_{k+1}.png",
+        )
+        refine_mesh.plot_mesh_edges_colored_by_h(
+            Mesh_obj.V,
+            Mesh_obj.E,
+            sf,
+            fname=f"data/mesh_h_edges_before_refine_{k+1}.svg",
+        )
 
         # 2. Run Sizing Function
         marked_list, tri_marks = refine_mesh.mark_edges_for_refinement(Mesh_obj.V, Mesh_obj.E, sf, periodic_pairs)
-        
-        # 3. Handle Periodic Symmetry
-        # Load original periodic pairs to ensure symmetry
-        _, _, _, periodic_pairs = plotgri.read_gri_file('data/coarse_blade_mesh.gri')
-        p_map = {p[0]-1: p[1]-1 for p in periodic_pairs}
-        p_map.update({p[1]-1: p[0]-1 for p in periodic_pairs})
+
+        # Plot refinement decisions on current mesh
+        refine_mesh.plot_refinement_edges(
+            Mesh_obj.V,
+            Mesh_obj.E,
+            sf,
+            periodic_pairs,
+            fname=f"data/refinement_edges_before_refine_{k+1}.png",
+        )
         
         print(f"Initial mesh: {Mesh_obj.E.shape[0]} elements.")
         print(f"Sizing Function marked {len(marked_list)} edges for refinement.")
 
-        if len(marked_list) > 0:
-            # 4. Refine
-            V_ref, E_ref, periodic_pairs_new = refine_mesh.refine_mesh_locally(Mesh_obj, sf, periodic_pairs)
-            
-            # 5. Update Mesh Object
-            Mesh_obj.V = V_ref
-            Mesh_obj.E = E_ref
-            
-            # 6. Rebuild Boundary Connectivity
-            [I2E_ref, B2E_ref] = E2N.edgehash(Mesh_obj.E + 1)
-            
-            print(f"Refined mesh: {Mesh_obj.E.shape[0]} elements, {Mesh_obj.V.shape[0]} nodes.")
+        if len(marked_list) == 0:
+            break
 
-            # 7. Write and Plot
-            output_file = 'data/locally_refined_blade_mesh.gri'
-            
-            write_gri.save_mesh_from_coarse_mesh(
-                Mesh_obj, I2E_ref, B2E_ref,
-                y_bottom_left=geom_info['y_bottom_left_box'],
-                y_top_left=geom_info['y_top_left_box'],
-                y_bottom_right=geom_info['y_bottom_right_box'],
-                y_top_right=geom_info['y_top_right_box'],
-                x_left=geom_info['x_left_box'],
-                x_right=geom_info['x_right_box'],
-                airfoil_x_min=geom_info['x_left_upper_airfoil'], # Map here
-                airfoil_x_max=geom_info['x_right_upper_airfoil'], # Map here
-                filename=output_file
-            )
-            
-            nodes, elements, groups, pairs = plotgri.read_gri_file(output_file)
-            plotgri.plot_refined_mesh_with_boundaries(nodes, elements, groups, pairs, ctr)
-            ctr += 1
+        # 4. Refine
+        V_ref, E_ref, periodic_pairs_new = refine_mesh.refine_mesh_locally(Mesh_obj, sf, periodic_pairs)
+
+        # Identify wall boundary nodes (airfoil surface only)
+        wall_nodes = refine_mesh.get_wall_boundary_nodes(
+            V_ref,
+            E_ref,
+            x_left=geom_info['x_left_box'],
+            x_right=geom_info['x_right_box'],
+            y_bottom_left=geom_info['y_bottom_left_box'],
+            y_top_left=geom_info['y_top_left_box'],
+            y_bottom_right=geom_info['y_bottom_right_box'],
+            y_top_right=geom_info['y_top_right_box'],
+            airfoil_x_min=geom_info['x_left_upper_airfoil'],
+            airfoil_x_max=geom_info['x_right_upper_airfoil'],
+        )
+
+        # Snap wall nodes before smoothing
+        V_ref = refine_mesh.snap_wall_nodes_to_blade(V_ref, wall_nodes)
+
+        # 5. Smooth mesh (freeze boundary + periodic nodes)
+        V_ref = refine_mesh.smooth_mesh_periodic_safe(
+            V_ref, E_ref, periodic_pairs_new, iterations=5, omega=0.2
+        )
+
+        # Snap wall nodes after smoothing
+        V_ref = refine_mesh.snap_wall_nodes_to_blade(V_ref, wall_nodes)
+        
+        # 6. Update Mesh Object
+        Mesh_obj.V = V_ref
+        Mesh_obj.E = E_ref
+        
+        # 7. Rebuild Boundary Connectivity
+        [I2E_ref, B2E_ref] = E2N.edgehash(Mesh_obj.E + 1)
+        
+        print(f"Refined mesh: {Mesh_obj.E.shape[0]} elements, {Mesh_obj.V.shape[0]} nodes.")
+
+        # 8. Write and Plot
+        output_file = 'data/locally_refined_blade_mesh.gri'
+        
+        write_gri.save_mesh_from_coarse_mesh(
+            Mesh_obj, I2E_ref, B2E_ref,
+            y_bottom_left=geom_info['y_bottom_left_box'],
+            y_top_left=geom_info['y_top_left_box'],
+            y_bottom_right=geom_info['y_bottom_right_box'],
+            y_top_right=geom_info['y_top_right_box'],
+            x_left=geom_info['x_left_box'],
+            x_right=geom_info['x_right_box'],
+            airfoil_x_min=geom_info['x_left_upper_airfoil'], # Map here
+            airfoil_x_max=geom_info['x_right_upper_airfoil'], # Map here
+            filename=output_file
+        )
+        
+        nodes, elements, groups, pairs = plotgri.read_gri_file(output_file)
+        plotgri.plot_refined_mesh_with_boundaries(nodes, elements, groups, pairs, ctr)
+        ctr += 1
+        periodic_pairs = periodic_pairs_new
         # ---- END TEST ----
+
     refine_mesh.plot_sizing_function_on_mesh(Mesh_obj.V, Mesh_obj.E, sf, fname="data/sizing_function_most_refined.png")
+    # refine_mesh.plot_sizing_function_with_centroid_projection(Mesh_obj.V, Mesh_obj.E, sf, fname="data/sizing_function_most_refined.png")
+    # refine_mesh.plot_kdtree_points_on_surface(poly_xy, fname="data/kdtree_points_on_surface.png")
 
     # display total runtime
     t_end = time.perf_counter()
