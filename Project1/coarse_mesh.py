@@ -230,7 +230,37 @@ def mesh_verification(N_interior, N_boundary, Area, I2E_matrix, B2E_matrix, Mesh
     print(f"Mean error magnitude:    {mean_error:.6e}")
     print(f"Number of elements:      {Mesh_obj.E.shape[0]}")
 
+def mesh_test():
+    """
+    From task 1-3, rerun the main() process but for test.gri. Save results below.
+    """
+    print("Running mesh test.gri...")
+    # Load the test mesh
+    nodes, elements, boundary_groups, periodic_pairs = plotgri.read_gri_file('data/test.gri')
+    elements_0based = elements - 1
+    
+    # Create a new Mesh object
+    Mesh_obj_test = Mesh(nodes, elements_0based, [], [])
+    print("Test Vertices (V):"   , Mesh_obj_test.V.shape)
+    print("Test Elements (E):"   , Mesh_obj_test.E.shape)
 
+    I2E_matrix_test, B2E_matrix_test = E2N.edgehash(Mesh_obj_test.E + 1)
+    N_interior_test, N_boundary_test, Area_test = normals_area.compute_normals_and_areas(Mesh_obj_test.V, Mesh_obj_test.E)
+
+    print("Test Interior Normals:" , N_interior_test.shape)
+    print("Test Boundary Normals:" , N_boundary_test.shape)
+    print("Test Element Areas:"    , Area_test.shape)
+    print("Test I2E Matrix:"       , I2E_matrix_test.shape)
+    print("Test B2E Matrix:"       , B2E_matrix_test.shape)
+    np.savetxt('data/test_interior_normals.txt', N_interior_test)
+    np.savetxt('data/test_boundary_normals.txt', N_boundary_test)
+    np.savetxt('data/test_element_areas.txt', Area_test)
+    np.savetxt('data/test_I2E_matrix.txt', I2E_matrix_test)
+    np.savetxt('data/test_B2E_matrix.txt', B2E_matrix_test)
+
+    mesh_verification(N_interior_test, N_boundary_test, Area_test, I2E_matrix_test, B2E_matrix_test, Mesh_obj_test)
+
+    
 
 #-----------------------------------------------------------
 def main():
@@ -258,6 +288,9 @@ def main():
     Mesh_dict = {'V': Mesh_obj.V, 'E': Mesh_obj.E, 'B': Mesh_obj.B, 'Bname': Mesh_obj.Bname}
     # Verify the normals and areas
     mesh_verification(N_interior, N_boundary, Area, I2E_matrix, B2E_matrix, Mesh_obj)
+
+    # Run the test.gri file from above tests and see if it can recall the tasks correctly
+    mesh_test()
     
     # Save to GRI file with proper boundary classification
     write_gri.save_mesh_from_coarse_mesh(

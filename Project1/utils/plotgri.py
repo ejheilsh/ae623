@@ -55,7 +55,7 @@ def read_gri_file(filename):
     all_elements = []
     for _ in range(negroups):
         # Element type line
-        etype_parts = lines[idx].strip().split()
+        # etype_parts = lines[idx].strip().split()
         idx += 1
         
         # Read elements (until we hit a non-numeric line or end of elements)
