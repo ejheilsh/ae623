@@ -311,6 +311,7 @@ def main():
     plotgri.plot_mesh_with_boundaries(nodes, elements, boundary_groups, periodic_pairs)
 
     # ---- Tasks 4 and 5: Sizing Function & Local Refinement ----
+	# to get global (unform) refinement, need to make h_min very very small, then all cells will refine every time)
     refine_level = 1 # putting 0 makes it all h_max?
     ctr = 1
     k = 0
