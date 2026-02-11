@@ -8,6 +8,17 @@ import os
 
 from utils import plotgri, E2N
 
+# HELPERS FOR DIAGNOSTIC (MATT)
+def elem_centroid(Mesh, e):
+    V, E = Mesh['V'], Mesh['E']
+    return V[E[e]].mean(axis=0)
+
+def elem_boundary_groups(Mesh, e):
+    BE = Mesh['BE']
+    idx = np.where(BE[:,2] == e)[0]
+    groups = [Mesh['Bname'][BE[i,3]] for i in idx] if len(idx) else []
+    return idx, groups
+
 
 def solve(Mesh, flow_params, niter, U0=None):
     """
@@ -38,6 +49,9 @@ def solve(Mesh, flow_params, niter, U0=None):
     """
     # Build normals
     Normals = get_normals(Mesh)
+    fI, fB = orient_normals(Mesh, Normals)
+    print(f"Normal orientation: flipped interior={fI}/{Mesh['IE'].shape[0]}, boundary={fB}/{Mesh['BE'].shape[0]}")
+
     
     # Initialize state
     if U0 is None:
@@ -58,6 +72,39 @@ def solve(Mesh, flow_params, niter, U0=None):
     for iiter in range(niter):
         # Calculate residual
         R, dtA = calc_res(Mesh, Normals, flow_params, U)
+
+        # # DIAGNOSTIC BLOCK (can delete)
+        # gamma = flow_params['gamma']
+
+        # rho = U[:,0].copy()
+        # p   = np.zeros(U.shape[0])
+        # M   = np.zeros(U.shape[0])
+
+        # for j in range(U.shape[0]):
+        #     r,u,v,pj = prim_from_cons(U[j,:], gamma)
+        #     p[j] = pj
+        #     a = np.sqrt(gamma*pj/r)
+        #     V = np.sqrt(u*u + v*v)
+        #     M[j] = V / max(a, 1e-12)
+
+        # j_rmin = np.argmin(rho)
+        # j_pmin = np.argmin(p)
+        # j_Mmax = np.argmax(M)
+
+        # c_p = elem_centroid(Mesh, j_pmin)
+        # _, g_p = elem_boundary_groups(Mesh, j_pmin)
+
+        # c_m = elem_centroid(Mesh, j_Mmax)
+        # _, g_m = elem_boundary_groups(Mesh, j_Mmax)
+
+        # print(f"  pmin elem {j_pmin} centroid={c_p}, touches={g_p}")
+        # print(f"  Mmax elem {j_Mmax} centroid={c_m}, touches={g_m}")
+
+        # print(f"  rho[min]={rho[j_rmin]:.3e} @ elem {j_rmin}, rho[max]={rho.max():.3e}")
+        # print(f"  p  [min]={p[j_pmin]:.3e} @ elem {j_pmin}, p  [max]={p.max():.3e}")
+        # print(f"  M  [max]={M[j_Mmax]:.3e} @ elem {j_Mmax}")
+        # print(f"  dtA[min]={dtA.min():.3e}, dtA[max]={dtA.max():.3e}")
+
         
         # Check convergence
         if iiter % 10 == 0:
@@ -72,14 +119,14 @@ def solve(Mesh, flow_params, niter, U0=None):
             
             import matplotlib.pyplot as plt
             from utils.plotgri import plot_solution
-            plot_solution(Mesh, U[:, 0], title='Density Field', cmap='viridis')
-            plt.show()
+            # plot_solution(Mesh, U[:, 0], title='Density Field', cmap='viridis')
+            # plt.show()
             if Rnorm < Rtol:
                 print('Converged!')
                 break
         
         # Update the state (explicit Euler time step)
-        dtA = 2 * CFL / dtA
+        dtA = CFL / (2 * dtA)
         for k in range(4):
             U[:, k] = U[:, k] - dtA * R[:, k]
     
@@ -126,6 +173,40 @@ def get_normals(Mesh):
     Normals['blength'] = blength
     
     return Normals
+
+def orient_normals(Mesh, Normals):
+    V, E = Mesh['V'], Mesh['E']
+    IE, BE = Mesh['IE'], Mesh['BE']
+
+    # Interior normals: force n to point from eL to eR
+    nI = Normals['inormal']
+    flipped_I = 0
+    for i in range(IE.shape[0]):
+        eL = IE[i, 2]
+        eR = IE[i, 3]
+        cL = V[E[eL]].mean(axis=0)
+        cR = V[E[eR]].mean(axis=0)
+        if np.dot(nI[i, :], (cR - cL)) < 0.0:
+            nI[i, :] *= -1.0
+            flipped_I += 1
+    Normals['inormal'] = nI
+
+    # Boundary normals: force n to point outward of adjacent element eL
+    nB = Normals['bnormal']
+    flipped_B = 0
+    for i in range(BE.shape[0]):
+        eL = BE[i, 2]
+        n1 = BE[i, 0]
+        n2 = BE[i, 1]
+        cL = V[E[eL]].mean(axis=0)
+        mid = 0.5 * (V[n1] + V[n2])
+        # outward means pointing from centroid to edge midpoint
+        if np.dot(nB[i, :], (mid - cL)) < 0.0:
+            nB[i, :] *= -1.0
+            flipped_B += 1
+    Normals['bnormal'] = nB
+
+    return flipped_I, flipped_B
 
 
 def get_param():
@@ -369,41 +450,180 @@ def wall_flux(UL, n, gamma):
     smag : float
         Maximum wave speed
     """
-    rL = UL[0]
-    uL = UL[1] / rL
-    vL = UL[2] / rL
-    unL = uL * n[0] + vL * n[1]
-    qL = np.sqrt(UL[1]**2 + UL[2]**2) / rL
-    utL = np.sqrt(qL**2 - unL**2)
-    pL = (gamma - 1) * (UL[3] - 0.5 * rL * utL**2)
-    rHL = UL[3] + pL
-    cL = np.sqrt(gamma * pL / rL)
+    ### WILL VERSION: (magnitudes)
+    # rL = UL[0]
+    # uL = UL[1] / rL
+    # vL = UL[2] / rL
+    # unL = uL * n[0] + vL * n[1]
+    # qL = np.sqrt(UL[1]**2 + UL[2]**2) / rL
+    # utL = np.sqrt(qL**2 - unL**2)
+    # pL = (gamma - 1) * (UL[3] - 0.5 * rL * utL**2)
+    # rHL = UL[3] + pL
+    # cL = np.sqrt(gamma * pL / rL)
     
-    smag = abs(unL) + cL
+    # smag = abs(unL) + cL
     
-    # Wall flux: no mass flux, only pressure force
-    F = np.array([
-        0.0,
-        pL * n[0],
-        pL * n[1],
-        0.0
-    ])
+    # # Wall flux: no mass flux, only pressure force
+    # F = np.array([
+    #     0.0,
+    #     pL * n[0],
+    #     pL * n[1],
+    #     0.0
+    # ])
     
+    # return F, smag
+
+    ### MATT VERSION: (projection)
+    rho = max(UL[0], 1e-12)
+    u   = UL[1] / rho
+    v   = UL[2] / rho
+
+    un = u*n[0] + v*n[1]
+
+    # tangential boundary velocity
+    ub = u - un*n[0]
+    vb = v - un*n[1]
+    vb2 = ub*ub + vb*vb
+
+    pb = (gamma - 1.0) * (UL[3] - 0.5 * rho * vb2)
+    pb = max(pb, 1e-12)
+
+    # wave speed for dt estimate (use wall pressure-based sound speed)
+    cb = np.sqrt(gamma * pb / rho)
+    smag = abs(un) + cb
+
+    F = np.array([0.0, pb*n[0], pb*n[1], 0.0])
     return F, smag
 
-def subsonic_inflow_bc(UL, n, rho0, p0, alpha, gamma):
-    """Simplified subsonic inflow BC"""
+def prim_from_cons(U, gamma):
+    """
+    Conservative to primitive.
+    U = [rho, rho*u, rho*v, rho*E]
+    returns (rho, u, v, p)
+    """
+    rho = max(U[0], 1e-12)
+    u = U[1] / rho
+    v = U[2] / rho
+    q2 = u*u + v*v
+    p = (gamma - 1.0) * (U[3] - 0.5 * rho * q2)
+    p = max(p, 1e-12)  # pressure floor for robustness
+    return rho, u, v, p
 
-    #return flux_function(UL, UR, n, gamma)
-    pass
+def cons_from_prim(rho, u, v, p, gamma):
+    """
+    Primitive to conservative.
+    (rho, u, v, p) -> U = [rho, rho*u, rho*v, rho*E]
+    """
+    rho = max(rho, 1e-12)
+    p = max(p, 1e-12)
+    E = p / ((gamma - 1.0) * rho) + 0.5 * (u*u + v*v)
+    return np.array([rho, rho*u, rho*v, rho*E])
+
+def sound_speed(rho, p, gamma):
+    """a = sqrt(gamma p / rho)"""
+    return np.sqrt(gamma * p / max(rho, 1e-12))
+
+
+
+def subsonic_inflow_bc(UL, n, rho0, p0, alpha, gamma):
+    """
+    Inflow (rho_t, c_t, alpha) SEE Fidkowski 3.3.2.
+    rho0 = rho_t, a0 = c_t (stagnation speed of sound), alpha sets inflow direction.
+    """
+    # interior primitives
+    rhoL, uL, vL, pL = prim_from_cons(UL, gamma)
+    cL = sound_speed(rhoL, pL, gamma)
+    unL = uL*n[0] + vL*n[1]
+
+    # outgoing invariant from interior
+    Jp = unL + 2.0*cL/(gamma - 1.0)
+
+    # inflow direction
+    nin = np.array([np.cos(alpha), np.sin(alpha)])
+    dn  = nin[0]*n[0] + nin[1]*n[1]
+
+    # stagnation data (floors)
+    rho_t = max(rho0, 1e-12)
+    p_t   = max(p0,   1e-12)
+
+    # c_t^2 = gamma p_t / rho_t
+    ct2 = gamma * p_t / rho_t
+
+    # quadratic: A M^2 + B M + C = 0
+    A = ct2*(dn*dn) - 0.5*(gamma - 1.0)*(Jp*Jp)
+    B = 4.0*ct2*dn/(gamma - 1.0)
+    C = 4.0*ct2/((gamma - 1.0)**2) - (Jp*Jp)
+
+    # solve for M_b >= 0
+    if abs(A) < 1e-14:
+        Mb = 0.0 if abs(B) < 1e-14 else (-C / B)
+    else:
+        disc = B*B - 4.0*A*C
+        disc = max(disc, 0.0)
+        rdisc = np.sqrt(disc)
+        M1 = (-B - rdisc)/(2.0*A)
+        M2 = (-B + rdisc)/(2.0*A)
+        cand = [m for m in (M1, M2) if m >= 0.0]
+        Mb = min(cand) if cand else max(M1, M2)
+
+    # subsonic guard
+    Mb = max(0.0, min(Mb, 0.999))
+
+    # isentropic ratios
+    tau = 1.0 + 0.5*(gamma - 1.0)*Mb*Mb
+    Tr  = 1.0 / tau  # T/Tt
+
+    pb   = p_t   * (Tr**(gamma/(gamma - 1.0)))
+    rhob = rho_t * (Tr**(1.0/(gamma - 1.0)))
+    pb   = max(pb,   1e-12)
+    rhob = max(rhob, 1e-12)
+
+    cb = np.sqrt(gamma * pb / rhob)
+
+    vb = Mb * cb * nin
+    Ub = cons_from_prim(rhob, vb[0], vb[1], pb, gamma)
+
+    # HLLE boundary flux
+    F, smag = flux_function(UL, Ub, n, gamma)
+    return F, smag
 
 
 def subsonic_outflow_bc(UL, n, pout, gamma):
-    """Simplified subsonic outflow BC"""
+    """subsonic outflow BC"""
+    rhoL, uL, vL, pL = prim_from_cons(UL, gamma)
+    cL  = sound_speed(rhoL, pL, gamma)
+    unL = uL*n[0] + vL*n[1]
+
+    # supersonic outflow guard if everything is leaving, just extrapolate
+    if (unL > 0.0) and (abs(unL) / max(cL, 1e-12) >= 1.0):
+        F, smag = flux_function(UL, UL, n, gamma)
+        return F, smag
+
+    # outgoing invariant
+    Jp = unL + 2.0*cL/(gamma - 1.0)
+
+    # entropy from interior
+    Splus = pL / (rhoL**gamma)
+
+    pb = max(pout, 1e-12)
+    rhob = (pb / max(Splus, 1e-300))**(1.0/gamma)
+    rhob = max(rhob, 1e-12)
+
+    cb = np.sqrt(gamma * pb / rhob)
+
+    unb = Jp - 2.0*cb/(gamma - 1.0)
+
+    # keep tangential velocity from interior
+    ut = uL - unL*n[0]
+    vt = vL - unL*n[1]
+    ub = ut + unb*n[0]
+    vb = vt + unb*n[1]
+
+    Ub = cons_from_prim(rhob, ub, vb, pb, gamma)
+
+    F, smag = flux_function(UL, Ub, n, gamma)
+    return F, smag
     
-    
-    #return flux_function(UL, UR, n, gamma)
-    pass
 
 def load_mesh_from_gri(mesh_file):
     """
@@ -634,7 +854,7 @@ if __name__ == '__main__':
     # Load mesh using Project1's infrastructure
     Mesh = load_mesh_from_gri(mesh_file)
     
-    # Set flow conditions (from Project 2 specs)
+    # Set flow conditions (from Project 2 specs) | Corresponding to Project 2, Section 1.2
     gamma = 1.4
     rho0 = 1.0                          # Inlet stagnation density
     a0 = 1.0                            # Inlet stagnation speed of sound
