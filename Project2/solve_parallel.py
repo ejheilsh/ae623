@@ -27,7 +27,7 @@ def update_state_parallel(U, R, dtA, CFL):
     Parallel explicit Euler time step update
     """
     Ne = U.shape[0]
-    dt = CFL / (2 * dtA)
+    dt = 2 * CFL / (dtA)
     for i in prange(Ne):
         for k in range(4):
             U[i, k] = U[i, k] - dt[i] * R[i, k]
@@ -293,24 +293,46 @@ def get_uinf(Minf, aoa):
     return Uinf
 
 
-@njit(parallel=True)
 def calc_res_interior_parallel(IE, U, inormal, ilength, gamma, R, dtA):
     """
-    Parallel computation of interior edge flux contributions
+    Uses a 2-pass approach:
+      1) parallel edge flux compute
+      2) serial accumulation into R and dtA
     """
     Ni = IE.shape[0]
+    Fedge = np.empty((Ni, 4), dtype=np.float64)
+    smag_edge = np.empty(Ni, dtype=np.float64)
+
+    compute_interior_edge_fluxes(IE, U, inormal, gamma, Fedge, smag_edge)
+    accumulate_interior_edge_fluxes(IE, ilength, Fedge, smag_edge, R, dtA)
+
+
+@njit(parallel=True)
+def compute_interior_edge_fluxes(IE, U, inormal, gamma, Fedge, smag_edge):
+    Ni = IE.shape[0]
     for i in prange(Ni):
-        eL = IE[i, 2]  # Left element
-        eR = IE[i, 3]  # Right element
-        ilen = ilength[i]
-        
+        eL = IE[i, 2]
+        eR = IE[i, 3]
         F, smag = flux_function(U[eL, :], U[eR, :], inormal[i, :], gamma)
-        
         for k in range(4):
-            R[eL, k] += F[k] * ilen
-            R[eR, k] -= F[k] * ilen
-        dtA[eL] += smag * ilen
-        dtA[eR] += smag * ilen
+            Fedge[i, k] = F[k]
+        smag_edge[i] = smag
+
+
+@njit
+def accumulate_interior_edge_fluxes(IE, ilength, Fedge, smag_edge, R, dtA):
+    Ni = IE.shape[0]
+    for i in range(Ni):
+        eL = IE[i, 2]
+        eR = IE[i, 3]
+        L  = ilength[i]
+        for k in range(4):
+            R[eL, k] += Fedge[i, k] * L
+            R[eR, k] -= Fedge[i, k] * L
+        s = smag_edge[i] * L
+        dtA[eL] += s
+        dtA[eR] += s
+
 
 
 @njit
@@ -325,32 +347,47 @@ def calc_res_boundary_serial(BE, U, bnormal, blength, gamma, R, dtA,
     for i in range(Nb):
         eL = BE[i, 2]  # Adjacent element
         ib = BE[i, 3]  # Boundary group
-        blen = blength[i]
-        
+        L  = blength[i]
+
+        # PERIODIC: treat as an interior face
+        if ib == BN_periodicbottom or ib == BN_periodictop:
+            j = periodic_map_array[i]
+            if j < 0:
+                # fallback if unmapped
+                F, smag = flux_function(U[eL, :], U[eL, :], bnormal[i, :], gamma)
+                for k in range(4):
+                    R[eL, k] += F[k] * L
+                dtA[eL] += smag * L
+                continue
+
+            # process each pair once
+            if j < i:
+                continue
+
+            eR = BE[j, 2]
+            F, smag = flux_function(U[eL, :], U[eR, :], bnormal[i, :], gamma)
+
+            for k in range(4):
+                R[eL, k] += F[k] * L
+                R[eR, k] -= F[k] * L
+            dtA[eL] += smag * L
+            dtA[eR] += smag * L
+            continue
+
+        # inflow/outflow/wall
         if ib == BN_inflow:
-            # Subsonic inflow: specify stagnation conditions
             F, smag = subsonic_inflow_bc(U[eL, :], bnormal[i, :], rho0, p0, alpha, gamma)
         elif ib == BN_outflow:
-            # Subsonic outflow: specify back pressure
             F, smag = subsonic_outflow_bc(U[eL, :], bnormal[i, :], pout, gamma)
         elif ib == BN_wall:
-            # Wall boundary condition (blade surface)
             F, smag = wall_flux(U[eL, :], bnormal[i, :], gamma)
-        elif ib == BN_periodicbottom or ib == BN_periodictop:
-            j_match = periodic_map_array[i]
-            if j_match >= 0:
-                eR = BE[j_match, 2]  # Element on other side of periodic boundary
-                F, smag = flux_function(U[eL, :], U[eR, :], bnormal[i, :], gamma)
-            else:
-                # Fallback if no match found
-                F, smag = flux_function(U[eL, :], U[eL, :], bnormal[i, :], gamma)
         else:
-            # Shouldn't happen - use extrapolation as fallback
             F, smag = flux_function(U[eL, :], U[eL, :], bnormal[i, :], gamma)
-        
+
         for k in range(4):
-            R[eL, k] += F[k] * blen
-        dtA[eL] += smag * blen
+            R[eL, k] += F[k] * L
+        dtA[eL] += smag * L
+
 
 
 def calc_res(Mesh, Normals, flow_params, U):
@@ -914,6 +951,8 @@ def build_periodic_map(BE, periodic_pairs, Bname): # ADDED NEW FROM DR. FIDOWSKI
     
     # For each periodic boundary edge, find its matching edge
     for i in range(BE.shape[0]):
+        if i in periodic_map:
+            continue  # Already mapped
         if BE[i, 3] == pb_idx or BE[i, 3] == pt_idx:
             n1, n2 = BE[i, 0], BE[i, 1]
             
@@ -929,6 +968,7 @@ def build_periodic_map(BE, periodic_pairs, Bname): # ADDED NEW FROM DR. FIDOWSKI
                         # Check both orderings
                         if (m1 == n1_match and m2 == n2_match) or (m1 == n2_match and m2 == n1_match):
                             periodic_map[i] = j
+                            periodic_map[j] = i
                             break
     
     return periodic_map
@@ -963,7 +1003,7 @@ if __name__ == '__main__':
         'gamma': gamma
     }
     
-    niter = 10000
+    niter = 100000
     
     print(f"\nSolving Euler equations:")
     print(f"  Inlet: rho0={rho0:.3f}, p0={p0:.3f}, alpha={alpha*180/np.pi:.1f} deg")
