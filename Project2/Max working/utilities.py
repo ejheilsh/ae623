@@ -14,7 +14,6 @@ class Uutil():
     """
     U: np.ndarray   
     gamma: float    
-    stdout: bool = False
     
     def __post_init__(self):
         self.rho = self.U[0]
@@ -92,7 +91,7 @@ if __name__=="__main__":
     
     gamma = 1.4
 
-    Utest = Uutil(Uex, gamma, stdout=True)
+    Utest = Uutil(Uex, gamma) 
     print(Utest.p)
     print(Utest.rho)
     

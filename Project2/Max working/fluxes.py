@@ -1,5 +1,5 @@
 import numpy as np
-from utils import Uutil
+from utilities import Uutil
 """
 Max Mah
 2/11/26
@@ -21,12 +21,11 @@ def inviscid_wall(Uplus: np.ndarray, n: np.ndarray, gamma: float):
     gamma: float 
         Ratio of specific heats
     """    
-    rhoint = Uplus[0]
-    rhouint = Uplus[1]
-    rhovint = Uplus[2]
-    rhoEint = Uplus[3]
-    
-    vvecint = np.array([rhouint / rhoint, rhovint / rhoint]) 
+    Uplus = Uutil(Uplus, gamma)
+    vvecint = Uplus.vvec
+    rhoint = Uplus.rho
+    rhoEint = Uplus.rhoE
+
     vvecb = vvecint - (vvecint @ n) * n # boundary velocity is tangential; interior velocity with wall-normal component removed 
     qsqb = vvecb @ vvecb
     pb = (gamma - 1) * (rhoEint - (0.5 * rhoint * qsqb))
@@ -36,11 +35,18 @@ def inviscid_wall(Uplus: np.ndarray, n: np.ndarray, gamma: float):
         pb * n[1],
         0
     ])
-   
-    # for wall, use interior state with normal velocity removed for the wave speed
-    u = vvecb @ n # u = vvec dot n, with normal velocity component removed
-    cb = np.sqrt((gamma * pb / rhoint)) # NOTE just using the interior density here, dont think we need to compute rho on boundary....
+    
+    # NOTE temporarily switch wall BC wave speed to use interior un instead of tangential removed
+    pint = Uplus.p
+    u = vvecint @ n
+    cb = np.sqrt((gamma * pint) / rhoint)
+    
+    # NOTE ADD THIS BACK LATERRRR.....for wall, use interior state with normal velocity removed for the wave speed
+    # u = vvecb @ n # u = vvec dot n, with normal velocity component removed
+    # cb = np.sqrt((gamma * pb / rhoint)) # NOTE just using the interior density here, dont think we need to compute rho on boundary....
+    
     smax = np.abs(u) + cb 
+
     return Fb, smax 
 
 # NOTE MAKE SURE ALPHA IS PASSED IN IN RADIANS!!!!
@@ -66,26 +72,16 @@ def subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: 
     pt = ct**2 * rhot / gamma
 
     # deconstruct interior state TODO offload this to helper function later
-    rhoplus = Uplus[0]
-    rhouplus = Uplus[1]
-    rhovplus = Uplus[2]
-    rhoEplus = Uplus[3]
+    Uplus = Uutil(Uplus, gamma)
+    vvecplus = Uplus.vvec
+    cplus = Uplus.c
 
-    uplus = rhouplus/rhoplus
-    vplus = rhovplus/rhoplus
-    vvecplus = np.array([uplus, vplus])
     unplus = vvecplus @ n   # wall-normal velocity component from the interior (Fidkowski, pg 62)
+    Jplus = unplus + (2 * cplus)/(gamma - 1)    # Riemann invariant (Fidkowski, pg 62)
 
-    qsq = uplus**2 + vplus**2           # magnitude velocity squared 
-    q = np.sqrt(qsq)            # magnitude velocity 
-
-    pplus = (gamma - 1) * (rhoEplus - 0.5 * rhoplus * qsq) # pressure
-    cplus = np.sqrt((gamma * pplus) / rhoplus)
     nin = np.array([np.cos(alpha), np.sin(alpha)]) # specified inflow direction
     dn = nin @ n
     
-    Jplus = unplus + (2 * cplus)/(gamma - 1)    # Riemann invariant (Fidkowski, pg 62)
-
     # inflow Mach number Mb is calculated from Jplus and specified parameters by solving a quadratic of form A*M^2 + B*M + C = 0
     A = ((gamma * pt * dn**2) / rhot) - ((gamma - 1) / 2) * Jplus**2
     B = ((4 * gamma * pt * dn) / (rhot * (gamma - 1)))
@@ -111,22 +107,20 @@ def subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: 
             (-B - sqrt_discr) / (2 * A),
         ]
 
-    # Prefer physical subsonic roots; if unavailable, clip nearest positive root
-    Mb_candidates = [M for M in roots if np.isfinite(M) and (0.0 < M < 1.0)]
-    if len(Mb_candidates) == 1:
-        Mb = Mb_candidates[0]
-    elif len(Mb_candidates) == 2:
+    # Simpler root filter: accept physically forward roots (M > 0)
+    Mb_candidates = [M for M in roots if np.isfinite(M) and (M > 0.0)]
+    if len(Mb_candidates) >= 1:
         Mb = min(Mb_candidates)
     else:
-        positive_roots = [M for M in roots if np.isfinite(M) and M > 0.0]
-        if len(positive_roots) > 0:
-            Mb = min(positive_roots)
-        else:
-            Mb = 0.1
-        Mb = np.clip(Mb, tol, 1.0 - tol)
+        Mb = 0.1
+        print("WARNING: No positive inflow Mach root; using fallback Mb=0.1")
+
+    # NOTE this clutters the sdout console
+    # if Mb > 1.0:
+    #     print(f"WARNING: Inflow Mb > 1 detected (Mb={Mb:.6e})")
     
     # using Mb and stagnation quantities, construct exterior state (ub) quantities
-    Tr = 1 + 0.5 * (gamma - 1) * Mb**2  # temperature ratio = exterior static temperature / total temperature (Tb / Tt)
+    Tr = 1 / (1 + 0.5 * (gamma - 1) * Mb**2)  # temperature ratio = exterior static temperature / total temperature (Tb / Tt) # NOTE THIS IS A LITTLE JANK WITH THE DIVISION
     pb = pt * Tr**(gamma / (gamma - 1)) # exterior static pressure
     RTb = Tr * pt / rhot    
     rhob = pb / RTb                     # exterior static density
@@ -143,12 +137,14 @@ def subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: 
         rhoEb 
     ])
     
-    Fhatb, *_ = F_from_U(Ub, n, gamma)
+    return Ub
+    # NOTE BELOW WAS WRONG!!!!
+    # Fhatb, *_ = F_from_U(Ub, n, gamma)
     
-    # compute maximum wave speed 
-    u = vvecb @ n # incorporate the boundary state by using velocity vector at boundary (exterior velocity) dotted with the normal
-    smax = np.abs(u) + cb
-    return Fhatb, smax
+    # # compute maximum wave speed 
+    # u = vvecb @ n # incorporate the boundary state by using velocity vector at boundary (exterior velocity) dotted with the normal
+    # smax = np.abs(u) + cb
+    # return Fhatb, smax
 
 # NOTE BE SURE TO PASS IN POUT FROM THE MAIN SOLVER
 def subsonic_outflow(Uplus: np.ndarray, n: float, pb: float, gamma: float):
@@ -190,11 +186,13 @@ def subsonic_outflow(Uplus: np.ndarray, n: float, pb: float, gamma: float):
         rhoEb
     ])
     
-    # compute maximum wave speed 
-    u = vvecb @ n # incorporate the boundary state by using velocity vector at boundary (exterior velocity) dotted with the normal
-    smax = np.abs(u) + cb
-    Fhatb, *_ = F_from_U(Ub, n, gamma)
-    return Fhatb, smax
+    return Ub
+    # NOTE BELOW IS WRONG!! JUST GOTTA PASS Ub to the FLUX FUNCTION!!
+    # # compute maximum wave speed 
+    # u = vvecb @ n # incorporate the boundary state by using velocity vector at boundary (exterior velocity) dotted with the normal
+    # smax = np.abs(u) + cb
+    # Fhatb, *_ = F_from_U(Ub, n, gamma)
+    # return Fhatb, smax
 
 def F_from_U(U, n, gamma):
     """
@@ -257,6 +255,7 @@ def fluxRoe(UL, UR, n, gamma):
     eps = 0.1 * c
     mask = mag_eigs < eps # boolean mask array T/F if each eig magnitude is less than eps NOTE OR CAN USE np.where(condition, new_value, old_value)
     eigs[mask] = (eps**2 + eigs[mask]**2) / (2 * eps)
+    mag_eigs = np.abs(eigs)
     
     # maximum eigenvalue used as the maximum wave speed for time step calculations     
     smax_tm = np.max(mag_eigs) # NOTE for wavespeed always use absolute value 
@@ -271,7 +270,8 @@ def fluxRoe(UL, UR, n, gamma):
     drho_E = dU[3]
     
     drhovvec = np.array([drho_u, drho_v])
-    G1 = (gamma - 1) * ((0.5 * qsq**2 * drho) - (vvec_roe @ drhovvec) + drho_E)
+    # Roe dissipation term uses 0.5*|v|^2*drho (not |v|^4*drho)
+    G1 = (gamma - 1) * ((0.5 * qsq * drho) - (vvec_roe @ drhovvec) + drho_E)
     G2 = -(u * drho) + (drhovvec @ n)
     C1 = (G1 / c**2) * (s1 - mag_eigs[2]) + (G2 / c) * s2
     C2 = (G1 / c) * s2 + (s1 - mag_eigs[2]) * G2 
@@ -290,8 +290,8 @@ def fluxHLLE(UL, UR, n, gamma):
     """
     HLLE flux function (Fidkowski, pg 60)
     """
-    FL, rhoL, vvecL, HL, PL = F_from_U(UL)
-    FR, rhoR, vvecR, HR, PR = F_from_U(UR)
+    FL, rhoL, vvecL, HL, PL = F_from_U(UL, n, gamma)
+    FR, rhoR, vvecR, HR, PR = F_from_U(UR, n, gamma)
     
     uL = vvecL @ n 
     uR = vvecR @ n
@@ -307,7 +307,19 @@ def fluxHLLE(UL, UR, n, gamma):
     smin = min(sLmin, sRmin)
     smax = max(sLmax, sRmax)
 
-    Fhat = 0.5 * (FL + FR) - 0.5 * ((smax + smin)/(smax - smin)) * (FR - FL) + ((smax * smin) / (smax - smin)) * (uR - uL)
+    Fhat = 0.5 * (FL + FR) - 0.5 * ((smax + smin)/(smax - smin)) * (FR - FL) + ((smax * smin) / (smax - smin)) * (UR - UL)
     smax_tm = max(np.abs(uL) + cL, np.abs(uR) + cR) # maximum wave speed for time step calculations (AE 623 course notes, pg 60)
     
     return Fhat, smax_tm
+
+# incorporate the boundary state by using velocity vector at boundary (exterior velocity) dotted with the normal
+def smagb(Ub, bn, gamma):
+    Ub = Uutil(Ub, gamma)
+    vvecb = Ub.vvec
+    pb = Ub.p
+    rhob = Ub.rho
+    
+    u = vvecb @ bn
+    cb = np.sqrt(gamma * pb / rhob)
+    smax = np.abs(u) + cb
+    return float(smax)

@@ -4,9 +4,10 @@ from dataclasses import dataclass, field
 from readgri import readgri 
 from pathlib import Path
 from viz import plotmesh
-from fluxes import fluxHLLE, fluxRoe, inviscid_wall, subsonic_inflow, subsonic_outflow
+from fluxes import fluxHLLE, fluxRoe, inviscid_wall, subsonic_inflow, subsonic_outflow, smagb
 import time
 from typing import Optional
+from utilities import Uutil
 
 """
 Max Mah 
@@ -112,43 +113,77 @@ class FiniteVol():
         
         U = self.U0.copy()
         Rhist = [] 
-        RnormL1 = 1 # starting guess for RnormL1    
         niter = 0
+        converged = False
+        fail_reason = None
         
         # TODO one issue i see is R is a matrix [Ne x 4] not a vector...
         # is the L1 norm gonna be right? 
         
-        while RnormL1 > self.rtol and niter < itercap:
+        while niter < itercap:
             # calculate residual
             R, sdl = self.calc_residual(U)
+            # np.isfinite(x) reutrns True where x is real finite number and False for Nan, +inf, -inf. This catches numerical breakdown early.
+            if (not np.all(np.isfinite(R))) or (not np.all(np.isfinite(sdl))):
+                fail_reason = f"Non-finite residual or sdl detected at iter {niter}"
+                break
+
             # RnormL1 = np.linalg.norm(R, ord=1) # monitor L1 norm of the discrete residual vector
-            RnormL1 = np.sum(np.abs(R)) # from GPT: this is the global L1 norm? else can have elementwise L1? 
-            
+            RnormL1 = np.sum(np.abs(R)) # global L1 residual norm
+            if not np.isfinite(RnormL1):
+                fail_reason = f"Residual norm became non-finite at iter {niter}"
+                break
+             
             Rhist.append(RnormL1)
             if niter % 10 == 0: 
-                print(f'niter: {niter}, RnormL1: {RnormL1:.6e}')
+                _, rho_min_now, p_min_now = self._state_is_physical(U)
+                print(
+                    f'niter: {niter}, RnormL1: {RnormL1:.6e}, '
+                    f'min(rho): {rho_min_now:.6e}, min(p): {p_min_now:.6e}'
+                )
+            if RnormL1 <= self.rtol:
+                converged = True
+                break
             # update the state via local time stepping 
             dt = self.calc_dt(sdl, usecase='steady') # this ought to be an array with time steps for each element
+            if not np.all(np.isfinite(dt)):
+                fail_reason = f"Non-finite local dt detected at iter {niter}"
+                break
             # TODO check the broadcasting on this 
             U -= dt[:, None] * (R / self.Area[:, None]) # TODO right now using FE for first order, build out additional time integration SSP-RK-.. later
+            ok_state, rho_min, p_min = self._state_is_physical(U)
+            if not ok_state:
+                fail_reason = (
+                    f"Non-physical state at iter {niter}: min(rho)={rho_min:.6e}, "
+                    f"min(p)={p_min:.6e}"
+                )
+                self._print_state_diagnostics(U, niter, RnormL1)
+                break
             niter += 1 # increment counter 
         
-        if niter==itercap:
+        if converged:
+            print(f"Converged in {niter} iterations with RnormL1={RnormL1:.6e}")
+        elif fail_reason is not None:
+            print(f"WARNING: Solver aborted: {fail_reason}")
+        elif niter==itercap:
             print("WARNING: Iteration cap reached without convergence")
             
         # store final state, time history of state
         self.U = U 
         self.Rhist = Rhist 
         
-        # save results as numpy binary  (.npz) after solving; replaces nested list objects with plain np arrays so that post-processing is easier
-        datafile = f"{self.meshname}_{self.fluxname}_results.npz"
-        np.savez(
-            datafile,
-            fluxfunc=self.fluxname,
-            U=self.U,
-            Rhist=self.Rhist
-        )
-        print(f"Saved results to {datafile}")
+        # save only converged runs to avoid silently writing corrupted/nonphysical states
+        if converged:
+            datafile = f"{self.meshname}_{self.fluxname}_results.npz"
+            np.savez(
+                datafile,
+                fluxfunc=self.fluxname,
+                U=self.U,
+                Rhist=self.Rhist
+            )
+            print(f"Saved results to {datafile}")
+        else:
+            print("Did not save results because solve did not converge cleanly.")
         
 
     def calc_residual(self, U):
@@ -185,14 +220,21 @@ class FiniteVol():
             bidx = self.BE[i, 3]
             blen = self.Bn[i, 2]
             Bname = self.Bname # get the Bname to index by boundary 
+            bn = self.Bn[i, :2] # normal vector at boundary (nx, ny)
             
-            #TODO come up with a way to return wave speed FOR ALL THREE!!! SEE PIAZZA
+            # TODO come up with a way to return wave speed FOR ALL THREE!!! SEE PIAZZA
             if Bname[bidx]=='inflow': 
-                F, smag_b = subsonic_inflow(U[elemL, :], self.Bn[i, :2], self.rho0, self.a0, self.alpha, self.gamma)
-            elif Bname[bidx]=='wall': 
-                F, smag_b = inviscid_wall(U[elemL, :], self.Bn[i, :2], self.gamma)
+                Ub = subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, self.gamma)
+                F, _ = self.flux(U[elemL, :], Ub, bn, self.gamma) # NOTE if returned a wave speed from flux function, it would come from uL and uL not from boundary state by using velocity vector at boundary.
+                smag_b = smagb(Ub, bn, self.gamma) # NOTE set the wavespeed using boundary state-based smax 
+                 
             elif Bname[bidx]=='outflow': 
-                F, smag_b = subsonic_outflow(U[elemL, :], self.Bn[i, :2], self.pout, self.gamma)
+                Ub = subsonic_outflow(U[elemL, :], bn, self.pout, self.gamma)
+                F, _ = self.flux(U[elemL, :], Ub, bn, self.gamma)
+                smag_b = smagb(Ub, bn, self.gamma)
+                
+            elif Bname[bidx]=='wall': 
+                F, smag_b = inviscid_wall(U[elemL, :], bn, self.gamma)
             else:
                 raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
             F = np.asarray(F, dtype=float)
@@ -202,6 +244,109 @@ class FiniteVol():
             sdl[elemL] += smag_b * blen
 
         return R, sdl
+
+    def plot_edge_normals(self, edge_set: str = 'both', scale: float = 0.35, stride: int = 1, figsize=(10, 4)):
+        """
+        Debug visualization for edge-normal orientation.
+        Colors:
+        - interior: green = points L->R, red = opposite
+        - boundary: cyan = points outward from element, magenta = opposite
+        """
+        V = self.V
+        E = self.E
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.triplot(V[:, 0], V[:, 1], E, 'k-', linewidth=0.35, alpha=0.45)
+
+        edge_set = edge_set.lower()
+        stride = max(1, int(stride))
+
+        if edge_set in ('both', 'interior'):
+            ie = self.IE[::stride, :]
+            ni = self.In[::stride, :2]
+            mids_i = 0.5 * (V[ie[:, 0], :] + V[ie[:, 1], :])
+            d_lr = self.Centroid[ie[:, 3], :] - self.Centroid[ie[:, 2], :]
+            ok_i = np.einsum('ij,ij->i', ni, d_lr) > 0.0
+
+            if np.any(ok_i):
+                ax.quiver(
+                    mids_i[ok_i, 0], mids_i[ok_i, 1], ni[ok_i, 0], ni[ok_i, 1],
+                    color='tab:green', angles='xy', scale_units='xy', scale=1.0 / scale,
+                    width=0.0022, label='interior normal OK'
+                )
+            if np.any(~ok_i):
+                ax.quiver(
+                    mids_i[~ok_i, 0], mids_i[~ok_i, 1], ni[~ok_i, 0], ni[~ok_i, 1],
+                    color='tab:red', angles='xy', scale_units='xy', scale=1.0 / scale,
+                    width=0.0028, label='interior normal flipped'
+                )
+
+        if edge_set in ('both', 'boundary'):
+            be = self.BE[::stride, :]
+            nb = self.Bn[::stride, :2]
+            mids_b = 0.5 * (V[be[:, 0], :] + V[be[:, 1], :])
+            c_to_mid = mids_b - self.Centroid[be[:, 2], :]
+            ok_b = np.einsum('ij,ij->i', nb, c_to_mid) > 0.0
+
+            if np.any(ok_b):
+                ax.quiver(
+                    mids_b[ok_b, 0], mids_b[ok_b, 1], nb[ok_b, 0], nb[ok_b, 1],
+                    color='tab:cyan', angles='xy', scale_units='xy', scale=1.0 / scale,
+                    width=0.0022, label='boundary normal outward'
+                )
+            if np.any(~ok_b):
+                ax.quiver(
+                    mids_b[~ok_b, 0], mids_b[~ok_b, 1], nb[~ok_b, 0], nb[~ok_b, 1],
+                    color='magenta', angles='xy', scale_units='xy', scale=1.0 / scale,
+                    width=0.0028, label='boundary normal flipped'
+                )
+
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_title('Edge-Normal Orientation Check')
+        ax.legend(loc='best', fontsize=8)
+        fig.tight_layout()
+        plt.show()
+
+    def plot_residual_field(self, U: np.ndarray, component: str = 'l1', log10: bool = True, cmap: str = 'viridis', figsize=(10, 4)):
+        """
+        Plot element-wise residual magnitude on the mesh.
+        component options: 'l1', 'rho', 'rhou', 'rhov', 'rhoE'
+        """
+        R, _ = self.calc_residual(U)
+        key = component.lower()
+        if key == 'l1':
+            val = np.sum(np.abs(R), axis=1)
+            label = r'|R|_1 (per element)'
+        elif key == 'rho':
+            val = np.abs(R[:, 0]); label = r'|R_rho|'
+        elif key == 'rhou':
+            val = np.abs(R[:, 1]); label = r'|R_rhou|'
+        elif key == 'rhov':
+            val = np.abs(R[:, 2]); label = r'|R_rhov|'
+        elif key in ('rhoe', 'rho_e'):
+            val = np.abs(R[:, 3]); label = r'|R_rhoE|'
+        else:
+            raise ValueError("component must be one of: 'l1', 'rho', 'rhou', 'rhov', 'rhoE'")
+
+        if log10:
+            val_plot = np.log10(np.maximum(val, 1e-30))
+            cbar_label = f'log10({label})'
+        else:
+            val_plot = val
+            cbar_label = label
+
+        fig, ax = plt.subplots(figsize=figsize)
+        tpc = ax.tripcolor(
+            self.V[:, 0], self.V[:, 1], self.E,
+            facecolors=val_plot, shading='flat', cmap=cmap
+        )
+        ax.triplot(self.V[:, 0], self.V[:, 1], self.E, color='k', linewidth=0.15, alpha=0.25)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_title(f'Residual Field ({component})')
+        cbar = fig.colorbar(tpc, ax=ax)
+        cbar.set_label(cbar_label)
+        fig.tight_layout()
+        plt.show()
+
     
     def time_march_scheme(self):
         """
@@ -221,13 +366,70 @@ class FiniteVol():
         
         if usecase.lower()=='steady':
             return dt_i
-        elif usecase.loewr()=='unsteady':
+        elif usecase.lower()=='unsteady':
             return dt
         else: 
             raise ValueError(f"Expected 'steady' or 'unsteady' for usecase") 
+
+    def _state_is_physical(self, U):
+        rho = U[:, 0]
+        rhou = U[:, 1]
+        rhov = U[:, 2]
+        rhoE = U[:, 3]
+
+        finite_mask = np.all(np.isfinite(U), axis=1)
+        rho_pos_mask = rho > 0.0
+        valid_den_mask = finite_mask & rho_pos_mask
+        p = np.full_like(rho, -np.inf, dtype=float)
+        p[valid_den_mask] = (self.gamma - 1.0) * (
+            rhoE[valid_den_mask]
+            - 0.5 * (rhou[valid_den_mask] ** 2 + rhov[valid_den_mask] ** 2) / rho[valid_den_mask]
+        )
+
+        ok = np.all(finite_mask) and np.all(rho_pos_mask) and np.all(p > 0.0)
+        rho_min = np.min(rho)
+        p_min = np.min(p)
+        return ok, rho_min, p_min
+
+    def _compute_pressure(self, U):
+        rho = U[:, 0]
+        rhou = U[:, 1]
+        rhov = U[:, 2]
+        rhoE = U[:, 3]
+
+        p = np.full(self.Ne, np.nan, dtype=float)
+        valid = np.isfinite(rho) & (rho > 0.0) & np.isfinite(rhou) & np.isfinite(rhov) & np.isfinite(rhoE)
+        p[valid] = (self.gamma - 1.0) * (rhoE[valid] - 0.5 * (rhou[valid] ** 2 + rhov[valid] ** 2) / rho[valid])
+        return p
+
+    def _print_state_diagnostics(self, U, niter, RnormL1):
+        p = self._compute_pressure(U)
+        rho = U[:, 0]
+
+        idx_p = int(np.nanargmin(p))
+        idx_rho = int(np.nanargmin(rho))
+
+        bmask = self.BE[:, 2] == idx_p
+        btags = [self.Bname[int(b)] for b in self.BE[bmask, 3]] if np.any(bmask) else []
+        btags_str = ",".join(btags) if len(btags) > 0 else "none"
+
+        c = self.Centroid[idx_p]
+        print(
+            "DIAG: "
+            f"iter={niter}, RnormL1={RnormL1:.6e}, "
+            f"worst_p_elem={idx_p}, p={p[idx_p]:.6e}, rho={rho[idx_p]:.6e}, "
+            f"centroid=({c[0]:.6e},{c[1]:.6e}), boundary_tags={btags_str}"
+        )
+        c_rho = self.Centroid[idx_rho]
+        print(
+            "DIAG: "
+            f"worst_rho_elem={idx_rho}, rho={rho[idx_rho]:.6e}, p={p[idx_rho]:.6e}, "
+            f"centroid=({c_rho[0]:.6e},{c_rho[1]:.6e})"
+        )
         
 if __name__=="__main__":
-    solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4)
+    solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
+    # solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4, CFL=0.5)
     solver.solve_steady(runtime=True, itercap=10e6)
     print('deez')
     # plotmesh(solver.Mesh, fname='testplot', savefig=True)
