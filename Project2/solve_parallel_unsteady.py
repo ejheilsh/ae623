@@ -653,17 +653,16 @@ def subsonic_inflow_bc(UL, n, rho0, p0, alpha, gamma, y, t):
     ## UNSTEADY ADDITION PORTION (WILL)
     f_wake = 0.1
     delta = 0.1
+    delta_y = 18e-3
     # Rotor speed V_rotor = a,0_inflow
     V_rotor = ct2**0.5
     # eta. y = y_pos of the domain we examine, t = cumulative time (iteration * dt)
     y_stator = y + V_rotor * t
-    delta_y = 18e-3
     eta = y_stator / delta_y - np.floor(y_stator / delta_y) - 0.5
+    #print(eta)
     # Modify stagnation density with unsteady wake function
     rho_t *= (1.0 - f_wake * np.exp(-0.5 * (eta / delta)**2))
-
-    #print(f"Subsonic inflow BC at y={y:.4f}, t={t:.4f}: rho_t={rho_t:.4e}, eta={eta:.4f}")
-
+    ##
 
     # quadratic: A M^2 + B M + C = 0
     A = ct2*(dn*dn) - 0.5*(gamma - 1.0)*(Jp*Jp)

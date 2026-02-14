@@ -237,6 +237,7 @@ def convert_unassigned_edges(E, IE, BE):
 # IMPORT data/unsteady/coarse iterations, whole folder
 data_folder = 'data/unsteady/coarse'
 data_organized = {}
+time_values = {}  # Store time values for each iteration
 N_files_load_limit = 20
 N_plot_frames = 10
 # Load mesh using prior infrastructure
@@ -252,7 +253,21 @@ for i in range(1, N_files_load_limit + 1):  # Load files 1 to N_files_load_limit
         if matching_files:
             filename = matching_files[0]  # Take first match
             data_organized[i] = np.loadtxt(filename)
-            print(f"Loaded {filename}")
+            
+            # Extract time from filename (e.g., solution_34.42_0004.txt -> 34.42)
+            base_name = os.path.basename(filename)  # Get just filename without path
+            # Split by underscores and get the time part
+            parts = base_name.split('_')
+            if len(parts) >= 2:
+                time_str = parts[1]  # Get the time part (e.g., "34.42")
+                try:
+                    time_values[i] = float(time_str)
+                except ValueError:
+                    time_values[i] = 0.0  # Default if can't parse
+            else:
+                time_values[i] = 0.0
+                
+            print(f"Loaded {filename}, time = {time_values[i]:.3f}")
         else:
             print(f"No file found matching pattern: {pattern}")
             
@@ -263,10 +278,11 @@ for i in range(1, N_files_load_limit + 1):  # Load files 1 to N_files_load_limit
 for i in range(1, N_files_load_limit + 1, N_plot_frames):
     if i in data_organized:
         U = data_organized[i]
+        time_value = time_values.get(i, 0.0)  # Get time for this iteration
         # now find the map in image form
         # Plotting the solution (e.g. density) on the mesh
         plot_solution(Mesh, U[:, 1] / U[:, 0], title='Vel_x Field', cmap='viridis')
-        plt.title(f'Solution Snapshot at Iteration {i}')
+        plt.title(f'Solution Snapshot at Iteration {i}, Time = {time_value:.3f} Seconds')
         plt.xlabel('X Index')
         plt.ylabel('Y Index')
         plt.savefig(f'data/unsteady/coarse/plots/unsteady_snapshot_{i:04d}.png')
