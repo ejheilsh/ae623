@@ -112,7 +112,8 @@ def subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: 
     if len(Mb_candidates) >= 1:
         Mb = min(Mb_candidates)
     else:
-        Mb = 0.1
+        Mb = 1e-5
+        # Mb = 0.1
         print("WARNING: No positive inflow Mach root; using fallback Mb=0.1")
 
     # NOTE this clutters the sdout console
@@ -290,6 +291,15 @@ def fluxHLLE(UL, UR, n, gamma):
     """
     HLLE flux function (Fidkowski, pg 60)
     """
+    UL = np.asarray(UL, dtype=float).reshape(-1)
+    UR = np.asarray(UR, dtype=float).reshape(-1)
+    n = np.asarray(n, dtype=float).reshape(-1)
+    if UL.shape != (4,) or UR.shape != (4,) or n.shape != (2,):
+        raise ValueError(
+            f"fluxHLLE expects UL/UR shape (4,) and n shape (2,), "
+            f"got UL={UL.shape}, UR={UR.shape}, n={n.shape}"
+        )
+
     FL, rhoL, vvecL, HL, PL = F_from_U(UL, n, gamma)
     FR, rhoR, vvecR, HR, PR = F_from_U(UR, n, gamma)
     
@@ -306,8 +316,17 @@ def fluxHLLE(UL, UR, n, gamma):
 
     smin = min(sLmin, sRmin)
     smax = max(sLmax, sRmax)
-
-    Fhat = 0.5 * (FL + FR) - 0.5 * ((smax + smin)/(smax - smin)) * (FR - FL) + ((smax * smin) / (smax - smin)) * (UR - UL)
+    den = smax - smin
+    if np.abs(den) < 1e-14:
+        # Degenerate wave-speed bracket: states are nearly identical.
+        # Fall back to central flux to avoid blow-up/broadcast surprises.
+        Fhat = 0.5 * (FL + FR)
+    else:
+        Fhat = (
+            0.5 * (FL + FR)
+            - 0.5 * ((smax + smin) / den) * (FR - FL)
+            + ((smax * smin) / den) * (UR - UL)
+        )
     smax_tm = max(np.abs(uL) + cL, np.abs(uR) + cR) # maximum wave speed for time step calculations (AE 623 course notes, pg 60)
     
     return Fhat, smax_tm

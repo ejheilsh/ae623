@@ -135,7 +135,7 @@ def freestream_test(initial_cell_states, edges, areas, perimeters, hydrodynamic_
     cell_states_history = [initial_cell_states]
     L1_norm_history = []
     for i in range(n_iters):
-        print(f"Iteration {i}")
+        print(f"Iteration {i}, {L1_norm}")
         for cell_num in range(n_cells):
             weighted_avg_wave_speed[cell_num] = 0
             residuals[cell_num] = 0
@@ -180,7 +180,8 @@ def fvsolve(initial_cell_states, edges, areas, perimeters, hydrodynamic_diameter
     cell_states_history = [initial_cell_states]
     L1_norm_history = []
     for i in range(n_iters):
-        print(f"Iteration {i + 1}")
+        if i % 10 == 0 and i > 0:
+            print(f"Iteration {i}, {L1_norm:.2e}")
         for cell_num in range(n_cells):
             weighted_avg_wave_speed[cell_num] = 0
             residuals[cell_num] = 0

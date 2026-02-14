@@ -4,8 +4,8 @@ from functions import *
 nItersMax = 5000
 partA = 0
 partB = 0
-partC = 1; partCi = 1; partCii = 0
-partD = 0
+partC = 0; partCi = 0; partCii = 0
+partD = 1
 partE = 0
 partF = 0
 
@@ -52,6 +52,7 @@ if partC == 1:
 
 if partD == 1:
     bladeNums = [0, 1, 2]
+#    bladeNums = [2]
     for bladeNum in bladeNums:
         (coordinates, nodeConnectivity, cellConnectivity, centroids, areas, edges,
          perimeters, hydrodynamicDiameters, initialCellStates) = initialize_blade(bladeNum)
