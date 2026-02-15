@@ -147,8 +147,7 @@ def unsteady_subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float
     if len(Mb_candidates) >= 1:
         Mb = min(Mb_candidates)
     else:
-        Mb = 1e-5
-        # Mb = 0.1
+        Mb = 0.1
         print("WARNING: No positive inflow Mach root; using fallback Mb=0.1")
 
     # NOTE this clutters the sdout console
@@ -246,8 +245,7 @@ def subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: 
     if len(Mb_candidates) >= 1:
         Mb = min(Mb_candidates)
     else:
-        Mb = 1e-5
-        # Mb = 0.1
+        Mb = 0.1
         print("WARNING: No positive inflow Mach root; using fallback Mb=0.1")
 
     # NOTE this clutters the sdout console

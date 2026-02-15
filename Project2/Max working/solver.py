@@ -239,9 +239,11 @@ class FiniteVol():
         else:
             print("Did not save results because solve did not converge cleanly.")
 
-    def F_dudt(self, U, first_order=False):
-        resid_func = self.calc_residual if first_order else self.calc_residual_second_order
-        R, _ = resid_func(U)
+    def F_dudt(self, U, first_order=False, limited=False):
+        if first_order:
+            R, _ = self.calc_residual(U)
+        else:
+            R, _ = self.calc_residual_second_order(U, limited=limited)
         A = self.Area
         A = np.column_stack([A, A, A, A]) # for broadcasting?
         return - R / A
@@ -253,6 +255,7 @@ class FiniteVol():
         first_order=False,
         warm_start_next: bool = True,
         init_npz: str | None = None,
+        limited=False
     ):
         """
         Main time stepping loop with local time stepping 
@@ -277,7 +280,7 @@ class FiniteVol():
             if first_order:
                 R, sdl = self.calc_residual(U)
             else:
-                R, sdl = self.calc_residual_second_order(U)
+                R, sdl = self.calc_residual_second_order(U, limited=limited)
 
             # np.isfinite(x) reutrns True where x is real finite number and False for Nan, +inf, -inf. This catches numerical breakdown early.
             if (not np.all(np.isfinite(R))) or (not np.all(np.isfinite(sdl))):
@@ -292,7 +295,7 @@ class FiniteVol():
                 break
              
             Rhist.append(RnormL1)
-            if niter % 10 == 0: 
+            if niter % max(1, int(self.print_every)) == 0: 
                 _, rho_min_now, p_min_now = self._state_is_physical(U)
                 print(
                     f'niter: {niter}, RnormL1: {RnormL1:.6e}, '
@@ -304,6 +307,8 @@ class FiniteVol():
 
             # update the state via local time stepping 
             dt = self.calc_dt(sdl, usecase='steady') # this ought to be an array with time steps for each element
+            if (not first_order) and limited:
+                dt *= 0.2
             if not np.all(np.isfinite(dt)):
                 fail_reason = f"Non-finite local dt detected at iter {niter}"
                 break
@@ -312,7 +317,7 @@ class FiniteVol():
             # TODO right now this is just FE for first order. build out additional time integration SSP-RK2 and RK3 later
             # U -= dt[:, None] * (R / self.Area[:, None]) 
             # U = FiniteVol.fe(un=U, dt=dt[:, None], F=-R/self.Area[:, None])
-            U = self.ssp_rk2(un=U, dt=dt[:, None], first_order=first_order)
+            U = self.ssp_rk2(un=U, dt=dt[:, None], first_order=first_order, limited=limited)
 
 
 
@@ -358,7 +363,7 @@ class FiniteVol():
     #     unp1 = un + dt * F
     #     return unp1
 
-    def ssp_rk2(self, un: np.ndarray, dt: float, first_order=True):
+    def ssp_rk2(self, un: np.ndarray, dt: float, first_order=True, limited=False):
         """
         Inputs: 
         -------
@@ -369,11 +374,11 @@ class FiniteVol():
         F: function
             function in udot = F(u) for ODE time marching
         """
-        u1 = un + dt * self.F_dudt(un, first_order=first_order)
-        unp1 = (0.5 * un) + (0.5 * (u1 + dt * self.F_dudt(u1, first_order=first_order)))
+        u1 = un + dt * self.F_dudt(un, first_order=first_order, limited=limited)
+        unp1 = (0.5 * un) + (0.5 * (u1 + dt * self.F_dudt(u1, first_order=first_order, limited=limited)))
         return unp1
     
-    def ssp_rk3(self, un: np.ndarray, dt: float, first_order=True): 
+    def ssp_rk3(self, un: np.ndarray, dt: float, first_order=True, limited=False): 
         """
         Inputs: 
         -------
@@ -384,19 +389,19 @@ class FiniteVol():
         F: function
             function in udot = F(u) for ODE time marching
         """
-        u1 = un + (dt * self.F_dudt(un, first_order=first_order)) 
-        u2 = 0.75 * un + 0.25 * (u1 + dt * self.F_dudt(u1, first_order=first_order))
-        unp1 = (1/3)*un + (2/3)*(u2 + dt * self.F_dudt(u2, first_order=first_order))
+        u1 = un + (dt * self.F_dudt(un, first_order=first_order, limited=limited)) 
+        u2 = 0.75 * un + 0.25 * (u1 + dt * self.F_dudt(u1, first_order=first_order, limited=limited))
+        unp1 = (1/3)*un + (2/3)*(u2 + dt * self.F_dudt(u2, first_order=first_order, limited=limited))
         return unp1
 
-    def calc_residual_second_order(self, U):
+    def calc_residual_second_order(self, U, limited=False):
         """
         2nd order residual
         """
         # get the b name
         R = np.zeros([self.Ne, 4]) # residual size Ne x 4 (indexed by elements). **ZERO out residual every time step
         sdl = np.zeros(self.Ne) # size Ne x 1 (one scalar value per element )
-        gradU_i = np.zeros([self.Ne, 4, 2])
+        gradU = np.zeros([self.Ne, 4, 2])
         IE = self.IE
         In = self.In
         BE = self.BE
@@ -415,36 +420,82 @@ class FiniteVol():
             u_hat = (1/2) * (U[elemL] + U[elemR])
             n = In[i, :2]
 
-            gradU_i[elemL] += np.outer(u_hat, n) * ilen
-            gradU_i[elemR] -= np.outer(u_hat, n) * ilen
+            gradU[elemL] += np.outer(u_hat, n) * ilen
+            gradU[elemR] -= np.outer(u_hat, n) * ilen
 
-        # for i in range(self.Nb):
-        #     elemL = BE[i, 2]
-        #     blen = Bn[i, 2]
-        #     bn = Bn[i, :2] # normal vector at boundary (nx, ny)
-        #     ilenb = Bn[i, 2]
+        for i in range(self.Nb):
+            elemL = BE[i, 2]
+            blen = Bn[i, 2]
+            bn = Bn[i, :2] # normal vector at boundary (nx, ny)
+            ilenb = Bn[i, 2]
             
-        #     if bc_code[i] == 0: 
-        #         Ub = subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, gamma)
+            if bc_code[i] == 0: 
+                Ub = subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, gamma)
                  
-        #     elif bc_code[i] == 1: 
-        #         Ub = subsonic_outflow(U[elemL, :], bn, self.pout, gamma)
+            elif bc_code[i] == 1: 
+                Ub = subsonic_outflow(U[elemL, :], bn, self.pout, gamma)
                 
-        #     elif bc_code[i] == 2: 
-        #         Ub = inviscid_wall_state(U[elemL, :], bn, gamma)
+            elif bc_code[i] == 2: 
+                Ub = inviscid_wall_state(U[elemL, :], bn, gamma)
 
-        #     else:
-        #         raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
+            else:
+                raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
 
-            # # u_hat is Ub
-            # u_hat = 0.5 * (U[elemL,:] + Ub)
-            # u_hat = Ub
-            # gradU_i[elemL] += np.outer(u_hat, bn) * ilenb
+            # Use boundary-face average for Green-Gauss consistency.
+            u_hat = 0.5 * (U[elemL, :] + Ub)
+            gradU[elemL] += np.outer(u_hat, bn) * ilenb
             
 
         # divide gradient by cell areas
-        gradU_i /= self.Area[:, None, None]   # (Ne,4,2)
+        areas = self.Area[:, None, None]  # (Ne, 1, 1) -> broadcasts to (Ne, 4, 2)
+        gradU /= areas
         # gradU_i *= 0.01
+
+        gradU_orig = gradU
+
+        # BJ limiting
+        if limited:
+            # Build cell-neighbor stencil from interior-edge connectivity.
+            neighbors = [set([i]) for i in range(self.Ne)]
+            for eL, eR in IE[:, 2:4]:
+                neighbors[int(eL)].add(int(eR))
+                neighbors[int(eR)].add(int(eL))
+
+            for i, row in enumerate(self.E):
+                # stencil min/max over this element + direct neighbors
+                stencil = np.fromiter(neighbors[i], dtype=int)
+                U_stencil = U[stencil, :]                  # (Ns, 4)
+                Umin = U_stencil.min(axis=0)              # (4,)
+                Umax = U_stencil.max(axis=0)              # (4,)
+
+                # triangle node coordinates and vectors from centroid to each node
+                nodes_xy = self.V[row, :]                 # (3, 2)
+                r = (nodes_xy - self.Centroid[i]).T       # (2, 3)
+
+                # unlimited reconstructed increments at triangle vertices
+                dU_nodes = gradU[i] @ r                   # (4, 3)
+                Ui = U[i, :]                              # (4,)
+                delta_p = Umax - Ui
+                delta_m = Umin - Ui
+
+                # Barth-Jespersen limiter per conserved variable
+                phi = np.ones(4)
+                for j in range(3):
+                    dU = dU_nodes[:, j]
+                    phi_j = np.ones(4)
+
+                    pos = dU > 0.0
+                    neg = dU < 0.0
+
+                    phi_j[pos] = np.minimum(1.0, delta_p[pos] / dU[pos])
+                    phi_j[neg] = np.minimum(1.0, delta_m[neg] / dU[neg])
+
+                    phi = np.minimum(phi, phi_j)
+
+                phi = np.clip(phi, 0.0, 1.0)
+                gradU[i] *= phi[:, None]
+
+
 
 
 
@@ -461,8 +512,8 @@ class FiniteVol():
             dL = xf - xL    # (2,)
             dR = xf - xR    # (2,)
 
-            ULf = U[elemL, :] + gradU_i[elemL] @ dL   # (4,)
-            URf = U[elemR, :] + gradU_i[elemR] @ dR   # (4,)
+            ULf = U[elemL, :] + gradU[elemL] @ dL   # (4,)
+            URf = U[elemR, :] + gradU[elemR] @ dR   # (4,)
 
             
             # call flux function on all interior edges 
@@ -485,7 +536,7 @@ class FiniteVol():
 
             xf = self.BE_mp[i]
             dL = xf - self.Centroid[elemL]
-            ULf = U[elemL, :] + gradU_i[elemL] @ dL
+            ULf = U[elemL, :] + gradU[elemL] @ dL
 
             if bc_code[i] == 0:  # inflow
                 Ub = subsonic_inflow(ULf, bn, self.rho0, self.a0, self.alpha, gamma)
@@ -1095,9 +1146,10 @@ if __name__=="__main__":
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
     # solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4, CFL=0.5)
 
-    grid = "base"
+    grid = "coarse"
+    flux = "hlle"
 
-    solver = FiniteVol(meshname=f'{grid}.gri', fluxname='roe', gamma=1.4, CFL=0.2)
+    solver = FiniteVol(meshname=f'{grid}.gri', fluxname=flux, gamma=1.4, CFL=0.5)
     # print('deez')
     # # plotmesh(solver.Mesh, fname='testplot', savefig=True)
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL = 0.1)
@@ -1113,19 +1165,19 @@ if __name__=="__main__":
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
     # solver.plot_periodic_pairs(show_mesh=True)   # optional background mesh
 
-    # solver.solve_steady(runtime=True, itercap=5e2, first_order=False)
-
-    # solver.plot_residual_history(from_current_solve=True)          # log-y by default
-
+    # solver.solve_steady(runtime=True, itercap=1e4, first_order=True)
 
     # data = np.load(f'{grid}.gri_roe_results.npz')
     # solver.plot_state_tripcolor(data['U'])
 
-
-    # solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4, CFL=1.0)
+    # solver = FiniteVol(meshname=f'{grid}.gri', fluxname='hlle', gamma=1.4, CFL=0.5)
 
     # 1) First-order solve
-    # solver.solve_steady(first_order=True, itercap=500)
+    # solver.solve_steady(first_order=True, itercap=1e5)
 
     # 2) Second-order solve, initialized from first-order file
-    solver.solve_steady(first_order=False, init_npz=f'{grid}.gri_roe_results.npz')
+    solver.solve_steady(first_order=False, init_npz=f'{grid}.gri_{flux}_results.npz', limited=True)
+
+    # Plot the converged second-order solution and residual history.
+    solver.plot_residual_history(from_current_solve=True)
+    solver.plot_state_tripcolor()
