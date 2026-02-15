@@ -5,7 +5,15 @@ from dataclasses import dataclass, field
 from readgri import readgri 
 from pathlib import Path
 from viz import plotmesh
-from fluxes import *
+from fluxes import (
+    fluxHLLE,
+    fluxRoe,
+    inviscid_wall,
+    subsonic_inflow,
+    unsteady_subsonic_inflow,
+    subsonic_outflow,
+    smagb,
+)
 import time
 from typing import Optional
 from utilities import Uutil
@@ -31,11 +39,15 @@ class FiniteVol():
     a0: float = 1.0 # inlet stagnation speed of sound
     alpha: float = 50 # angle of attack, deg 
     Minf: float = 0.1 # guessed Mach number for initial condition
-    debug_checks: bool = False
-    print_every: int = 50
     # pout: float = 0.7 * p0 # outflow static pressure TODO are we supposed to specify this???
     
     def __post_init__(self):
+        # initialize time vector
+        nt = 21
+        self.ts = np.linspace(start=0, stop=1, num=nt)
+
+
+
         # calculate some initialization quantities 
         self.p0 = (self.rho0 * self.a0**2) / self.gamma      # inlet stagnation pressure 
         self.pout = 0.7 * self.p0     # outflow static pressure 
@@ -48,9 +60,6 @@ class FiniteVol():
         # read in .gri file and get associated data structures
         self.Mesh = readgri(grifile) 
         # plotmesh(meshdata, '2k', savefig=True)
-
-        # convert alpha to rad
-        self.alpha = np.deg2rad(self.alpha)
 
         self.V = self.Mesh['V']
         self.E = self.Mesh['E']
@@ -68,29 +77,21 @@ class FiniteVol():
         self.In = self.Mesh['In']
         self.Bn = self.Mesh['Bn']
 
-        # compute midpoints of edges and store in self.IE_mp and self.BE_mp
-        self.IE_mp = 0.5 * (self.V[self.IE[:, 0], :] + self.V[self.IE[:, 1], :])
-        self.BE_mp = 0.5 * (self.V[self.BE[:, 0], :] + self.V[self.BE[:, 1], :])
+        # calculate inflow-edge midpoint y values, indexed by BE row
+        self.inflow_ys = np.full(self.BE.shape[0], np.nan, dtype=float)
+        for i in range(self.BE.shape[0]):
+            bidx = int(self.BE[i, 3])
+            if self.Bname[bidx] != 'inflow':
+                continue
+            n1 = int(self.BE[i, 0])
+            n2 = int(self.BE[i, 1])
+            ymid = 0.5 * (self.V[n1, 1] + self.V[n2, 1])
+            self.inflow_ys[i] = ymid
         
         # iteration quantities 
         self.Ne = self.E.shape[0] # number of elements
         self.Ni = self.IE.shape[0] # number of interior edges/faces
         self.Nb = self.BE.shape[0] # number of boundary edges/faces 
-
-        # Precompute boundary condition code per BE row for fast branching in residual loop.
-        # 0=inflow, 1=outflow, 2=wall
-        self.bc_code = np.empty(self.Nb, dtype=np.int8)
-        for i in range(self.Nb):
-            bidx = int(self.BE[i, 3])
-            bname = self.Bname[bidx]
-            if bname == 'inflow':
-                self.bc_code[i] = 0
-            elif bname == 'outflow':
-                self.bc_code[i] = 1
-            elif bname == 'wall':
-                self.bc_code[i] = 2
-            else:
-                raise ValueError(f"Unsupported boundary name '{bname}' at BE row {i}")
     
         # set fluxfunc
         if self.fluxname.lower()=='roe':
@@ -110,22 +111,6 @@ class FiniteVol():
         # ensures correct shape of passed in initial state vector U0
         if self.U0.shape != (self.Ne, 4):
             raise ValueError(f"Provided IC has shape {self.U0.shape}, expected {(self.Ne, 4)}")
-
-    def load_state_from_npz(self, npz_path: str, key: str = 'U', set_as_initial: bool = True):
-        """
-        Load a state array from an .npz file and optionally set it as U0.
-        """
-        data = np.load(npz_path)
-        if key not in data:
-            raise KeyError(f"Key '{key}' not found in {npz_path}")
-        U_loaded = np.asarray(data[key], dtype=float)
-        if U_loaded.shape != (self.Ne, 4):
-            raise ValueError(
-                f"Loaded state shape {U_loaded.shape} does not match mesh shape {(self.Ne, 4)}"
-            )
-        if set_as_initial:
-            self.U0 = U_loaded.copy()
-        return U_loaded
         
     def testplotgri(self):
         plotmesh(Mesh=self.Mesh, fname='testmeshplot', savefig=True)
@@ -134,7 +119,7 @@ class FiniteVol():
         """
         Initializes uniform state (Uinf or U0) from inlet conditions and guessed Mach number (Minf) 
         """
-        # self.alpha *= np.pi/180
+        self.alpha *= np.pi/180
         
         rho_u = self.rho0 * self.Minf * self.a0 * np.cos(self.alpha)
         rho_v = self.rho0 * self.Minf * self.a0 * np.sin(self.alpha)
@@ -146,7 +131,6 @@ class FiniteVol():
         U0[:, 3] = rho_E
         self.U0 = U0 
         
-
     def solve_unsteady(self, runtime: str = True, itercap: int = 1e6):
         """
         Main time stepping loop with local time stepping 
@@ -156,363 +140,144 @@ class FiniteVol():
             start = time.time()
         
         U = self.U0.copy()
-        Rhist = [] 
-        niter = 0
-        converged = False
-        fail_reason = None
 
-        ts = [0]
-        
         while True:
+            sdl = self.unsteady_sdl()
 
-            # determine dt
-
-
-
-
-
-
-
-
-
-            # calculate residual
-            R, sdl = self.calc_residual(U)
-            # np.isfinite(x) reutrns True where x is real finite number and False for Nan, +inf, -inf. This catches numerical breakdown early.
-            if (not np.all(np.isfinite(R))) or (not np.all(np.isfinite(sdl))):
-                fail_reason = f"Non-finite residual or sdl detected at iter {niter}"
-                break
-
-            # RnormL1 = np.linalg.norm(R, ord=1) # monitor L1 norm of the discrete residual vector
-            RnormL1 = np.sum(np.abs(R)) # global L1 residual norm
-            if not np.isfinite(RnormL1):
-                fail_reason = f"Residual norm became non-finite at iter {niter}"
-                break
-             
-            Rhist.append(RnormL1)
-            if niter % max(1, int(self.print_every)) == 0: 
-                _, rho_min_now, p_min_now = self._state_is_physical(U)
-                print(
-                    f'niter: {niter}, RnormL1: {RnormL1:.6e}, '
-                    f'min(rho): {rho_min_now:.6e}, min(p): {p_min_now:.6e}'
-                )
-            if RnormL1 <= self.rtol:
-                converged = True
-                break
-            # update the state via local time stepping 
-            dt = self.calc_dt(sdl, usecase='steady') # this ought to be an array with time steps for each element
-            if not np.all(np.isfinite(dt)):
-                fail_reason = f"Non-finite local dt detected at iter {niter}"
-                break
-            # TODO check the broadcasting on this 
-            U -= dt[:, None] * (R / self.Area[:, None]) # TODO right now using FE for first order, build out additional time integration SSP-RK-.. later
-            ok_state, rho_min, p_min = self._state_is_physical(U)
-            if not ok_state:
-                fail_reason = (
-                    f"Non-physical state at iter {niter}: min(rho)={rho_min:.6e}, "
-                    f"min(p)={p_min:.6e}"
-                )
-                self._print_state_diagnostics(U, niter, RnormL1)
-                break
-            niter += 1 # increment counter 
+            dt = self.calc_dt(sdl, usecase='unsteady') # this ought to be an array with time steps for each element
         
-        if converged:
-            print(f"Converged in {niter} iterations with RnormL1={RnormL1:.6e}")
-        elif fail_reason is not None:
-            print(f"WARNING: Solver aborted: {fail_reason}")
-        elif niter==itercap:
-            print("WARNING: Iteration cap reached without convergence")
-            
-        # store final state, time history of state
-        self.U = U 
-        self.Rhist = Rhist 
-        
-        # save only converged runs to avoid silently writing corrupted/nonphysical states
-        if converged:
-            datafile = f"{self.meshname}_{self.fluxname}_results.npz"
-            np.savez(
-                datafile,
-                fluxfunc=self.fluxname,
-                U=self.U,
-                Rhist=self.Rhist
-            )
-            print(f"Saved results to {datafile}")
-        else:
-            print("Did not save results because solve did not converge cleanly.")
-
-    def F_dudt(self, U, first_order=False):
-        resid_func = self.calc_residual if first_order else self.calc_residual_second_order
-        R, _ = resid_func(U)
-        A = self.Area
-        A = np.column_stack([A, A, A, A]) # for broadcasting?
-        return - R / A
-
-    def solve_steady(
-        self,
-        runtime: str = True,
-        itercap: int = 1e6,
-        first_order=False,
-        warm_start_next: bool = True,
-        init_npz: str | None = None,
-    ):
-        """
-        Main time stepping loop with local time stepping 
-        """
-        # Record runtime 
-        if runtime==True:
-            start = time.time()
-        
-        if init_npz is not None:
-            self.load_state_from_npz(init_npz, key='U', set_as_initial=True)
-        U = self.U0.copy()
-        Rhist = [] 
-        niter = 0
-        converged = False
-        fail_reason = None
-        
-        # TODO one issue i see is R is a matrix [Ne x 4] not a vector...
-        # is the L1 norm gonna be right? 
-        
-        while niter < itercap:
-            # calculate residual
-            if first_order:
                 R, sdl = self.calc_residual(U)
-            else:
-                R, sdl = self.calc_residual_second_order(U)
+                # np.isfinite(x) reutrns True where x is real finite number and False for Nan, +inf, -inf. This catches numerical breakdown early.
+                if (not np.all(np.isfinite(R))) or (not np.all(np.isfinite(sdl))):
+                    fail_reason = f"Non-finite residual or sdl detected at iter {niter}"
+                    break
 
-            # np.isfinite(x) reutrns True where x is real finite number and False for Nan, +inf, -inf. This catches numerical breakdown early.
-            if (not np.all(np.isfinite(R))) or (not np.all(np.isfinite(sdl))):
-                fail_reason = f"Non-finite residual or sdl detected at iter {niter}"
-                break
-
-            # RnormL1 = np.linalg.norm(R, ord=1) # monitor L1 norm of the discrete residual vector
-            RnormL1 = np.sum(np.abs(R)) # global L1 residual norm
-
-            if not np.isfinite(RnormL1):
-                fail_reason = f"Residual norm became non-finite at iter {niter}"
-                break
-             
-            Rhist.append(RnormL1)
-            if niter % 10 == 0: 
-                _, rho_min_now, p_min_now = self._state_is_physical(U)
-                print(
-                    f'niter: {niter}, RnormL1: {RnormL1:.6e}, '
-                    f'min(rho): {rho_min_now:.6e}, min(p): {p_min_now:.6e}'
-                )
-            if RnormL1 <= self.rtol:
-                converged = True
-                break
-
-            # update the state via local time stepping 
-            dt = self.calc_dt(sdl, usecase='steady') # this ought to be an array with time steps for each element
-            if not np.all(np.isfinite(dt)):
-                fail_reason = f"Non-finite local dt detected at iter {niter}"
-                break
-            # TODO check the broadcasting on this 
-
-            # TODO right now this is just FE for first order. build out additional time integration SSP-RK2 and RK3 later
-            # U -= dt[:, None] * (R / self.Area[:, None]) 
-            # U = FiniteVol.fe(un=U, dt=dt[:, None], F=-R/self.Area[:, None])
-            U = self.ssp_rk2(un=U, dt=dt[:, None], first_order=first_order)
-
-
-
-            ok_state, rho_min, p_min = self._state_is_physical(U)
-            if not ok_state:
-                fail_reason = (
-                    f"Non-physical state at iter {niter}: min(rho)={rho_min:.6e}, "
-                    f"min(p)={p_min:.6e}"
-                )
-                self._print_state_diagnostics(U, niter, RnormL1)
-                break
-            niter += 1 # increment counter 
-        
-        if converged:
-            print(f"Converged in {niter} iterations with RnormL1={RnormL1:.6e}")
-        elif fail_reason is not None:
-            print(f"WARNING: Solver aborted: {fail_reason}")
-        elif niter==itercap:
-            print("WARNING: Iteration cap reached without convergence")
-            
-        # store final state, time history of state
-        self.U = U 
-        self.Rhist = Rhist 
-        if warm_start_next:
-            self.U0 = U.copy()
-        
-        # save only converged runs to avoid silently writing corrupted/nonphysical states
-        if converged:
-            datafile = f"{self.meshname}_{self.fluxname}_results.npz"
-            np.savez(
-                datafile,
-                fluxfunc=self.fluxname,
-                U=self.U,
-                Rhist=self.Rhist
-            )
-            print(f"Saved results to {datafile}")
-        else:
-            print("Did not save results because solve did not converge cleanly.")
-
-    # NOTE THESE STATIC METHODS ARE JUST FOR STEADY TIME STEPPING ONLY BECAUSE OF THE INPUT SHAPES THEY ASSUME CHANGE THIS SHIT LATER FOR UNSTEADY
-    # @staticmethod
-    # def fe(un: np.ndarray, dt: np.ndarray, F: np.ndarray):
-    #     unp1 = un + dt * F
-    #     return unp1
-
-    def ssp_rk2(self, un: np.ndarray, dt: float, first_order=True):
-        """
-        Inputs: 
-        -------
-        un: np.ndarray
-            state at current time n 
-        dt: float
-            time step size 
-        F: function
-            function in udot = F(u) for ODE time marching
-        """
-        u1 = un + dt * self.F_dudt(un, first_order=first_order)
-        unp1 = (0.5 * un) + (0.5 * (u1 + dt * self.F_dudt(u1, first_order=first_order)))
-        return unp1
-    
-    def ssp_rk3(self, un: np.ndarray, dt: float, first_order=True): 
-        """
-        Inputs: 
-        -------
-        un: np.ndarray
-            state at current time n 
-        dt: float
-            time step size 
-        F: function
-            function in udot = F(u) for ODE time marching
-        """
-        u1 = un + (dt * self.F_dudt(un, first_order=first_order)) 
-        u2 = 0.75 * un + 0.25 * (u1 + dt * self.F_dudt(u1, first_order=first_order))
-        unp1 = (1/3)*un + (2/3)*(u2 + dt * self.F_dudt(u2, first_order=first_order))
-        return unp1
-
-    def calc_residual_second_order(self, U):
-        """
-        2nd order residual
-        """
-        # get the b name
-        R = np.zeros([self.Ne, 4]) # residual size Ne x 4 (indexed by elements). **ZERO out residual every time step
-        sdl = np.zeros(self.Ne) # size Ne x 1 (one scalar value per element )
-        gradU_i = np.zeros([self.Ne, 4, 2])
-        IE = self.IE
-        In = self.In
-        BE = self.BE
-        Bn = self.Bn
-        flux = self.flux
-        gamma = self.gamma
-        bc_code = self.bc_code
-        # interior edge flux contributions
-
-        # gererate gradient by looping over interior edges and boundary edges
-        for i in range(self.Ni):
-            elemL = IE[i, 2]
-            elemR = IE[i, 3]
-            ilen = In[i, 2]
-
-            u_hat = (1/2) * (U[elemL] + U[elemR])
-            n = In[i, :2]
-
-            gradU_i[elemL] += np.outer(u_hat, n) * ilen
-            gradU_i[elemR] -= np.outer(u_hat, n) * ilen
-
-        # for i in range(self.Nb):
-        #     elemL = BE[i, 2]
-        #     blen = Bn[i, 2]
-        #     bn = Bn[i, :2] # normal vector at boundary (nx, ny)
-        #     ilenb = Bn[i, 2]
-            
-        #     if bc_code[i] == 0: 
-        #         Ub = subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, gamma)
-                 
-        #     elif bc_code[i] == 1: 
-        #         Ub = subsonic_outflow(U[elemL, :], bn, self.pout, gamma)
+                # RnormL1 = np.linalg.norm(R, ord=1) # monitor L1 norm of the discrete residual vector
+                RnormL1 = np.sum(np.abs(R)) # global L1 residual norm
+                if not np.isfinite(RnormL1):
+                    fail_reason = f"Residual norm became non-finite at iter {niter}"
+                    break
                 
-        #     elif bc_code[i] == 2: 
-        #         Ub = inviscid_wall_state(U[elemL, :], bn, gamma)
-
-        #     else:
-        #         raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
-
-            # # u_hat is Ub
-            # u_hat = 0.5 * (U[elemL,:] + Ub)
-            # u_hat = Ub
-            # gradU_i[elemL] += np.outer(u_hat, bn) * ilenb
+                Rhist.append(RnormL1)
+                if niter % 10 == 0: 
+                    _, rho_min_now, p_min_now = self._state_is_physical(U)
+                    print(
+                        f'niter: {niter}, RnormL1: {RnormL1:.6e}, '
+                        f'min(rho): {rho_min_now:.6e}, min(p): {p_min_now:.6e}'
+                    )
+                if RnormL1 <= self.rtol:
+                    converged = True
+                    break
+                # update the state via local time stepping 
+                dt = self.calc_dt(sdl, usecase='steady') # this ought to be an array with time steps for each element
+                if not np.all(np.isfinite(dt)):
+                    fail_reason = f"Non-finite local dt detected at iter {niter}"
+                    break
+                # TODO check the broadcasting on this 
+                U -= dt[:, None] * (R / self.Area[:, None]) # TODO right now using FE for first order, build out additional time integration SSP-RK-.. later
+                ok_state, rho_min, p_min = self._state_is_physical(U)
+                if not ok_state:
+                    fail_reason = (
+                        f"Non-physical state at iter {niter}: min(rho)={rho_min:.6e}, "
+                        f"min(p)={p_min:.6e}"
+                    )
+                    self._print_state_diagnostics(U, niter, RnormL1)
+                    break
+                niter += 1 # increment counter 
             
-
-        # divide gradient by cell areas
-        gradU_i /= self.Area[:, None, None]   # (Ne,4,2)
-        # gradU_i *= 0.01
-
-
-
-        # loop over interior edges (NOTE including periodic? might be some weirdness...)
-        for i in range(self.Ni):
-            elemL = IE[i, 2]
-            elemR = IE[i, 3]
-            ilen = In[i, 2]
-
-            xL = self.Centroid[elemL]
-            xR = self.Centroid[elemR]
-
-            xf = self.IE_mp[i]
-            dL = xf - xL    # (2,)
-            dR = xf - xR    # (2,)
-
-            ULf = U[elemL, :] + gradU_i[elemL] @ dL   # (4,)
-            URf = U[elemR, :] + gradU_i[elemR] @ dR   # (4,)
-
+            if converged:
+                print(f"Converged in {niter} iterations with RnormL1={RnormL1:.6e}")
+            elif fail_reason is not None:
+                print(f"WARNING: Solver aborted: {fail_reason}")
+            elif niter==itercap:
+                print("WARNING: Iteration cap reached without convergence")
+                
+            # store final state, time history of state
+            self.U = U 
+            self.Rhist = Rhist 
             
-            # call flux function on all interior edges 
-            F, smag_i = flux(ULf, URf, In[i, :2], gamma)
-            if self.debug_checks:
-                F = np.asarray(F, dtype=float)
-                if F.shape != (4,):
-                    raise ValueError(f"Interior flux returned shape {F.shape}, expected (4,)")
-            R[elemL, :] += F * ilen # sums F dot n * dl for all three interior edges on element
-            R[elemR, :] -= F * ilen
-            
-            sdl[elemL] += smag_i * ilen
-            sdl[elemR] += smag_i * ilen
-
-        # loop over boundary edges 
-        for i in range(self.Nb):
-            elemL = BE[i, 2]
-            blen = Bn[i, 2]
-            bn = Bn[i, :2] # normal vector at boundary (nx, ny)
-
-            xf = self.BE_mp[i]
-            dL = xf - self.Centroid[elemL]
-            ULf = U[elemL, :] + gradU_i[elemL] @ dL
-
-            if bc_code[i] == 0:  # inflow
-                Ub = subsonic_inflow(ULf, bn, self.rho0, self.a0, self.alpha, gamma)
-                F, _ = flux(ULf, Ub, bn, gamma)
-                smag_b = smagb(Ub, bn, gamma)
-
-            elif bc_code[i] == 1:  # outflow
-                Ub = subsonic_outflow(ULf, bn, self.pout, gamma)
-                F, _ = flux(ULf, Ub, bn, gamma)
-                smag_b = smagb(Ub, bn, gamma)
-
-            elif bc_code[i] == 2:  # wall
-                F, smag_b = inviscid_wall(ULf, bn, gamma)
-
+            # save only converged runs to avoid silently writing corrupted/nonphysical states
+            if converged:
+                datafile = f"{self.meshname}_{self.fluxname}_results.npz"
+                np.savez(
+                    datafile,
+                    fluxfunc=self.fluxname,
+                    U=self.U,
+                    Rhist=self.Rhist
+                )
+                print(f"Saved results to {datafile}")
             else:
-                raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
-            if self.debug_checks:
-                F = np.asarray(F, dtype=float)
-                if F.shape != (4,):
-                    raise ValueError(f"Boundary flux returned shape {F.shape}, expected (4,)")
-            R[elemL, :] += F * blen # sums F dot n * dl for all three interior edges on element
-            sdl[elemL] += smag_b * blen
+                print("Did not save results because solve did not converge cleanly.")
 
-        return R, sdl
+        print(f"time: {t}")
+
+    def F(self, U, t):
+        # returns flux for entire state F: (n_elems x 4)
+
+        F = np.zeros_like(U)
+
+        # interior edges
+        for i, row in enumerate(self.IE):
+            elemL = row[2]
+            elemR = row[2]
+            l_edge = self.In[i, 2]
+            
+            # call flux function on all interior edes 
+            F_edge, smag_i = self.flux(U[elemL, :], U[elemR, :], self.In[i, :2], self.gamma)
+            F_edge = np.asarray(F, dtype=float)
+            if F.shape != (4,):
+                raise ValueError(f"Interior flux returned shape {F.shape}, expected (4,)")
+
+            F[elemL] += F_edge * l_edge
+            F[elemR] -= F_edge * l_edge
+
+        # inflow
+        for i, row in enumerate(self.BE):
+            elemL = row[2]
+        for i in range(self.Nb):
+            elemL = self.BE[i, 2]
+            bidx = self.BE[i, 3]
+            blen = self.Bn[i, 2]
+            Bname = self.Bname # get the Bname to index by boundary 
+            bn = self.Bn[i, :2] # normal vector at boundary (nx, ny)
+
+            y = self.inflow_ys[i]
+
+        if Bname[bidx]=='inflow': 
+            Ub = unsteady_subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, self.gamma, y, t)
+            F, _ = self.flux(U[elemL, :], Ub, bn, self.gamma) # NOTE if returned a wave speed from flux function, it would come from uL and uL not from boundary state by using velocity vector at boundary.
+            smag_b = smagb(Ub, bn, self.gamma) # NOTE set the wavespeed using boundary state-based smax 
+                
+        elif Bname[bidx]=='outflow': 
+            Ub = subsonic_outflow(U[elemL, :], bn, self.pout, self.gamma)
+            F, _ = self.flux(U[elemL, :], Ub, bn, self.gamma)
+            smag_b = smagb(Ub, bn, self.gamma)
+            
+        elif Bname[bidx]=='wall': 
+            F, smag_b = inviscid_wall(U[elemL, :], bn, self.gamma)
+        else:
+            raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
+        F = np.asarray(F, dtype=float)
+        if F.shape != (4,):
+            raise ValueError(f"Boundary flux returned shape {F.shape}, expected (4,)")
+        R[elemL, :] += F * blen # sums F dot n * dl for all three interior edges on element
+        sdl[elemL] += smag_b * blen
 
 
-    def calc_residual(self, U):
+
+
+
+
+
+        return F
+
+
+
+
+
+        
+
+    def calc_residual(self, U, t: float):
         """
         Calculates residual using the selected flux function
         Loops over internal edges (IE) and boundary edges (BE), calculates fluxes and increments residuals on respective L and R elements
@@ -521,27 +286,19 @@ class FiniteVol():
         # get the b name
         R = np.zeros([self.Ne, 4]) # residual size Ne x 4 (indexed by elements). **ZERO out residual every time step
         sdl = np.zeros(self.Ne) # size Ne x 1 (one scalar value per element )
-        IE = self.IE
-        In = self.In
-        BE = self.BE
-        Bn = self.Bn
-        flux = self.flux
-        gamma = self.gamma
-        bc_code = self.bc_code
         # interior edge flux contributions
         
         # loop over interior edges (NOTE including periodic? might be some weirdness...)
         for i in range(self.Ni):
-            elemL = IE[i, 2]
-            elemR = IE[i, 3]
-            ilen = In[i, 2]
+            elemL = self.IE[i, 2]
+            elemR = self.IE[i, 3]
+            ilen = self.In[i, 2]
             
-            # call flux function on all interior edges 
-            F, smag_i = flux(U[elemL, :], U[elemR, :], In[i, :2], gamma)
-            if self.debug_checks:
-                F = np.asarray(F, dtype=float)
-                if F.shape != (4,):
-                    raise ValueError(f"Interior flux returned shape {F.shape}, expected (4,)")
+            # call flux function on all interior edes 
+            F, smag_i = self.flux(U[elemL, :], U[elemR, :], self.In[i, :2], self.gamma)
+            F = np.asarray(F, dtype=float)
+            if F.shape != (4,):
+                raise ValueError(f"Interior flux returned shape {F.shape}, expected (4,)")
             R[elemL, :] += F * ilen # sums F dot n * dl for all three interior edges on element
             R[elemR, :] -= F * ilen
             
@@ -550,29 +307,32 @@ class FiniteVol():
 
         # loop over boundary edges 
         for i in range(self.Nb):
-            elemL = BE[i, 2]
-            blen = Bn[i, 2]
-            bn = Bn[i, :2] # normal vector at boundary (nx, ny)
+            elemL = self.BE[i, 2]
+            bidx = self.BE[i, 3]
+            blen = self.Bn[i, 2]
+            Bname = self.Bname # get the Bname to index by boundary 
+            bn = self.Bn[i, :2] # normal vector at boundary (nx, ny)
+
+            y = self.inflow_ys[i]
             
             # TODO come up with a way to return wave speed FOR ALL THREE!!! SEE PIAZZA
-            if bc_code[i] == 0: 
-                Ub = subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, gamma)
-                F, _ = flux(U[elemL, :], Ub, bn, gamma) # NOTE if returned a wave speed from flux function, it would come from uL and uL not from boundary state by using velocity vector at boundary.
-                smag_b = smagb(Ub, bn, gamma) # NOTE set the wavespeed using boundary state-based smax 
+            if Bname[bidx]=='inflow': 
+                Ub = unsteady_subsonic_inflow(U[elemL, :], bn, self.rho0, self.a0, self.alpha, self.gamma, y, t)
+                F, _ = self.flux(U[elemL, :], Ub, bn, self.gamma) # NOTE if returned a wave speed from flux function, it would come from uL and uL not from boundary state by using velocity vector at boundary.
+                smag_b = smagb(Ub, bn, self.gamma) # NOTE set the wavespeed using boundary state-based smax 
                  
-            elif bc_code[i] == 1: 
-                Ub = subsonic_outflow(U[elemL, :], bn, self.pout, gamma)
-                F, _ = flux(U[elemL, :], Ub, bn, gamma)
-                smag_b = smagb(Ub, bn, gamma)
+            elif Bname[bidx]=='outflow': 
+                Ub = subsonic_outflow(U[elemL, :], bn, self.pout, self.gamma)
+                F, _ = self.flux(U[elemL, :], Ub, bn, self.gamma)
+                smag_b = smagb(Ub, bn, self.gamma)
                 
-            elif bc_code[i] == 2: 
-                F, smag_b = inviscid_wall(U[elemL, :], bn, gamma)
+            elif Bname[bidx]=='wall': 
+                F, smag_b = inviscid_wall(U[elemL, :], bn, self.gamma)
             else:
                 raise ValueError(f"Not reading in boundary name correctly...unsupported boundary condition??")
-            if self.debug_checks:
-                F = np.asarray(F, dtype=float)
-                if F.shape != (4,):
-                    raise ValueError(f"Boundary flux returned shape {F.shape}, expected (4,)")
+            F = np.asarray(F, dtype=float)
+            if F.shape != (4,):
+                raise ValueError(f"Boundary flux returned shape {F.shape}, expected (4,)")
             R[elemL, :] += F * blen # sums F dot n * dl for all three interior edges on element
             sdl[elemL] += smag_b * blen
 
@@ -893,7 +653,6 @@ class FiniteVol():
         cbar.set_label(f'F_{component}')
         fig.tight_layout()
         plt.show()
-
     def plot_residual_field(self, U: np.ndarray, component: str = 'l1', log10: bool = True, cmap: str = 'viridis', figsize=(10, 4)):
         """
         Plot element-wise residual magnitude on the mesh.
@@ -970,46 +729,10 @@ class FiniteVol():
         fig.suptitle('State Variables Tripcolor')
         plt.show()
 
-    def plot_residual_history(
-        self,
-        logy: bool = True,
-        figsize=(7, 4),
-        npz_path: str | None = None,
-        from_current_solve: bool = True,
-    ):
-        """
-        Plot residual norm history versus iteration index.
-        If from_current_solve=True, use self.Rhist from the current run.
-        Otherwise, read Rhist from an .npz file.
-        """
-        y = None
+    def ts_FE(self, U, dt):
+        pass
 
-        if from_current_solve:
-            if not hasattr(self, 'Rhist') or len(self.Rhist) == 0:
-                raise ValueError("No in-memory residual history found. Run solve_steady first or set from_current_solve=False.")
-            y = np.asarray(self.Rhist, dtype=float)
-        else:
-            datafile = npz_path if npz_path is not None else f"{self.meshname}_{self.fluxname}_results.npz"
-            data = np.load(datafile)
-            if 'Rhist' not in data:
-                raise KeyError(f"'Rhist' not found in {datafile}")
-            y = np.asarray(data['Rhist'], dtype=float)
 
-        if y.size == 0:
-            raise ValueError("Residual history is empty.")
-
-        x = np.arange(len(y), dtype=int)
-
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.plot(x, y, color='tab:blue', linewidth=1.5)
-        if logy:
-            ax.set_yscale('log')
-        ax.set_xlabel('Iteration')
-        ax.set_ylabel('Residual L1 Norm')
-        ax.set_title('Residual History')
-        ax.grid(True, alpha=0.25)
-        fig.tight_layout()
-        plt.show()
 
     
     def time_march_scheme(self):
@@ -1095,9 +818,7 @@ if __name__=="__main__":
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
     # solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4, CFL=0.5)
 
-    grid = "base"
-
-    solver = FiniteVol(meshname=f'{grid}.gri', fluxname='roe', gamma=1.4, CFL=0.2)
+    solver = FiniteVol(meshname='base.gri', fluxname='roe', gamma=1.4, CFL=1)
     # print('deez')
     # # plotmesh(solver.Mesh, fname='testplot', savefig=True)
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL = 0.1)
@@ -1111,21 +832,10 @@ if __name__=="__main__":
     # solver.plot_boundary_edge_indices(stride=5, fontsize=6)
 
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
-    # solver.plot_periodic_pairs(show_mesh=True)   # optional background mesh
+    solver.plot_periodic_pairs(show_mesh=True)   # optional background mesh
 
-    # solver.solve_steady(runtime=True, itercap=5e2, first_order=False)
-
-    # solver.plot_residual_history(from_current_solve=True)          # log-y by default
+    solver.solve_unsteady(runtime=True, itercap=1e5)
 
 
-    # data = np.load(f'{grid}.gri_roe_results.npz')
-    # solver.plot_state_tripcolor(data['U'])
-
-
-    # solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4, CFL=1.0)
-
-    # 1) First-order solve
-    # solver.solve_steady(first_order=True, itercap=500)
-
-    # 2) Second-order solve, initialized from first-order file
-    solver.solve_steady(first_order=False, init_npz=f'{grid}.gri_roe_results.npz')
+    data = np.load('base.gri_roe_results.npz')
+    solver.plot_state_tripcolor(data['U'])

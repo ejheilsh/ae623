@@ -361,7 +361,7 @@ def main():
     dir_base = Path(__file__).resolve().parent
     grifile = dir_base.joinpath(meshstr)
     Mesh = readgri(grifile)
-    print('deez') 
+    print(Mesh) 
     
 
 if __name__ == "__main__":

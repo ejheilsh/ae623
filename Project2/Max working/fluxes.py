@@ -9,6 +9,28 @@ Implemented boundary conditions through fluxes on boundary faces:
 inviscid wall, subsonic inflow, subsonic outflow 
 """
 
+def inviscid_wall_state(Uplus: np.ndarray, n: np.ndarray, gamma: float):
+    """
+    """    
+    Uplus = Uutil(Uplus, gamma)
+    vvecint = Uplus.vvec
+    rhoint = Uplus.rho
+    rhoEint = Uplus.rhoE
+    Eint = Uplus.E
+
+    vvecb = vvecint - (vvecint @ n) * n # boundary velocity is tangential; interior velocity with wall-normal component removed 
+
+    Ub = rhoint * np.array([
+        1,
+        vvecb[0],
+        vvecb[1],
+        Eint,
+    ])
+    
+
+    return Ub
+
+
 def inviscid_wall(Uplus: np.ndarray, n: np.ndarray, gamma: float):
     """
     Inviscid wall boundary condition (Fidkowski, pg. 61)
@@ -47,9 +69,121 @@ def inviscid_wall(Uplus: np.ndarray, n: np.ndarray, gamma: float):
     
     smax = np.abs(u) + cb 
 
-    return Fb, smax 
+    return Fb, smax
 
+def unsteady_subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: float, gamma: float, y: float, t: float):
+    """
+    Subsonic inflow boundary condition. Boundary flux Fb is determined by constructing boundary state ub from the interior state uplus. 
+    (Fidkowski, pg 62)
+    Inputs:
+    -------
+    Uplus: np.ndarray
+       NInterior state vector
+    n: float
+       NNormal vector pointing out of domain (interior --> outer)
+    rhot: float
+       NTotal density, same as inlet stagnation density (rho0)
+    ct: float
+       NSpeed of sound, same as inlet stagnation speed of sound (a0)
+    alpha: float
+       NInlet angle of attack
+    gamma: float
+       NRatio of specific heats
+    """
+    a_0_inflow = 1
+    v_rot = a_0_inflow
+    f_wake = 0.1
+    delta = 0.1
+    delta_y = 18
+    y_rot = y + delta_y / 2 # so that the central y val is 0
+    y_stator = y_rot + v_rot * t
+    eta = (y_stator / delta_y) - np.floor(y_stator / delta_y) - (1/2)
+    rhot = rhot * (1 - f_wake * np.exp((-1 * eta**2) / (2 * delta**2)))
+
+
+
+
+
+    pt = ct**2 * rhot / gamma
+
+    # deconstruct interior state TODO offload this to helper function later
+    Uplus = Uutil(Uplus, gamma)
+    vvecplus = Uplus.vvec
+    cplus = Uplus.c
+
+    unplus = vvecplus @ n   # wall-normal velocity component from the interior (Fidkowski, pg 62)
+    Jplus = unplus + (2 * cplus)/(gamma - 1)    # Riemann invariant (Fidkowski, pg 62)
+
+    nin = np.array([np.cos(alpha), np.sin(alpha)]) # specified inflow direction
+    dn = nin @ n
+    
+    # inflow Mach number Mb is calculated from Jplus and specified parameters by solving a quadratic of form A*M^2 + B*M + C = 0
+    A = ((gamma * pt * dn**2) / rhot) - ((gamma - 1) / 2) * Jplus**2
+    B = ((4 * gamma * pt * dn) / (rhot * (gamma - 1)))
+    C = ((4 * gamma * pt) / (rhot * (gamma - 1)**2)) - Jplus**2 
+    
+    discr = B**2 - 4 * A * C
+    tol = 1e-12
+    roots = []
+
+    # Degenerate case A ~= 0: solve the linearized equation B*M + C = 0
+    if np.abs(A) < tol:
+        if np.abs(B) >= tol:
+            roots = [-C / B]
+    else:
+        # Guard tiny negative discriminants from roundoff
+        if discr < -tol:
+            discr = 0.0
+        else:
+            discr = max(discr, 0.0)
+        sqrt_discr = np.sqrt(discr)
+        roots = [
+            (-B + sqrt_discr) / (2 * A),
+            (-B - sqrt_discr) / (2 * A),
+        ]
+
+    # Simpler root filter: accept physically forward roots (M > 0)
+    Mb_candidates = [M for M in roots if np.isfinite(M) and (M > 0.0)]
+    if len(Mb_candidates) >= 1:
+        Mb = min(Mb_candidates)
+    else:
+        Mb = 1e-5
+        # Mb = 0.1
+        print("WARNING: No positive inflow Mach root; using fallback Mb=0.1")
+
+    # NOTE this clutters the sdout console
+    # if Mb > 1.0:
+    #     print(f"WARNING: Inflow Mb > 1 detected (Mb={Mb:.6e})")
+    
+    # using Mb and stagnation quantities, construct exterior state (ub) quantities
+    Tr = 1 / (1 + 0.5 * (gamma - 1) * Mb**2)  # temperature ratio = exterior static temperature / total temperature (Tb / Tt) # NOTE THIS IS A LITTLE JANK WITH THE DIVISION
+    pb = pt * Tr**(gamma / (gamma - 1)) # exterior static pressure
+    RTb = Tr * pt / rhot    
+    rhob = pb / RTb                     # exterior static density
+    cb = np.sqrt((gamma * pb) / rhob)   # exterior speed of sound
+    vvecb = Mb * cb * nin               # exterior velocity
+    qsqb = vvecb[0]**2 + vvecb[1]**2
+    rhoEb = (pb / (gamma - 1)) + 0.5 * rhob * qsqb  # exterior total energy
+    
+    # exterior boundary state
+    Ub = np.array([
+        rhob, 
+        rhob * vvecb[0],
+        rhob * vvecb[1], 
+        rhoEb 
+    ])
+    
+    return Ub
+    # NOTE BELOW WAS WRONG!!!!
+    # Fhatb, *_ = F_from_U(Ub, n, gamma)
+    
+    # # compute maximum wave speed 
+    # u = vvecb @ n # incorporate the boundary state by using velocity vector at boundary (exterior velocity) dotted with the normal
+    # smax = np.abs(u) + cb
+    # return Fhatb, smax
 # NOTE MAKE SURE ALPHA IS PASSED IN IN RADIANS!!!!
+
+
 def subsonic_inflow(Uplus: np.ndarray, n: float, rhot: float, ct: float, alpha: float, gamma: float):
     """
     Subsonic inflow boundary condition. Boundary flux Fb is determined by constructing boundary state ub from the interior state uplus. 
