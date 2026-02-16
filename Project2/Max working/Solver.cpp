@@ -94,10 +94,17 @@ void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
       Rnorm +=
           std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
     }
+    res_history.push_back(Rnorm);
 
-    if (niter % 10 == 0) {
+    if (niter % 10 == 0 || Rnorm < rtol) {
       double minRho = 1e10, minP = 1e10;
-      for (const auto &u : U) {
+      cell_residuals.resize(Ne);
+      for (int i = 0; i < Ne; ++i) {
+        const auto &u = U[i];
+        const auto &r = res.R[i];
+        cell_residuals[i] =
+            std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+
         State s(u, gamma);
         minRho = std::min(minRho, s.rho());
         minP = std::min(minP, s.p());
@@ -132,7 +139,8 @@ std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
   std::vector<Vec4> U1(Ne);
   double cfl_eff = CFL;
   if (secondOrder && limited)
-    cfl_eff *= 0.2;
+    // cfl_eff *= 0.2;
+    cfl_eff *= 1;
 
   for (int i = 0; i < Ne; ++i) {
     double sdl = std::max(res1.sdl[i], 1e-12);

@@ -51,6 +51,21 @@ int main(int argc, char **argv) {
     out.close();
     std::cout << "Results saved to results.bin" << std::endl;
 
+    std::ofstream res_out("residual.bin", std::ios::binary);
+    int Nit = solver.res_history.size();
+    res_out.write((char *)&Nit, sizeof(int));
+    res_out.write((char *)solver.res_history.data(), sizeof(double) * Nit);
+    res_out.close();
+    std::cout << "Residual history saved to residual.bin" << std::endl;
+
+    std::ofstream cell_res_out("cell_res.bin", std::ios::binary);
+    int Ne_res = solver.cell_residuals.size();
+    cell_res_out.write((char *)&Ne_res, sizeof(int));
+    cell_res_out.write((char *)solver.cell_residuals.data(),
+                       sizeof(double) * Ne_res);
+    cell_res_out.close();
+    std::cout << "Spatial residuals saved to cell_res.bin" << std::endl;
+
   } catch (const std::exception &e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;

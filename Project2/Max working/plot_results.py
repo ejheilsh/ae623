@@ -15,10 +15,7 @@ def read_mesh(filename):
         nn, ne, dim = map(int, f.readline().split())
         v = np.array([[float(s) for s in f.readline().split()] for _ in range(nn)])
         f.readline() # NB
-        # Skip boundaries for this simple plotter
-        # We just need vertices and elements
-        # This is a simplified parser
-        return v, None # Placeholder for elements
+        return v, None
 
 def get_elements_from_gri(filename):
     with open(filename, 'r') as f:
@@ -41,10 +38,30 @@ def get_elements_from_gri(filename):
             ne_total += nei
         return np.array(elements)
 
-def plot_results(meshfile, resultsfile):
+def read_residual(filename):
+    try:
+        with open(filename, 'rb') as f:
+            nit = struct.unpack('i', f.read(4))[0]
+            data = struct.unpack('d' * nit, f.read(8 * nit))
+            return np.array(data)
+    except FileNotFoundError:
+        return None
+
+def read_cell_residual(filename):
+    try:
+        with open(filename, 'rb') as f:
+            ne = struct.unpack('i', f.read(4))[0]
+            data = struct.unpack('d' * ne, f.read(8 * ne))
+            return np.array(data)
+    except FileNotFoundError:
+        return None
+
+def plot_results(meshfile, resultsfile, residualfile, cellresfile):
     u = read_results(resultsfile)
     v, _ = read_mesh(meshfile)
     e = get_elements_from_gri(meshfile)
+    res_hist = read_residual(residualfile)
+    cell_res = read_cell_residual(cellresfile)
     
     # Calculate Primitive variables
     gamma = 1.4
@@ -62,20 +79,56 @@ def plot_results(meshfile, resultsfile):
     # Create triangles for plotting
     verts = v[e]
     
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(22, 6))
+    
+    # Plot Mach Number
     pc = PolyCollection(verts, cmap='jet')
     pc.set_array(mach)
-    ax.add_collection(pc)
-    ax.autoscale()
-    ax.set_aspect('equal')
-    plt.colorbar(pc, label='Mach Number')
-    plt.title(f'Mach Number Distribution - {meshfile}')
-    plt.savefig('mach_distribution.png')
-    print("Saved mach_distribution.png")
+    ax1.add_collection(pc)
+    ax1.autoscale()
+    ax1.set_aspect('equal')
+    fig.colorbar(pc, ax=ax1, label='Mach Number')
+    ax1.set_title(f'Mach Number Distribution')
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+    
+    # Plot Spatial Residuals
+    if cell_res is not None:
+        pc2 = PolyCollection(verts, cmap='magma')
+        # Log scale for better visibility of residual distribution
+        pc2.set_array(np.log10(np.maximum(cell_res, 1e-16)))
+        ax2.add_collection(pc2)
+        ax2.autoscale()
+        ax2.set_aspect('equal')
+        fig.colorbar(pc2, ax=ax2, label='Log10(Residual Norm)')
+        ax2.set_title(f'Spatial Residual Distribution')
+        ax2.set_xlabel('X')
+        ax2.set_ylabel('Y')
+    else:
+        ax2.text(0.5, 0.5, 'Cell residuals not found', ha='center', va='center')
+
+    # Plot Residual History
+    if res_hist is not None:
+        ax3.plot(res_hist)
+        ax3.set_yscale('log')
+        ax3.set_title('Convergence History')
+        ax3.set_xlabel('Iteration')
+        ax3.set_ylabel('Residual')
+        ax3.grid(True, which="both", ls="-", alpha=0.5)
+    else:
+        ax3.text(0.5, 0.5, 'Residual history not found', ha='center', va='center')
+    
+    plt.tight_layout()
+    plt.savefig('solution_summary.png')
+    print("Saved solution_summary.png")
     plt.show()
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python plot_results.py <meshfile> <results.bin>")
+        print("Usage: python plot_results.py <meshfile> <results.bin> [residual.bin] [cell_res.bin]")
     else:
-        plot_results(sys.argv[1], sys.argv[2])
+        mesh = sys.argv[1]
+        results = sys.argv[2]
+        residual = sys.argv[3] if len(sys.argv) > 3 else "residual.bin"
+        cellres = sys.argv[4] if len(sys.argv) > 4 else "cell_res.bin"
+        plot_results(mesh, results, residual, cellres)

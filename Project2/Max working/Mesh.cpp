@@ -5,8 +5,8 @@
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <sstream>
 #include <set>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -74,9 +74,18 @@ bool Mesh::readGRI(const std::string &filename) {
     if (Braw[i].empty())
       continue;
     bool is_elem_face = (Braw[i][0].size() == 2 && Bnnode[i] == 2);
-    // We assume and check if it's the elem-face format based on coordinates or
-    // max values if needed For simplicity, we follow the logic in readgri.py
-    if (is_elem_face && Braw[i][0][1] <= 3) {
+    if (is_elem_face) {
+      // Robust check: if any second value > 3, it's node-pair format.
+      // Or if any first value > Ne, it's node-pair format.
+      for (const auto &row : Braw[i]) {
+        if (row[1] > 3 || row[0] > (int)E.size()) {
+          is_elem_face = false;
+          break;
+        }
+      }
+    }
+
+    if (is_elem_face) {
       for (const auto &bi : Braw[i]) {
         int elem_idx = bi[0] - 1;
         int face_idx = bi[1] - 1;
@@ -360,13 +369,17 @@ void Mesh::computeGeometry() {
     // Ensure normal points from elemL to elemR
     Vec2 dLR = centroids[IE[i].elemR] - centroids[IE[i].elemL];
     // Periodic shift correction for dLR
+    bool isPeriodic = false;
     if (std::abs(dLR.y) > 9.0) { // Standard shift for expected meshes
+      isPeriodic = true;
       if (dLR.y > 0)
         dLR.y -= 18.0;
       else
         dLR.y += 18.0;
     }
-    if (inormals[i].dot(dLR) < 0) {
+
+    double dot = inormals[i].dot(dLR);
+    if (dot < 0) {
       inormals[i] = inormals[i] * -1.0;
     }
   }

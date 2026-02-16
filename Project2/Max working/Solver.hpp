@@ -11,6 +11,8 @@ public:
   Mesh mesh;
   std::vector<Vec4> U;
   std::vector<Vec4> U0;
+  std::vector<double> res_history;
+  std::vector<double> cell_residuals;
   std::string fluxname = "roe";
 
   double gamma = 1.4;
