@@ -21,7 +21,7 @@ FluxResult fluxRoe(const Vec4 &UL, const Vec4 &UR, const Vec2 &n,
 
   double eigs[4] = {u_roe + c_roe, u_roe - c_roe, u_roe, u_roe};
   double mag_eigs[4];
-  double eps = 0.5 * c_roe; // Increased for better stability during transients
+  double eps = 0.1 * c_roe; // Matches Python and PDF spec
   for (int i = 0; i < 4; ++i) {
     mag_eigs[i] = std::abs(eigs[i]);
     if (mag_eigs[i] < eps) {

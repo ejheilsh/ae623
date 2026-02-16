@@ -14,6 +14,7 @@ int main(int argc, char **argv) {
   bool secondOrder = false;
   double cfl = 1.0;
   std::string fluxname = "roe";
+  int itercap = 1e6;
 
   if (argc >= 3) {
     secondOrder = (std::string(argv[2]) == "2");
@@ -24,6 +25,9 @@ int main(int argc, char **argv) {
   if (argc >= 5) {
     fluxname = argv[4];
   }
+  if (argc >= 6) {
+    itercap = std::stoi(argv[5]);
+  }
 
   try {
     FiniteVolumeSolver solver(meshfile);
@@ -32,9 +36,10 @@ int main(int argc, char **argv) {
 
     std::cerr << "Starting solver for " << meshfile
               << " (Order: " << (secondOrder ? "2nd" : "1st")
-              << ", CFL: " << cfl << ", Flux: " << fluxname << ")" << std::endl;
+              << ", CFL: " << cfl << ", Flux: " << fluxname
+              << ", IterCap: " << itercap << ")" << std::endl;
 
-    solver.solveSteady(20000, secondOrder, false);
+    solver.solveSteady(itercap, secondOrder, false);
 
     // Save results to a simple binary or text format for Python to read
     std::ofstream out("results.bin", std::ios::binary);

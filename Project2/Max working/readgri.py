@@ -114,6 +114,130 @@ def _parse_periodic_groups(f):
         groups.append(pairs)
     return groups
 
+def append_periodic_to_ie(V, E, IE, BE, periodic_groups):
+    """
+    Reconstruct periodic interior edges from ordered periodic node pairs.
+
+    For each periodic group:
+    1) orient pair rows as (lower-y node, higher-y node),
+    2) sort by x of lower-y node,
+    3) walk adjacent lower nodes to form candidate bottom/top edge pairs,
+    4) if both candidate edges exist in connectivity, append one IE row
+       [n1_bottom, n2_bottom, elem_bottom, elem_top].
+
+    Returns
+    -------
+    IE_out, BE_out, added_count, expected_count
+    """
+    if len(periodic_groups) == 0:
+        return IE, BE, 0, 0
+
+    print("pairing periodic edges from ordered node pairs...")
+
+    # map unordered edge -> list of adjacent element ids
+    edge_to_elems = {}
+    for elem in range(E.shape[0]):
+        n0, n1, n2 = [int(x) for x in E[elem, :3]]
+        for a, b in ((n0, n1), (n1, n2), (n2, n0)):
+            key = tuple(sorted((a, b)))
+            edge_to_elems.setdefault(key, []).append(int(elem))
+
+    # existing IE keys to avoid duplicates
+    ie_keys = set()
+    for k in range(IE.shape[0]):
+        ie_keys.add(tuple(sorted((int(IE[k, 0]), int(IE[k, 1])))))
+
+    # BE lookup for removal (if periodic sides are listed there)
+    be_key_to_idx = {}
+    for k in range(BE.shape[0]):
+        key = tuple(sorted((int(BE[k, 0]), int(BE[k, 1]))))
+        be_key_to_idx.setdefault(key, []).append(int(k))
+
+    remove_idx = set()
+    new_ie = []
+    unresolved = []
+    expected_count = 0
+
+    for gidx, node_pairs in enumerate(periodic_groups):
+        if node_pairs.shape[0] < 2:
+            continue
+
+        pairs = np.asarray(node_pairs, dtype=int).copy()
+
+        # ensure first column is lower-y node, second is upper-y node
+        y0 = V[pairs[:, 0], 1]
+        y1 = V[pairs[:, 1], 1]
+        swap = y0 > y1
+        if np.any(swap):
+            pairs[swap, :] = pairs[swap, ::-1]
+
+        # sort by x of lower nodes
+        order = np.argsort(V[pairs[:, 0], 0], kind='stable')
+        pairs = pairs[order, :]
+
+        # walk adjacent periodic pairs to create periodic interface candidates
+        for i in range(pairs.shape[0] - 1):
+            b1, t1 = int(pairs[i, 0]), int(pairs[i, 1])
+            b2, t2 = int(pairs[i + 1, 0]), int(pairs[i + 1, 1])
+
+            key_bottom = tuple(sorted((b1, b2)))
+            key_top = tuple(sorted((t1, t2)))
+
+            elems_bottom = edge_to_elems.get(key_bottom, [])
+            elems_top = edge_to_elems.get(key_top, [])
+
+            # expected by pair ordering, but only add when both sides are real edges
+            expected_count += 1
+
+            if (len(elems_bottom) == 0) or (len(elems_top) == 0):
+                unresolved.append((gidx, i, key_bottom, key_top, "missing_edge"))
+                continue
+
+            # Periodic sides are expected to be boundary-like before stitching (one adjacent elem).
+            if (len(elems_bottom) != 1) or (len(elems_top) != 1):
+                unresolved.append(
+                    (gidx, i, key_bottom, key_top, f"adj={len(elems_bottom)}/{len(elems_top)}")
+                )
+                continue
+
+            if key_bottom in ie_keys:
+                continue
+
+            n1b, n2b = b1, b2
+            x1b, x2b = V[n1b, 0], V[n2b, 0]
+            y1b, y2b = V[n1b, 1], V[n2b, 1]
+            if (x1b > x2b) or (np.isclose(x1b, x2b) and y1b > y2b):
+                n1b, n2b = n2b, n1b
+
+            elemL = int(elems_bottom[0])
+            elemR = int(elems_top[0])
+            new_ie.append([n1b, n2b, elemL, elemR])
+            ie_keys.add(key_bottom)
+
+            for k in be_key_to_idx.get(key_bottom, []):
+                remove_idx.add(k)
+            for k in be_key_to_idx.get(key_top, []):
+                remove_idx.add(k)
+
+    added_count = len(new_ie)
+    print(f"Added {added_count} periodic IEs to mesh")
+    if len(unresolved) > 0:
+        print(
+            f"WARNING: periodic ordered-pair candidates not added. "
+            f"count={len(unresolved)}, samples={unresolved[:5]}"
+        )
+
+    if added_count == 0:
+        return IE, BE, added_count, expected_count
+
+    IE_out = np.vstack([IE, np.asarray(new_ie, dtype=int)])
+    keep_mask = np.ones(BE.shape[0], dtype=bool)
+    if len(remove_idx) > 0:
+        keep_mask[list(remove_idx)] = False
+    BE_out = BE[keep_mask]
+    return IE_out, BE_out, added_count, expected_count
+
+
 def _append_periodic_to_ie(V, E, IE, BE, periodic_groups):
     """
     Build periodic interior faces from node correspondences and append to IE.
@@ -149,7 +273,8 @@ def _append_periodic_to_ie(V, E, IE, BE, periodic_groups):
     new_ie = []
     unresolved = []
     expected_added = 0
-    tol = 1e-8
+    tol = 1e-12
+    periodic_add_count = 0
 
     for gidx, node_pairs in enumerate(periodic_groups):
         if node_pairs.shape[0] < 2:
@@ -222,6 +347,8 @@ def _append_periodic_to_ie(V, E, IE, BE, periodic_groups):
                     n1b, n2b = n2b, n1b
                 new_ie.append([n1b, n2b, int(eb[2]), int(et[2])])
                 ie_keys.add(key_bottom)
+                periodic_add_count += 1
+                print(f"Periodic IE added count: {periodic_add_count}")
 
             # remove periodic sides from BE when present (some files may still include them)
             for k in be_key_to_idx.get(key_bottom, []):
@@ -230,6 +357,7 @@ def _append_periodic_to_ie(V, E, IE, BE, periodic_groups):
                 remove_idx.add(k)
 
     added_count = len(new_ie)
+    print(f"Added {added_count} periodic IEs to mesh")
     if len(unresolved) > 0:
         samples = unresolved[:5]
         print(
@@ -267,6 +395,15 @@ def readgri(fname):
             E = Ei if (Ne0==0) else np.concatenate((E,Ei), axis=0)
             Ne0 += ne
         periodic_groups = _parse_periodic_groups(f)
+    total_periodic_pairs = int(sum(g.shape[0] for g in periodic_groups))
+    if len(periodic_groups) > 0:
+        group_counts = [int(g.shape[0]) for g in periodic_groups]
+        print(
+            f"PeriodicGroup read: total_pairs={total_periodic_pairs}, "
+            f"groups={len(periodic_groups)}, per_group={group_counts}"
+        )
+    else:
+        print("PeriodicGroup read: total_pairs=0, groups=0")
     # convert boundaries to node-pair format (0-based).
     # Some .gri files store boundary faces as (elem, local_face) instead of (n1, n2).
     B = []
@@ -293,7 +430,8 @@ def readgri(fname):
             B.append(Bi - 1) 
     # make IE, BE structures
     IE, BE = edgehash(E, B)
-    IE, BE, periodic_ie_added, periodic_ie_expected = _append_periodic_to_ie(V, E, IE, BE, periodic_groups)
+    # IE, BE, periodic_ie_added, periodic_ie_expected = _append_periodic_to_ie(V, E, IE, BE, periodic_groups)
+    IE, BE, periodic_ie_added, periodic_ie_expected = append_periodic_to_ie(V, E, IE, BE, periodic_groups)
     
     # NOTE added normals, centroids, areas 
     In, Bn = get_normals(V, IE, BE) # computes normals and edge lengths
@@ -313,7 +451,8 @@ def readgri(fname):
             'PeriodicGroups': periodic_groups,
             'PeriodicPairs': periodic_pairs,
             'PeriodicIEAdded': periodic_ie_added,
-            'PeriodicIEExpected': periodic_ie_expected}
+            'PeriodicIEExpected': periodic_ie_expected
+    }
     return Mesh
 
 def get_normals(V, IE, BE):
@@ -356,7 +495,7 @@ def get_centroids_areas(V, E):
     
 #-----------------------------------------------------------
 def main():
-    meshstr = '2k.gri'
+    meshstr = '8k.gri'
 
     dir_base = Path(__file__).resolve().parent
     grifile = dir_base.joinpath(meshstr)

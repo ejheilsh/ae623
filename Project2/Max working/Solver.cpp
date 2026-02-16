@@ -130,9 +130,13 @@ std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
   ResidualResult res1 =
       secondOrder ? calcResidualSecondOrder(Un, limited) : calcResidual(Un);
   std::vector<Vec4> U1(Ne);
+  double cfl_eff = CFL;
+  if (secondOrder && limited)
+    cfl_eff *= 0.2;
+
   for (int i = 0; i < Ne; ++i) {
     double sdl = std::max(res1.sdl[i], 1e-12);
-    double dt = CFL * 2.0 * mesh.areas[i] / sdl;
+    double dt = cfl_eff * 2.0 * mesh.areas[i] / sdl;
     U1[i] = Un[i] - (res1.R[i] / mesh.areas[i]) * dt;
   }
 
@@ -140,9 +144,8 @@ std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
       secondOrder ? calcResidualSecondOrder(U1, limited) : calcResidual(U1);
   std::vector<Vec4> Unp1(Ne);
   for (int i = 0; i < Ne; ++i) {
-    double sdl =
-        std::max(res1.sdl[i], 1e-12); // Use dt from first step for stability
-    double dt = CFL * 2.0 * mesh.areas[i] / sdl;
+    double sdl = std::max(res1.sdl[i], 1e-12);
+    double dt = cfl_eff * 2.0 * mesh.areas[i] / sdl;
     Unp1[i] = Un[i] * 0.5 + (U1[i] - (res2.R[i] / mesh.areas[i]) * dt) * 0.5;
   }
   return Unp1;
@@ -260,22 +263,18 @@ FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
     Vec2 dL = xf - mesh.centroids[eL];
     Vec2 dR = xf - mesh.centroids[eR];
 
-    // Periodic shift correction for dR
-    // If it's a periodic edge, centroids[eR] might be far away
-    // We assume translational periodicity and that dR should be "small"
-    // (This is a heuristic: if |dR| > domain_size/2, shift it)
-    // For coarse.gri, the domain height is 18.0
+    // Periodic shift correction (standard 18.0 as per user mesh fixes)
+    if (std::abs(dL.y) > 9.0) {
+      if (dL.y > 0)
+        dL.y -= 18.0;
+      else
+        dL.y += 18.0;
+    }
     if (std::abs(dR.y) > 9.0) {
       if (dR.y > 0)
         dR.y -= 18.0;
       else
         dR.y += 18.0;
-    }
-    if (std::abs(dL.y) > 9.0) { // Should not happen if L is the "local" element
-      if (dL.y > 0)
-        dL.y -= 18.0;
-      else
-        dL.y += 18.0;
     }
 
     Vec4 ULf = Un[eL] + gradX[eL] * dL.x + gradY[eL] * dL.y;

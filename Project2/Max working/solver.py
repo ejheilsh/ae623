@@ -4,7 +4,7 @@ from matplotlib.collections import LineCollection
 from dataclasses import dataclass, field 
 from readgri import readgri 
 from pathlib import Path
-from viz import plotmesh
+# from viz import plotmesh
 from fluxes import *
 import time
 from typing import Optional
@@ -884,7 +884,14 @@ class FiniteVol():
         print(msg)
         return added, expected, ok
 
-    def plot_edge_flux(self, U: np.ndarray, component: str = 'rhov', cmap: str = 'coolwarm', figsize=(10, 4)):
+    def plot_edge_flux(
+        self,
+        U: np.ndarray,
+        component: str = 'rhov',
+        cmap: str = 'coolwarm',
+        figsize=(10, 4),
+        show_periodic_mates: bool = True,
+    ):
         """
         Plot edge flux on all interior and boundary edges.
         Default component is y-momentum ('rhov').
@@ -898,6 +905,14 @@ class FiniteVol():
         segments = []
         edge_flux_vals = []
 
+        # Optional periodic node map for plotting both geometric sides of a periodic interface.
+        periodic_bt = {}
+        periodic_tb = {}
+        if show_periodic_mates and self.PeriodicPairs.size > 0:
+            for nb, nt in np.asarray(self.PeriodicPairs, dtype=int):
+                periodic_bt[int(nb)] = int(nt)
+                periodic_tb[int(nt)] = int(nb)
+
         # Interior edges
         for i in range(self.Ni):
             n1, n2, elemL, elemR = self.IE[i, :]
@@ -907,6 +922,18 @@ class FiniteVol():
                 raise ValueError(f"Interior flux returned shape {F.shape}, expected (4,)")
             segments.append([self.V[n1, :], self.V[n2, :]])
             edge_flux_vals.append(F[comp_idx])
+
+            if show_periodic_mates and (len(periodic_bt) > 0):
+                n1i, n2i = int(n1), int(n2)
+                mate = None
+                if (n1i in periodic_bt) and (n2i in periodic_bt):
+                    mate = (periodic_bt[n1i], periodic_bt[n2i])
+                elif (n1i in periodic_tb) and (n2i in periodic_tb):
+                    mate = (periodic_tb[n1i], periodic_tb[n2i])
+                if mate is not None:
+                    m1, m2 = int(mate[0]), int(mate[1])
+                    segments.append([self.V[m1, :], self.V[m2, :]])
+                    edge_flux_vals.append(F[comp_idx])
 
         # Boundary edges
         for i in range(self.Nb):
@@ -1146,15 +1173,15 @@ if __name__=="__main__":
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
     # solver = FiniteVol(meshname='2k.gri', fluxname='roe', gamma=1.4, CFL=0.5)
 
-    grid = "coarse"
-    flux = "hlle"
+    grid = "8k"
+    flux = "roe"
 
-    solver = FiniteVol(meshname=f'{grid}.gri', fluxname=flux, gamma=1.4, CFL=0.5)
+    solver = FiniteVol(meshname=f'{grid}.gri', fluxname=flux, gamma=1.4, CFL=0.1)
     # print('deez')
-    # # plotmesh(solver.Mesh, fname='testplot', savefig=True)
+    # plotmesh(solver.Mesh, fname='testplot', savefig=True)
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL = 0.1)
     # solver.testplotgri()
-    # solver.plot_edge_flux(solver.U0, component='rhov')
+    solver.plot_edge_flux(solver.U0, component='rhov', show_periodic_mates=False)
 
     # solver.plot_interior_edge_indices()               # all interior edges
     # solver.plot_interior_edge_indices(stride=5)       # every 5th IE entry
@@ -1163,7 +1190,7 @@ if __name__=="__main__":
     # solver.plot_boundary_edge_indices(stride=5, fontsize=6)
 
     # solver = FiniteVol(meshname='2k.gri', fluxname='hlle', gamma=1.4, CFL=0.1)
-    # solver.plot_periodic_pairs(show_mesh=True)   # optional background mesh
+    solver.plot_periodic_pairs(show_mesh=True)   # optional background mesh
 
     # solver.solve_steady(runtime=True, itercap=1e4, first_order=True)
 
@@ -1173,11 +1200,11 @@ if __name__=="__main__":
     # solver = FiniteVol(meshname=f'{grid}.gri', fluxname='hlle', gamma=1.4, CFL=0.5)
 
     # 1) First-order solve
-    # solver.solve_steady(first_order=True, itercap=1e5)
+    solver.solve_steady(first_order=True, itercap=100)
 
     # 2) Second-order solve, initialized from first-order file
-    solver.solve_steady(first_order=False, init_npz=f'{grid}.gri_{flux}_results.npz', limited=True)
+    # solver.solve_steady(first_order=False, init_npz=f'{grid}.gri_{flux}_results.npz', limited=True)
 
     # Plot the converged second-order solution and residual history.
-    solver.plot_residual_history(from_current_solve=True)
-    solver.plot_state_tripcolor()
+    # solver.plot_residual_history(from_current_solve=True)
+    # solver.plot_state_tripcolor()

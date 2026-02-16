@@ -1,9 +1,14 @@
 #include "Mesh.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
+#include <set>
+#include <utility>
+#include <vector>
 
 bool Mesh::readGRI(const std::string &filename) {
   std::ifstream f(filename);
@@ -104,12 +109,30 @@ bool Mesh::readGRI(const std::string &filename) {
           for (int j = 0; j < pg.nPairs; ++j) {
             int n1, n2;
             f >> n1 >> n2;
-            pg.pairs.push_back({n1 - 1, n2 - 1});
+            int pair_n1 = n1 - 1;
+            int pair_n2 = n2 - 1;
+            pg.pairs.push_back({pair_n1, pair_n2});
           }
           periodicGroups.push_back(pg);
         }
       }
     }
+  }
+  int totalPeriodicPairs = 0;
+  for (const auto &pg : periodicGroups) {
+    totalPeriodicPairs += static_cast<int>(pg.pairs.size());
+  }
+  if (!periodicGroups.empty()) {
+    std::cout << "PeriodicGroup read: total_pairs=" << totalPeriodicPairs
+              << ", groups=" << periodicGroups.size() << ", per_group=[";
+    for (size_t i = 0; i < periodicGroups.size(); ++i) {
+      if (i > 0)
+        std::cout << ", ";
+      std::cout << periodicGroups[i].pairs.size();
+    }
+    std::cout << "]" << std::endl;
+  } else {
+    std::cout << "PeriodicGroup read: total_pairs=0, groups=0" << std::endl;
   }
 
   edgeHash(B);
@@ -124,96 +147,174 @@ void Mesh::appendPeriodicToIE() {
   if (periodicGroups.empty())
     return;
 
-  // Map boundary nodes to elements and edges
-  std::map<std::pair<int, int>, int> edgeToElem;
-  for (int e = 0; e < (int)E.size(); ++e) {
-    for (int i = 0; i < 3; ++i) {
-      int n1 = E[e].v[i];
-      int n2 = E[e].v[(i + 1) % 3];
-      edgeToElem[{std::min(n1, n2), std::max(n1, n2)}] = e;
+  std::cout << "pairing periodic edges from ordered node pairs..." << std::endl;
+
+  auto sortedEdge = [](int a, int b) {
+    return std::make_pair(std::min(a, b), std::max(a, b));
+  };
+
+  // edge -> adjacent element ids from connectivity
+  std::map<std::pair<int, int>, std::vector<int>> edgeToElems;
+  for (int elem = 0; elem < static_cast<int>(E.size()); ++elem) {
+    const int n0 = E[elem].v[0];
+    const int n1 = E[elem].v[1];
+    const int n2 = E[elem].v[2];
+    edgeToElems[sortedEdge(n0, n1)].push_back(elem);
+    edgeToElems[sortedEdge(n1, n2)].push_back(elem);
+    edgeToElems[sortedEdge(n2, n0)].push_back(elem);
+  }
+
+  // Existing IE set to avoid duplicates.
+  std::set<std::pair<int, int>> ieSet;
+  for (const auto &ie : IE) {
+    ieSet.insert(sortedEdge(ie.v[0], ie.v[1]));
+  }
+
+  // BE lookup so periodic sides can be removed if present.
+  std::map<std::pair<int, int>, std::vector<int>> beKeyToIdx;
+  for (int i = 0; i < static_cast<int>(BE.size()); ++i) {
+    beKeyToIdx[sortedEdge(BE[i].v[0], BE[i].v[1])].push_back(i);
+  }
+
+  std::set<int> removeBEIdx;
+  int addedCount = 0;
+  int expectedCount = 0;
+  std::vector<std::string> unresolved;
+
+  for (int gidx = 0; gidx < static_cast<int>(periodicGroups.size()); ++gidx) {
+    const auto &pg = periodicGroups[gidx];
+    if (pg.pairs.size() < 2)
+      continue;
+
+    std::vector<std::pair<int, int>> pairs = pg.pairs;
+
+    // Ensure each pair is (lower-y node, upper-y node).
+    for (auto &p : pairs) {
+      if (V[p.first].y > V[p.second].y) {
+        std::swap(p.first, p.second);
+      }
+    }
+
+    // Sort by x of lower node, stable for ties.
+    std::stable_sort(
+        pairs.begin(), pairs.end(),
+        [&](const std::pair<int, int> &a, const std::pair<int, int> &b) {
+          return V[a.first].x < V[b.first].x;
+        });
+
+    for (int i = 0; i < static_cast<int>(pairs.size()) - 1; ++i) {
+      const int b1 = pairs[i].first;
+      const int t1 = pairs[i].second;
+      const int b2 = pairs[i + 1].first;
+      const int t2 = pairs[i + 1].second;
+
+      const auto keyBottom = sortedEdge(b1, b2);
+      const auto keyTop = sortedEdge(t1, t2);
+      expectedCount += 1;
+
+      const auto itBottom = edgeToElems.find(keyBottom);
+      const auto itTop = edgeToElems.find(keyTop);
+      if (itBottom == edgeToElems.end() || itTop == edgeToElems.end()) {
+        if (unresolved.size() < 5) {
+          std::ostringstream oss;
+          oss << "(g=" << gidx << ", i=" << i << ", bottom=(" << keyBottom.first
+              << "," << keyBottom.second << "), top=(" << keyTop.first << ","
+              << keyTop.second << "), missing_edge)";
+          unresolved.push_back(oss.str());
+        }
+        continue;
+      }
+      if (itBottom->second.size() != 1 || itTop->second.size() != 1) {
+        if (unresolved.size() < 5) {
+          std::ostringstream oss;
+          oss << "(g=" << gidx << ", i=" << i << ", bottom=(" << keyBottom.first
+              << "," << keyBottom.second << "), top=(" << keyTop.first << ","
+              << keyTop.second << "), adj=" << itBottom->second.size() << "/"
+              << itTop->second.size() << ")";
+          unresolved.push_back(oss.str());
+        }
+        continue;
+      }
+      if (ieSet.count(keyBottom)) {
+        continue;
+      }
+
+      int n1b = b1;
+      int n2b = b2;
+      const double x1 = V[n1b].x, x2 = V[n2b].x;
+      const double y1 = V[n1b].y, y2 = V[n2b].y;
+      if ((x1 > x2) || (std::abs(x1 - x2) <= 1e-12 && y1 > y2)) {
+        std::swap(n1b, n2b);
+      }
+
+      const int elemL = itBottom->second[0];
+      const int elemR = itTop->second[0];
+      IE.push_back({n1b, n2b, elemL, elemR});
+      ieSet.insert(keyBottom);
+      addedCount += 1;
+      std::cout << "Periodic IE added count: " << addedCount << std::endl;
+
+      auto itB = beKeyToIdx.find(keyBottom);
+      if (itB != beKeyToIdx.end()) {
+        for (int idx : itB->second) {
+          removeBEIdx.insert(idx);
+        }
+      }
+      auto itT = beKeyToIdx.find(keyTop);
+      if (itT != beKeyToIdx.end()) {
+        for (int idx : itT->second) {
+          removeBEIdx.insert(idx);
+        }
+      }
     }
   }
 
-  // This is a simplified translational periodic pairing
-  for (const auto &pg : periodicGroups) {
-    std::vector<int> botNodes, topNodes;
-    for (const auto &p : pg.pairs) {
-      botNodes.push_back(p.first);
-      topNodes.push_back(p.second);
-    }
-
-    struct PEdge {
-      int n1, n2, elem;
-      double midX;
-    };
-    std::vector<PEdge> botEdges, topEdges;
-
-    auto isNodeIn = [](int n, const std::vector<int> &nodes) {
-      return std::find(nodes.begin(), nodes.end(), n) != nodes.end();
-    };
-
-    // Find edges on bot/top boundaries
-    for (auto const &[nodes, elem] : edgeToElem) {
-      bool inBot =
-          isNodeIn(nodes.first, botNodes) && isNodeIn(nodes.second, botNodes);
-      bool inTop =
-          isNodeIn(nodes.first, topNodes) && isNodeIn(nodes.second, topNodes);
-
-      // Check if it's already an interior edge
-      bool alreadyIE = false;
-      for (const auto &ie : IE) {
-        if ((ie.v[0] == nodes.first && ie.v[1] == nodes.second) ||
-            (ie.v[0] == nodes.second && ie.v[1] == nodes.first)) {
-          alreadyIE = true;
-          break;
-        }
-      }
-      if (alreadyIE)
-        continue;
-
-      if (inBot)
-        botEdges.push_back({nodes.first, nodes.second, elem,
-                            (V[nodes.first].x + V[nodes.second].x) * 0.5});
-      if (inTop)
-        topEdges.push_back({nodes.first, nodes.second, elem,
-                            (V[nodes.first].x + V[nodes.second].x) * 0.5});
-    }
-
-    // Pair them up
-    for (const auto &be : botEdges) {
-      for (const auto &te : topEdges) {
-        if (std::abs(be.midX - te.midX) < 1e-8) {
-          IE.push_back({be.n1, be.n2, be.elem, te.elem});
-          break;
-        }
+  if (!removeBEIdx.empty()) {
+    std::vector<BoundaryEdge> beFiltered;
+    beFiltered.reserve(BE.size() - removeBEIdx.size());
+    for (int i = 0; i < static_cast<int>(BE.size()); ++i) {
+      if (!removeBEIdx.count(i)) {
+        beFiltered.push_back(BE[i]);
       }
     }
+    BE.swap(beFiltered);
+  }
+
+  std::cout << "Added " << addedCount << " periodic IEs to mesh" << std::endl;
+  if (!unresolved.empty()) {
+    std::cout << "WARNING: periodic ordered-pair candidates not added. count="
+              << (expectedCount - addedCount) << ", samples=[";
+    for (size_t i = 0; i < unresolved.size(); ++i) {
+      if (i > 0)
+        std::cout << ", ";
+      std::cout << unresolved[i];
+    }
+    std::cout << "]" << std::endl;
   }
 }
 
 void Mesh::edgeHash(const std::vector<std::vector<std::vector<int>>> &B) {
   int Ne_count = E.size();
-  std::map<std::pair<int, int>, int> H;
+  std::map<std::pair<int, int>, int> H; // Directional hash: (n1, n2) -> elem+1
   IE.clear();
 
   for (int e = 0; e < Ne_count; ++e) {
     for (int i = 0; i < 3; ++i) {
       int n1 = E[e].v[i];
       int n2 = E[e].v[(i + 1) % 3];
-      std::pair<int, int> key = {std::min(n1, n2), std::max(n1, n2)};
-      if (H.find(key) == H.end()) {
-        H[key] = e + 1; // 1-based to allow 0 as "not found"
-      } else {
-        int eL = H[key] - 1;
+
+      // If the reverse edge existed, it means eL was already found.
+      // eL had edge n2 -> n1 (CCW), so its normal points OUT.
+      // n1 -> n2 is CCW for the CURRENT element eR.
+      // So if we store {n2, n1, eL, eR}, the normal computed from n2 -> n1
+      // will point OUT of eL and INTO eR.
+      if (H.count({n2, n1})) {
+        int eL = H[{n2, n1}] - 1;
         int eR = e;
-        // Re-orient so n1, n2 are CCW for eL
-        // In our format, (n1, n2) is an edge of element 'e'.
-        // If it's already in H, it means it's an interior edge.
-        // We store it as (n1, n2, eR, eL) or similar.
-        // To match Python: IE contains (n1, n2, e, eR) where H[n2,n1] was found
-        // Let's just store it and handle orientation in geometry.
-        IE.push_back({n1, n2, eL, eR});
-        H.erase(key);
+        IE.push_back({n2, n1, eL, eR});
+        H.erase({n2, n1});
+      } else {
+        H[{n1, n2}] = e + 1;
       }
     }
   }
@@ -223,13 +324,11 @@ void Mesh::edgeHash(const std::vector<std::vector<std::vector<int>>> &B) {
     for (const auto &bi : B[g]) {
       int n1 = bi[0];
       int n2 = bi[1];
-      std::pair<int, int> key = {std::min(n1, n2), std::max(n1, n2)};
-      if (H.find(key) != H.end()) {
-        int e = H[key] - 1;
-        // Check orientation: +90 deg rotation of (n2-n1) should point out
-        // n = (y2-y1, x1-x2). dot(n, centroid - mid) should be negative for
-        // outward.
-        BE.push_back({n1, n2, e, g});
+      // Boundary edges: H only contains keys that aren't shared.
+      if (H.count({n1, n2})) {
+        BE.push_back({n1, n2, H[{n1, n2}] - 1, g});
+      } else if (H.count({n2, n1})) {
+        BE.push_back({n2, n1, H[{n2, n1}] - 1, g});
       }
     }
   }
@@ -261,7 +360,7 @@ void Mesh::computeGeometry() {
     // Ensure normal points from elemL to elemR
     Vec2 dLR = centroids[IE[i].elemR] - centroids[IE[i].elemL];
     // Periodic shift correction for dLR
-    if (std::abs(dLR.y) > 9.0) { // Height of coarse.gri is 18
+    if (std::abs(dLR.y) > 9.0) { // Standard shift for expected meshes
       if (dLR.y > 0)
         dLR.y -= 18.0;
       else
