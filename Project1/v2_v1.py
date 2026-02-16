@@ -80,8 +80,8 @@ class mesh_class():
         height = self.domain_height
         u = self.surface_upper
         l = self.surface_lower
-        n = 15 # arbitrary, controls fineness of initial unrefined mesh
-        # n = 3 # arbitrary, controls fineness of initial unrefined mesh
+        n = 10 # arbitrary, controls fineness of initial unrefined mesh
+        # n = 5 # arbitrary, controls fineness of initial unrefined mesh
 
         # array of points to the left of the LE
         idx_LE = np.argmin(u[:, 0])
@@ -267,7 +267,7 @@ class mesh_class():
         _, y_TE_upper = self.surface_upper[np.argmax(self.surface_upper[:, 0])]
         _, y_LE_lower = self.surface_lower[np.argmin(self.surface_lower[:, 0])]
         _, y_TE_lower = self.surface_lower[np.argmax(self.surface_lower[:, 0])]
-        tol = 1e-8
+        tol = 1e-12
         x_n1, y_n1 = self.V[self.BE[:, 0] - 1].T  # .T to unpack node coords for all node
         x_n2, y_n2 = self.V[self.BE[:, 1] - 1].T
         mask_LE_upper = (np.abs(y_n1 - y_LE_upper) < tol) & (np.abs(y_n2 - y_LE_upper) < tol)
@@ -621,38 +621,40 @@ class mesh_class():
         fname_gri.parent.mkdir(parents=True, exist_ok=True)
 
         with open(fname_gri, "w") as f:
-            # f.write(f"{n_node} {n_elem} {self.V.shape[1]}\n")
-            # f.write(f"{self.V}\n".replace("[", "").replace("]", ""))
-            # f.write(f"{len(np.unique(self.B2E[:, 2]))}\n")
-
             f.write(f"{n_node} {n_elem} {n_dims}\n")
-            np.savetxt(f, self.V, fmt="%10.06f")  # or "%.8e" etc.
+            # Increase precision for node coordinates
+            np.savetxt(f, self.V, fmt="%.12f %.12f")
 
             # boundary groups
+            # Only count categories that actually have edges assigned
             boundaries = self.B2E[:, 2]
-            f.write(f"{len(np.unique(boundaries))}\n")
+            unique_bg = np.atleast_1d(np.unique(boundaries))
+            f.write(f"{len(unique_bg)}\n")
             
-            # get number of each boundaries
-            boundary_groups = ["inflow", "wall", "outflow", "periodicTop"]
-            for bg in boundary_groups:
+            # Write each active boundary group
+            for bg in unique_bg:
                 mask = boundaries == bg
                 n = np.sum(mask)
-                f.write(f"{n} {n_dims} {bg}\n")
-                bnodes = self.B2E[mask][:, :2]
+                f.write(f"{n} 2 {bg}\n")
+                # Correctly use node indices from BE instead of element/local indices from B2E
+                bnodes = self.BE[mask, :2]
                 for bnode_pair in bnodes:
-                    f.write(" ".join(map(str, bnode_pair)) + "\n")
+                    f.write(f"{bnode_pair[0]} {bnode_pair[1]}\n")
 
-            # elements
+            # Element block header expected by downstream readers:
+            # [n_elem_in_block] [order] [type]
             f.write(f"{n_elem} 1 TriLagrange\n")
             np.savetxt(f, self.E2N, fmt="%i")
 
-            # now periodic groups
-            f.write("1 PeriodicGroup\n")
-            f.write(f"{len(self.periodic_node_pairs)} Translational\n")
-            for pair in self.periodic_node_pairs:
-                f.write(" ".join(map(str, pair)) + "\n")
+            # Periodic groups
+            if hasattr(self, 'periodic_node_pairs') and self.periodic_node_pairs is not None and len(self.periodic_node_pairs) > 0:
+                f.write("1 PeriodicGroup\n")
+                # Translational periodic section: "<n_pairs> <type>"
+                f.write(f"{len(self.periodic_node_pairs)} Translational\n")
+                for pair in self.periodic_node_pairs:
+                    f.write(f"{pair[0]} {pair[1]}\n")
 
-            print()
+            print(f"Wrote {fname_gri}")
 
     def distance_to_blade_surface(self, point):
         x, y = point[0], point[1]
@@ -1123,7 +1125,7 @@ class mesh_class():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_path, format=extension)
         print(f"Saved {out_path}")
-        # plt.show()
+        plt.show()
         plt.close(fig)
 
 
@@ -1140,52 +1142,53 @@ def main():
     t_start = time.perf_counter()
 
     # initialize
-    m = mesh_class(label="base", h_bounds=(0.67, 4.15))
+    m = mesh_class(label="coarse", h_bounds=(0.67, 4.20))
     print(f"\nThere are {len(m.E2N)} cells in the base mesh")
 
     m.write_gri()
-    # m.label = "2k"
+    m.label = "2k"
 
     # # m.mesh_verification()
 
     # # m.visual_mesh(fname="mesh0")
 
-    # # refine locally
-    # for _ in range(7): # 7 for report
-    #     m.refinement_local()
-    #     m.plot_by_distance(vmin=0, vmax=2)
-    # print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
-    # t_end = time.perf_counter()
-    # print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
-    # # m.visual_mesh(fname="mesh1")
-    # # m.visual_mesh(fname="mesh1_edge_length", color_by="edge_length")
-    # # m.plot_by_distance()
-    # # m.visual_mesh(fname="mesh1_projection", color_by="projections")
-    # print(f"\n local refinement: {len(m.E2N)} cells")
-    # # m.mesh_verification()
-    # m.write_gri()
-    # m.label = "8k"
+    # refine locally
+    for _ in range(10): # 7 for report
+        m.refinement_local()
+        m.plot_by_distance(vmin=0, vmax=2)
+    print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
+    t_end = time.perf_counter()
+    print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
+    m.visual_mesh(fname="testing")
+    # m.visual_mesh(fname="mesh1_edge_length", color_by="edge_length")
+    # m.plot_by_distance()
+    # m.visual_mesh(fname="mesh1_projection", color_by="projections")
+    print(f"\n local refinement: {len(m.E2N)} cells")
+    # m.mesh_verification()
+    m.write_gri()
+    m.label = "8k"
 
-    # # refine globally afterwards
-    # for i in range(3): # 3
-    #     m.refinement_global()
-    #     # m.plot_by_distance()
-    #     t_end = time.perf_counter()
-    #     print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
-    #     m.write_gri()
-    #     if i == 0:
-    #         m.label = "32k"
-    #     if i == 1:
-    #         m.label = "128k"
-    #     # m.visual_mesh(fname=f"mesh{2 + i}")
-    #     # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
-    #     # if i == 2: # 2
-    #     #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
+    # refine globally afterwards
+    for i in range(3): # 3
+        m.refinement_global()
+        # m.refinement_local() # smoothing here!!
+        # m.plot_by_distance()
+        t_end = time.perf_counter()
+        print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
+        m.write_gri()
+        m.visual_mesh(fname=m.label)
+        if i == 0:
+            m.label = "32k"
+        if i == 1:
+            m.label = "128k"
+        # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
+        # if i == 2: # 2
+        #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
 
-    #     print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
+        print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
 
 
-        # m.mesh_verification()
+        m.mesh_verification()
 
 
 
