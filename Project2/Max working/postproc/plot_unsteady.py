@@ -70,7 +70,8 @@ def get_boundary_edges_from_gri(filename):
         for ib in range(nb):
             line = f.readline().split()
             nb_edges = int(line[0])
-            bname = line[1] if len(line) > 1 else f"boundary_{ib}"
+            # Format: <num_edges> <boundary_type> <boundary_name>
+            bname = line[2] if len(line) > 2 else f"boundary_{ib}"
             
             edges = []
             for _ in range(nb_edges):
@@ -92,7 +93,11 @@ def extract_time_from_filename(filename):
     return 0.0
 
 def compute_force_coefficients(v, elements, boundary_groups, u, gamma=1.4):
-    """Compute force coefficients from wall pressure."""
+    """
+    Compute force coefficients from wall pressure.
+    Normalized by q_out * chord following project requirements.
+    c_x and c_y = F_x and F_y normalized by q_out*c with c = 18.804mm
+    """
     # Find wall boundary
     wall_edges = None
     for bname, edges in boundary_groups.items():
@@ -126,6 +131,18 @@ def compute_force_coefficients(v, elements, boundary_groups, u, gamma=1.4):
     qsq = vel_u**2 + vel_v**2
     p = (gamma - 1) * (rhoe - 0.5 * rho * qsq)
     
+    # Reference conditions following project requirements
+    # q_out = 0.5 * gamma * p_out * M_out^2
+    # M_out^2 = (2/(gamma-1)) * [(p0/p_out)^((gamma-1)/gamma) - 1]
+    rho0 = 1.0
+    a0 = 1.0
+    p0 = a0**2 * rho0 / gamma
+    p_out = 0.7 * p0  # From solver BC: pout = 0.7 * p0
+    
+    pressure_ratio = p0 / p_out
+    M_out_sq = (2.0 / (gamma - 1.0)) * (pressure_ratio**((gamma - 1.0) / gamma) - 1.0)
+    q_out = 0.5 * gamma * p_out * M_out_sq
+    
     # Integrate forces
     Fx = 0.0
     Fy = 0.0
@@ -155,13 +172,13 @@ def compute_force_coefficients(v, elements, boundary_groups, u, gamma=1.4):
             Fx += p_elem * normal[0] * edge_length
             Fy += p_elem * normal[1] * edge_length
     
-    # Force coefficients (normalized by reference dynamic pressure * chord)
-    q_ref = 0.5 * 1.0 * 1.0**2  # rho_ref * a_ref^2
-    chord = 1.0
-    Cf_x = Fx / (q_ref * chord)
-    Cf_y = Fy / (q_ref * chord)
+    # Force coefficients (normalized by q_out * chord)
+    # Note: mesh is in mm, so chord = 18.804 mm (not meters)
+    chord = 18.804  # Chord length in mm (same units as mesh)
+    c_x = Fx / (q_out * chord)
+    c_y = Fy / (q_out * chord)
     
-    return Cf_x, Cf_y
+    return c_x, c_y
 
 def plot_unsteady_results(meshfile, results_dir, output_dir='unsteady_plots'):
     """Main plotting function."""
@@ -177,11 +194,14 @@ def plot_unsteady_results(meshfile, results_dir, output_dir='unsteady_plots'):
     
     # Find all result files
     pattern = os.path.join(results_dir, "results_*.bin")
-    result_files = sorted(glob.glob(pattern))
+    result_files = glob.glob(pattern)
     
     if len(result_files) == 0:
         print(f"Error: No files found matching {pattern}")
         return
+    
+    # Sort by time value extracted from filename, not alphabetically
+    result_files = sorted(result_files, key=extract_time_from_filename)
     
     print(f"Found {len(result_files)} result files")
     
@@ -280,13 +300,13 @@ def plot_unsteady_results(meshfile, results_dir, output_dir='unsteady_plots'):
     
     ax1.plot(times, Cf_x_list, 'b-', linewidth=2)
     ax1.set_xlabel('Time')
-    ax1.set_ylabel('Cf_x')
+    ax1.set_ylabel('$c_x$')
     ax1.set_title('Axial Force Coefficient vs Time')
     ax1.grid(True, alpha=0.3)
     
     ax2.plot(times, Cf_y_list, 'r-', linewidth=2)
     ax2.set_xlabel('Time')
-    ax2.set_ylabel('Cf_y')
+    ax2.set_ylabel('$c_y$')
     ax2.set_title('Normal Force Coefficient vs Time')
     ax2.grid(True, alpha=0.3)
     
@@ -299,8 +319,8 @@ def plot_unsteady_results(meshfile, results_dir, output_dir='unsteady_plots'):
     print("\n" + "="*60)
     print("Force Coefficient Statistics:")
     print("="*60)
-    print(f"Cf_x: mean={Cf_x_list.mean():.6f}, std={Cf_x_list.std():.6f}")
-    print(f"Cf_y: mean={Cf_y_list.mean():.6f}, std={Cf_y_list.std():.6f}")
+    print(f"c_x: mean={Cf_x_list.mean():.6f}, std={Cf_x_list.std():.6f}")
+    print(f"c_y: mean={Cf_y_list.mean():.6f}, std={Cf_y_list.std():.6f}")
     print("="*60)
 
 if __name__ == "__main__":

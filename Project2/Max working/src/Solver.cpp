@@ -27,6 +27,38 @@ void FiniteVolumeSolver::setInitialCondition() {
   U0 = U;
 }
 
+void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
+  std::ifstream in(filename, std::ios::binary);
+  if (!in) {
+    std::cerr << "Warning: Could not open initial condition file " << filename 
+              << ", using default IC instead" << std::endl;
+    setInitialCondition();
+    return;
+  }
+  
+  int Ne_file;
+  in.read((char*)&Ne_file, sizeof(int));
+  
+  int Ne = mesh.E.size();
+  if (Ne_file != Ne) {
+    std::cerr << "Warning: Initial condition file has " << Ne_file 
+              << " elements but mesh has " << Ne 
+              << " elements. Using default IC instead." << std::endl;
+    in.close();
+    setInitialCondition();
+    return;
+  }
+  
+  U.resize(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    in.read((char*)U[i].v, sizeof(double) * 4);
+  }
+  in.close();
+  U0 = U;
+  
+  std::cout << "Successfully loaded initial condition from " << filename << std::endl;
+}
+
 FiniteVolumeSolver::ResidualResult
 FiniteVolumeSolver::calcResidual(const std::vector<Vec4> &Un, double time,
                                  bool use_unsteady_wake) {

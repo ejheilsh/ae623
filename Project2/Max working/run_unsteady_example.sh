@@ -19,6 +19,10 @@ FLUX="hlle"
 MAXITER=5000
 MODE="unsteady"
 
+# Extract grid name for IC file
+GRID_NAME=$(basename $MESH .gri)
+IC_FILE="data_steady/steady_${GRID_NAME}_results.bin"
+
 echo "Configuration:"
 echo "  Mesh: $MESH"
 echo "  Order: $ORDER"
@@ -26,14 +30,22 @@ echo "  CFL: $CFL"
 echo "  Flux: $FLUX"
 echo "  Max Iterations: $MAXITER"
 echo "  Mode: $MODE"
+echo "  Initial Condition: $IC_FILE"
 echo ""
+
+# Check if IC file exists, if not run steady first
+if [ ! -f "$IC_FILE" ]; then
+    echo "Initial condition file not found. Running steady solver first..."
+    ./euler_solver $MESH $ORDER 0.5 $FLUX 10000 steady
+    echo ""
+fi
 
 # Step 1: Run the simulation
 echo "Step 1: Running unsteady simulation..."
-echo "Command: ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE"
+echo "Command: ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE"
 echo ""
 
-./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE
+./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE
 
 if [ $? -ne 0 ]; then
     echo "Error: Simulation failed!"

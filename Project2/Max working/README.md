@@ -1,26 +1,24 @@
 # Unsteady Euler Solver - Quick Guide
 
-## Implementation Complete ✅
-
-- ✅ Unsteady mode with time-accurate global time stepping
-- ✅ Unsteady wake boundary condition at inflow  
-- ✅ Automatic snapshot saving to `data/` directory
-- ✅ Single simplified postprocessing script
-
-## Running Unsteady Simulations
-
 ```bash
-./euler_solver <mesh> <order> <CFL> <flux> <maxiter> unsteady
+./euler_solver <mesh> <order> <CFL> <flux> <maxiter> unsteady [ic_file]
 ```
 
-**Example:**
 ```bash
-./euler_solver grids/coarse.gri 1 0.1 hlle 10000 unsteady
+# Steady solver automatically saves to data_steady/steady_<gridname>_results.bin
+./euler_solver grids/2k.gri 1 0.5 hlle 10000 steady
+
+# Unsteady solver can then use this as IC
+./euler_solver grids/2k.gri 1 0.1 hlle 5000 unsteady data_steady/steady_2k_results.bin
 ```
 
 **Output:**
-- Snapshots saved to `data/results_<time>_<snapshot>.bin` (every 100 iterations)
-- Final files: `results.bin`, `residual.bin`, `cell_res.bin`
+- **Steady mode**: Results saved to `data_steady/steady_<gridname>_*.bin`
+- **Unsteady mode**: 
+  - Snapshots saved to `data/results_<time>_<snapshot>.bin` (every 100 iterations)
+  - Final files: `results.bin`, `residual.bin`, `cell_res.bin` (in current directory)
+
+**Note:** Using a converged steady-state solution as the initial condition eliminates the initial transient and allows the unsteady wake effects to be observed immediately.
 
 ## Postprocessing
 

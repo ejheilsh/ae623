@@ -29,6 +29,7 @@ public:
   FiniteVolumeSolver(const std::string &meshfile);
 
   void setInitialCondition();
+  void loadInitialCondition(const std::string &filename);
   void solveSteady(int itercap = 1000000, bool secondOrder = false,
                    bool limited = false);
   void solveUnsteady(int itercap = 1000000, bool secondOrder = false,

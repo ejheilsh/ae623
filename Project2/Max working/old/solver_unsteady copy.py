@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from readgri import readgri 
 from pathlib import Path
 from viz import plotmesh
-from fluxes import (
+from old.fluxes import (
     fluxHLLE,
     fluxRoe,
     inviscid_wall,
