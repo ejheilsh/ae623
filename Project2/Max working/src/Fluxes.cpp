@@ -86,8 +86,31 @@ FluxResult fluxHLLE(const Vec4 &UL, const Vec4 &UR, const Vec2 &n,
 }
 
 Vec4 subsonicInflow(const Vec4 &Uplus, const Vec2 &n, double rho0, double a0,
-                    double alpha, double gamma) {
-  double pt = (a0 * a0 * rho0) / gamma;
+                    double alpha, double gamma, double y_pos, double time,
+                    bool use_unsteady) {
+  double rho_t = rho0;  // Default to steady state density
+  
+  // Apply unsteady wake correction if requested
+  if (use_unsteady) {
+    // Unsteady wake parameters
+    const double f_wake = 0.1;      // Wake depth fraction
+    const double delta = 0.1;       // Wake width parameter
+    const double delta_y = 0.018;   // 18mm in meters
+    
+    // Rotor speed equals stagnation speed of sound at inflow
+    double V_rotor = a0;
+    
+    // Calculate eta(t) for unsteady wake
+    double y_stator = y_pos + V_rotor * time;
+    double eta = y_stator / delta_y - std::floor(y_stator / delta_y) - 0.5;
+    
+    // Modify stagnation density with unsteady wake function
+    rho_t = rho0 * (1.0 - f_wake * std::exp(-0.5 * (eta / delta) * (eta / delta)));
+  }
+  
+  // Stagnation pressure (modified by density change if unsteady)
+  double pt = (a0 * a0 * rho_t) / gamma;
+  
   State splus(Uplus, gamma);
   double unplus = splus.vvec().dot(n);
   double cplus = splus.c();
@@ -97,9 +120,9 @@ Vec4 subsonicInflow(const Vec4 &Uplus, const Vec2 &n, double rho0, double a0,
   double dn = nin.dot(n);
 
   double A =
-      ((gamma * pt * dn * dn) / rho0) - 0.5 * (gamma - 1.0) * Jplus * Jplus;
-  double B = (4.0 * gamma * pt * dn) / (rho0 * (gamma - 1.0));
-  double C = (4.0 * gamma * pt) / (rho0 * (gamma - 1.0) * (gamma - 1.0)) -
+      ((gamma * pt * dn * dn) / rho_t) - 0.5 * (gamma - 1.0) * Jplus * Jplus;
+  double B = (4.0 * gamma * pt * dn) / (rho_t * (gamma - 1.0));
+  double C = (4.0 * gamma * pt) / (rho_t * (gamma - 1.0) * (gamma - 1.0)) -
              Jplus * Jplus;
 
   double discr = B * B - 4.0 * A * C;
@@ -122,7 +145,7 @@ Vec4 subsonicInflow(const Vec4 &Uplus, const Vec2 &n, double rho0, double a0,
 
   double Tr = 1.0 / (1.0 + 0.5 * (gamma - 1.0) * Mb * Mb);
   double pb = pt * std::pow(Tr, gamma / (gamma - 1.0));
-  double rhob = pb / (Tr * pt / rho0);
+  double rhob = pb / (Tr * pt / rho_t);
   double cb = std::sqrt(gamma * pb / rhob);
   Vec2 vvecb = nin * (Mb * cb);
   double rhoEb = pb / (gamma - 1.0) + 0.5 * rhob * vvecb.normSq();

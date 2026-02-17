@@ -75,7 +75,8 @@ def plot_results(meshfile, resultsfile, residualfile, cellresfile):
     qsq = vel_u**2 + vel_v**2
     p = (gamma - 1) * (rhoe - 0.5 * rho * qsq)
     mach = np.sqrt(qsq) / np.sqrt(gamma * p / rho)
-    
+    entropy = np.log(p / rho**gamma)
+
     # Create triangles for plotting
     verts = v[e]
     

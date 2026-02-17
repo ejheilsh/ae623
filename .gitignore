@@ -210,3 +210,8 @@ __marimo__/
 # ADDED THESE (ERIC)
 *.png
 *.svg
+
+
+# Custom
+**/*.bin
+**/euler_solver

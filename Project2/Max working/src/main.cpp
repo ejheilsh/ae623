@@ -5,7 +5,7 @@
 int main(int argc, char **argv) {
   std::cout << std::unitbuf; // Enable unbuffered output for immediate feedback
   if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <meshfile> [order] [CFL] [fluxname]"
+    std::cerr << "Usage: " << argv[0] << " <meshfile> [order] [CFL] [fluxname] [itercap] [steady / unsteady]"
               << std::endl;
     return 1;
   }
@@ -15,6 +15,7 @@ int main(int argc, char **argv) {
   double cfl = 1.0;
   std::string fluxname = "roe";
   int itercap = 1e6;
+  bool unsteady = false;
 
   if (argc >= 3) {
     secondOrder = (std::string(argv[2]) == "2");
@@ -28,6 +29,9 @@ int main(int argc, char **argv) {
   if (argc >= 6) {
     itercap = std::stoi(argv[5]);
   }
+  if (argc >= 7) {
+    unsteady = (std::string(argv[6]) == "unsteady");
+  }
 
   try {
     FiniteVolumeSolver solver(meshfile);
@@ -37,9 +41,14 @@ int main(int argc, char **argv) {
     std::cerr << "Starting solver for " << meshfile
               << " (Order: " << (secondOrder ? "2nd" : "1st")
               << ", CFL: " << cfl << ", Flux: " << fluxname
-              << ", IterCap: " << itercap << ")" << std::endl;
+              << ", IterCap: " << itercap 
+              << ", Mode: " << (unsteady ? "Unsteady" : "Steady") << ")" << std::endl;
 
-    solver.solveSteady(itercap, secondOrder, false);
+    if (unsteady) {
+      solver.solveUnsteady(itercap, secondOrder, false);
+    } else {
+      solver.solveSteady(itercap, secondOrder, false);
+    }
 
     // Save results to a simple binary or text format for Python to read
     std::ofstream out("results.bin", std::ios::binary);

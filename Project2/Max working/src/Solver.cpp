@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <fstream>
 
 FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
   if (!mesh.readGRI(meshfile)) {
@@ -27,7 +28,8 @@ void FiniteVolumeSolver::setInitialCondition() {
 }
 
 FiniteVolumeSolver::ResidualResult
-FiniteVolumeSolver::calcResidual(const std::vector<Vec4> &Un) {
+FiniteVolumeSolver::calcResidual(const std::vector<Vec4> &Un, double time,
+                                 bool use_unsteady_wake) {
   int Ne = mesh.E.size();
   ResidualResult res;
   res.R.assign(Ne, {0, 0, 0, 0});
@@ -58,7 +60,11 @@ FiniteVolumeSolver::calcResidual(const std::vector<Vec4> &Un) {
 
     FluxResult fr;
     if (bName == "inflow") {
-      Vec4 Ub = subsonicInflow(Un[eL], n, rho0, a0, alpha, gamma);
+      // Calculate y-position at boundary edge (midpoint)
+      Vec2 edge_midpoint = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
+      double y_pos = edge_midpoint.y;
+      
+      Vec4 Ub = subsonicInflow(Un[eL], n, rho0, a0, alpha, gamma, y_pos, time, use_unsteady_wake);
       if (fluxname == "hlle")
         fr = fluxHLLE(Un[eL], Ub, n, gamma);
       else
@@ -87,7 +93,7 @@ void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
   for (int niter = 0; niter < itercap; ++niter) {
     // Calculate residual just for the norm and sdl (for dt)
     ResidualResult res =
-        secondOrder ? calcResidualSecondOrder(U, limited) : calcResidual(U);
+        secondOrder ? calcResidualSecondOrder(U, limited, 0.0, false) : calcResidual(U, 0.0, false);
 
     double Rnorm = 0;
     for (const auto &r : res.R) {
@@ -121,7 +127,7 @@ void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
     }
 
     // Use SSP-RK2 for time integration
-    U = sspRK2(U, secondOrder, limited);
+    U = sspRK2(U, secondOrder, limited, 0.0, false);
 
     if (!isPhysical(U)) {
       std::cerr << "Non-physical state detected at iteration " << niter
@@ -132,10 +138,11 @@ void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
 }
 
 std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
-                                             bool secondOrder, bool limited) {
+                                             bool secondOrder, bool limited, double time,
+                                             bool use_unsteady_wake) {
   int Ne = Un.size();
   ResidualResult res1 =
-      secondOrder ? calcResidualSecondOrder(Un, limited) : calcResidual(Un);
+      secondOrder ? calcResidualSecondOrder(Un, limited, time, use_unsteady_wake) : calcResidual(Un, time, use_unsteady_wake);
   std::vector<Vec4> U1(Ne);
   double cfl_eff = CFL;
   if (secondOrder && limited)
@@ -149,7 +156,7 @@ std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
   }
 
   ResidualResult res2 =
-      secondOrder ? calcResidualSecondOrder(U1, limited) : calcResidual(U1);
+      secondOrder ? calcResidualSecondOrder(U1, limited, time, use_unsteady_wake) : calcResidual(U1, time, use_unsteady_wake);
   std::vector<Vec4> Unp1(Ne);
   for (int i = 0; i < Ne; ++i) {
     double sdl = std::max(res1.sdl[i], 1e-12);
@@ -211,7 +218,8 @@ bool FiniteVolumeSolver::isPhysical(const std::vector<Vec4> &Un) {
 
 FiniteVolumeSolver::ResidualResult
 FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
-                                            bool limited) {
+                                            bool limited, double time,
+                                            bool use_unsteady_wake) {
   // Basic implementation for now, mirroring the calcResidual structure but with
   // gradients This part requires more complex logic for Green-Gauss gradients
   // and limiting. Given the task's scope, I'll provide a simplified version or
@@ -236,9 +244,11 @@ FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
     int eL = mesh.BE[i].elemL;
     Vec4 Ub;
     std::string bName = mesh.Bname[mesh.BE[i].bIndex];
-    if (bName == "inflow")
-      Ub = subsonicInflow(Un[eL], mesh.bnormals[i], rho0, a0, alpha, gamma);
-    else if (bName == "outflow")
+    if (bName == "inflow") {
+      Vec2 edge_midpoint = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
+      double y_pos = edge_midpoint.y;
+      Ub = subsonicInflow(Un[eL], mesh.bnormals[i], rho0, a0, alpha, gamma, y_pos, time);
+    } else if (bName == "outflow")
       Ub = subsonicOutflow(Un[eL], mesh.bnormals[i], pout, gamma);
     else if (bName == "wall")
       Ub = inviscidWallState(Un[eL], mesh.bnormals[i], gamma);
@@ -312,7 +322,8 @@ FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
     double len = mesh.blengths[i];
     FluxResult fr;
     if (bName == "inflow") {
-      Vec4 Ub = subsonicInflow(ULf, n, rho0, a0, alpha, gamma);
+      double y_pos = xf.y;
+      Vec4 Ub = subsonicInflow(ULf, n, rho0, a0, alpha, gamma, y_pos, time, use_unsteady_wake);
       if (fluxname == "hlle")
         fr = fluxHLLE(ULf, Ub, n, gamma);
       else
@@ -330,4 +341,117 @@ FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
     res.sdl[eL] += fr.smax * len;
   }
   return res;
+}
+
+void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
+                                       bool limited) {
+  int Ne = mesh.E.size();
+  std::cout << "Beginning unsteady solver loop for " << itercap << " iterations..."
+            << std::endl;
+  
+  // For unsteady, use a global time step (smallest over all cells)
+  current_time = 0.0;
+  std::vector<Vec4> U_prev = U;  // Store previous solution for monitoring change
+  
+  // Snapshot saving parameters
+  int snapshot_interval = 100;  // Save every N iterations
+  int snapshot_count = 0;
+  
+  // Create data directory if it doesn't exist
+  system("mkdir -p data");
+  
+  for (int niter = 0; niter < itercap; ++niter) {
+    // Calculate residual (spatial flux divergence = time derivative)
+    ResidualResult res =
+        secondOrder ? calcResidualSecondOrder(U, limited, current_time, true) : calcResidual(U, current_time, true);
+
+    // Calculate global time step (smallest over all cells for time-accurate unsteady)
+    double dt_global = 1e10;
+    for (int i = 0; i < Ne; ++i) {
+      double sdl = std::max(res.sdl[i], 1e-12);
+      double dt_local = CFL * 2.0 * mesh.areas[i] / sdl;
+      dt_global = std::min(dt_global, dt_local);
+    }
+    
+    // Explicit Euler update with global time step
+    for (int i = 0; i < Ne; ++i) {
+      U[i] = U[i] - (res.R[i] / mesh.areas[i]) * dt_global;
+    }
+    
+    // Advance physical time
+    current_time += dt_global;
+    
+    // Calculate residual norm (time derivative magnitude)
+    double Rnorm = 0;
+    for (const auto &r : res.R) {
+      Rnorm += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+    }
+    res_history.push_back(Rnorm);
+    
+    // Calculate solution change from previous time step
+    double dU_norm = 0;
+    for (int i = 0; i < Ne; ++i) {
+      Vec4 dU = U[i] - U_prev[i];
+      dU_norm += std::abs(dU[0]) + std::abs(dU[1]) + std::abs(dU[2]) + std::abs(dU[3]);
+    }
+
+    // Save periodic snapshots
+    if (niter % snapshot_interval == 0) {
+      char filename[256];
+      snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin", 
+               current_time, snapshot_count);
+      saveSnapshot(filename);
+      std::cout << "Saved snapshot: " << filename << std::endl;
+      snapshot_count++;
+    }
+
+    if (niter % 1 == 0) {
+      double minRho = 1e10, minP = 1e10;
+      cell_residuals.resize(Ne);
+      for (int i = 0; i < Ne; ++i) {
+        const auto &u = U[i];
+        const auto &r = res.R[i];
+        cell_residuals[i] =
+            std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+
+        State s(u, gamma);
+        minRho = std::min(minRho, s.rho());
+        minP = std::min(minP, s.p());
+      }
+      std::cout << "Iter: " << std::setw(6) << niter
+                << " | ||dU/dt||: " << std::scientific << std::setprecision(6)
+                << Rnorm << " | ||ΔU||: " << dU_norm 
+                << " | dt: " << dt_global
+                << " | time: " << current_time
+                << " | Min Rho: " << minRho << " | Min P: " << minP
+                << std::endl;
+    }
+
+    // Check for convergence (solution stopped changing)
+    if (dU_norm < rtol) {
+      std::cout << "Reached steady state (solution stopped changing) at iteration " 
+                << niter << std::endl;
+      break;
+    }
+    
+    // Check for NaN/Inf
+    if (!isPhysical(U)) {
+      std::cerr << "Non-physical state detected at iteration " << niter
+                << std::endl;
+      break;
+    }
+    
+    // Store current solution for next iteration comparison
+    U_prev = U;
+  }
+}
+
+void FiniteVolumeSolver::saveSnapshot(const std::string &filename) {
+  std::ofstream out(filename, std::ios::binary);
+  int Ne = U.size();
+  out.write((char *)&Ne, sizeof(int));
+  for (const auto &u : U) {
+    out.write((char *)u.v, sizeof(double) * 4);
+  }
+  out.close();
 }

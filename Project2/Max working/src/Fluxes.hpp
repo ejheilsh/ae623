@@ -14,7 +14,8 @@ FluxResult fluxHLLE(const Vec4 &UL, const Vec4 &UR, const Vec2 &n,
                     double gamma);
 
 Vec4 subsonicInflow(const Vec4 &Uplus, const Vec2 &n, double rho0, double a0,
-                    double alpha, double gamma);
+                    double alpha, double gamma, double y_pos = 0.0, double time = 0.0,
+                    bool use_unsteady = true);
 Vec4 subsonicOutflow(const Vec4 &Uplus, const Vec2 &n, double pb, double gamma);
 Vec4 inviscidWallState(const Vec4 &Uplus, const Vec2 &n, double gamma);
 FluxResult inviscidWallFlux(const Vec4 &Uplus, const Vec2 &n, double gamma);
