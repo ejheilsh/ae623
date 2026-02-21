@@ -2,7 +2,7 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy.spatial import Delaunay
 from scipy.special import expit
 from scipy.sparse import lil_matrix
@@ -20,6 +20,8 @@ class mesh_class():
     domain_width: float = 17
     domain_height: float = 18
     h_bounds: tuple = (0.2, 3)
+    use_pchip_lower_surface: bool = False
+    skip_le_corner_wall_projection: bool = False
 
 
     def __post_init__(self):
@@ -66,8 +68,21 @@ class mesh_class():
         self.cs_upper_up = CubicSpline(u_sorted[:, 0], u_sorted[:, 1] + self.domain_height, extrapolate=False, bc_type="natural")
 
         # lower splines, also shifted
-        self.cs_lower = CubicSpline(l_sorted[:, 0], l_sorted[:, 1], extrapolate=False, bc_type="natural")
-        self.cs_lower_down = CubicSpline(l_sorted[:, 0], l_sorted[:, 1] - self.domain_height, extrapolate=False, bc_type="natural")
+        self.cs_lower_cubic = CubicSpline(l_sorted[:, 0], l_sorted[:, 1], extrapolate=False, bc_type="natural")
+        self.cs_lower_down_cubic = CubicSpline(
+            l_sorted[:, 0], l_sorted[:, 1] - self.domain_height, extrapolate=False, bc_type="natural"
+        )
+        self.cs_lower_pchip = PchipInterpolator(l_sorted[:, 0], l_sorted[:, 1], extrapolate=False)
+        self.cs_lower_down_pchip = PchipInterpolator(
+            l_sorted[:, 0], l_sorted[:, 1] - self.domain_height, extrapolate=False
+        )
+
+        if self.use_pchip_lower_surface:
+            self.cs_lower = self.cs_lower_pchip
+            self.cs_lower_down = self.cs_lower_down_pchip
+        else:
+            self.cs_lower = self.cs_lower_cubic
+            self.cs_lower_down = self.cs_lower_down_cubic
 
         # spline bounds for minimization
         xs = np.hstack([u[:, 0], l[:, 0]])
@@ -80,7 +95,7 @@ class mesh_class():
         height = self.domain_height
         u = self.surface_upper
         l = self.surface_lower
-        n = 10 # arbitrary, controls fineness of initial unrefined mesh
+        n = 12 # arbitrary, controls fineness of initial unrefined mesh, 10 looks good for P2
         # n = 5 # arbitrary, controls fineness of initial unrefined mesh
 
         # array of points to the left of the LE
@@ -137,7 +152,7 @@ class mesh_class():
         self.y_min = self.y_TE
         def f(x):
                 return -self.cs_upper(x)
-        res = minimize_scalar(f, bounds=(self.x_LE, self.x_TE), method="bounded")
+        res = minimize_scalar(f, bounds=(self.x_LE, self.x_TE), method="bounded", options={"xatol": 1e-6, "maxiter": 10000})
         self.y_max = self.cs_lower(res.x)
 
         self.pts = pts
@@ -679,7 +694,7 @@ class mesh_class():
 
         return np.sqrt(min(d_u, d_l, d_u_u, d_l_d))
 
-    def project_point_to_blade(self, point, plot=False):
+    def project_point_to_blade(self, point, plot=False, return_label=False):
         x, y = point[0], point[1]
 
         def project_to_spline(xc, yc, spline):
@@ -722,6 +737,8 @@ class mesh_class():
             plt.tight_layout()
             # plt.show()
 
+        if return_label:
+            return best[1], best[2]
         return best[1]
 
     def sizing_function(self, point):
@@ -967,7 +984,172 @@ class mesh_class():
         print(f"n_cells after refinement {len(self.E2N)}")
         self.flag_cells_for_refinement()
 
-    def refinement_global(self):
+    def plot_global_wall_split_debug(self, old_wall_nodes, wall_split_records, fname="global_wall_splits", show=True):
+        if old_wall_nodes is None or len(old_wall_nodes) == 0:
+            print("No old wall nodes available for debug plot.")
+            return
+        if wall_split_records is None or len(wall_split_records) == 0:
+            print("No wall split records available for debug plot.")
+            return
+
+        new_wall_nodes = np.array([rec["mid_new"] for rec in wall_split_records], dtype=float)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.despine()
+        ax.scatter(
+            old_wall_nodes[:, 0],
+            old_wall_nodes[:, 1],
+            s=14,
+            c="tab:blue",
+            alpha=0.9,
+            label="Old wall-boundary nodes",
+            zorder=2,
+        )
+        ax.scatter(
+            new_wall_nodes[:, 0],
+            new_wall_nodes[:, 1],
+            s=20,
+            c="tab:orange",
+            alpha=0.9,
+            label="New nodes from wall edge splits",
+            zorder=3,
+        )
+        ax.plot(self.surface_upper[:, 0], self.surface_upper[:, 1], "k-", lw=1.0, zorder=1)
+        ax.plot(self.surface_lower[:, 0], self.surface_lower[:, 1], "k-", lw=1.0, zorder=1)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title("Global Refinement Wall Splits: Old vs New Wall Nodes")
+        ax.legend(loc="best")
+        ax.grid(True, alpha=0.2)
+        out_path = dir_base.joinpath(f"output/{fname}.png")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved {out_path}")
+        if show:
+            plt.show()
+        plt.close(fig)
+
+    def plot_wall_split_projection_details(self, wall_split_records, fname="wall_split_projection_details", show=True):
+        if wall_split_records is None or len(wall_split_records) == 0:
+            print("No wall split records available for projection-detail plot.")
+            return
+
+        n = len(wall_split_records)
+        ncols = min(3, n)
+        nrows = int(np.ceil(n / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.5 * nrows))
+        if isinstance(axes, np.ndarray):
+            axes = axes.ravel()
+        else:
+            axes = np.array([axes])
+
+        x_min, x_max = self.spline_bounds
+        x_plot = np.linspace(x_min, x_max, 4000)
+        y_upper = self.cs_upper(x_plot)
+        y_lower = self.cs_lower(x_plot)
+        y_upper_up = self.cs_upper_up(x_plot)
+        y_lower_down = self.cs_lower_down(x_plot)
+
+        for i, rec in enumerate(wall_split_records):
+            ax = axes[i]
+            p0 = rec["p0"]
+            p1 = rec["p1"]
+            mid_raw = rec["mid_raw"]
+            mid_new = rec["mid_new"]
+            n1, n2 = rec["n1"], rec["n2"]
+            idx = rec["idx"]
+            shift = rec["proj_shift"]
+            proj_label = rec.get("proj_label", "unknown")
+
+            ax.plot(x_plot, y_upper, "k-", lw=1.0, label="cs_upper")
+            ax.plot(x_plot, y_lower, color="tab:green", linestyle="-", lw=1.6, label="cs_lower")
+            ax.plot(x_plot, y_upper_up, color="0.55", lw=0.8, label="cs_upper_up")
+            ax.plot(x_plot, y_lower_down, color="0.55", lw=0.8, label="cs_lower_down")
+
+            ax.plot([p0[0], p1[0]], [p0[1], p1[1]], color="tab:blue", lw=1.8, label="wall edge")
+            ax.scatter([p0[0], p1[0]], [p0[1], p1[1]], c="tab:blue", s=35, zorder=4, label="edge endpoints")
+            ax.scatter([mid_raw[0]], [mid_raw[1]], c="tab:orange", s=50, zorder=5, label="mid_raw")
+            ax.scatter([mid_new[0]], [mid_new[1]], c="tab:red", s=55, marker="x", zorder=6, label="mid_new (projected)")
+
+            x_all = np.array([p0[0], p1[0], mid_raw[0], mid_new[0]])
+            y_all = np.array([p0[1], p1[1], mid_raw[1], mid_new[1]])
+            padx = max(0.15, 0.25 * (np.max(x_all) - np.min(x_all) + 1e-12))
+            pady = max(0.15, 0.35 * (np.max(y_all) - np.min(y_all) + 1e-12))
+            ax.set_xlim(np.min(x_all) - padx, np.max(x_all) + padx)
+            ax.set_ylim(np.min(y_all) - pady, np.max(y_all) + pady)
+
+            ax.set_aspect("equal", adjustable="box")
+            ax.grid(True, alpha=0.2)
+            ax.set_title(
+                f"edge ({n1}, {n2}) -> node {idx}\n"
+                f"proj={proj_label}, |dproj|={shift:.3e}"
+            )
+
+        for j in range(n, len(axes)):
+            axes[j].axis("off")
+
+        handles, labels = axes[0].get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        fig.legend(by_label.values(), by_label.keys(), loc="upper center", ncol=3)
+        fig.tight_layout(rect=(0, 0, 1, 0.93))
+
+        out_path = dir_base.joinpath(f"output/{fname}.png")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved {out_path}")
+        if show:
+            plt.show()
+        plt.close(fig)
+
+    def plot_splines_domain_high_res(self, fname="splines_domain_high_res", show=True):
+        x_min, x_max = self.spline_bounds
+        x_plot = np.linspace(x_min, x_max, 6000)
+        y_upper = self.cs_upper(x_plot)
+        y_lower = self.cs_lower(x_plot)
+        y_lower_pchip = self.cs_lower_pchip(x_plot)
+        y_upper_up = self.cs_upper_up(x_plot)
+        y_lower_down = self.cs_lower_down(x_plot)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        sns.despine()
+        ax.plot(x_plot, y_upper, "k-", lw=1.2, label="cs_upper")
+        ax.plot(x_plot, y_lower, color="tab:green", linestyle="-", lw=1.8, label="cs_lower")
+        ax.plot(x_plot, y_lower_pchip, color="tab:purple", linestyle="--", lw=1.4, label="cs_lower_pchip")
+        ax.plot(x_plot, y_upper_up, color="0.55", lw=1.0, label="cs_upper_up")
+        ax.plot(x_plot, y_lower_down, color="0.55", lw=1.0, label="cs_lower_down")
+        ax.scatter(
+            self.surface_upper[:, 0],
+            self.surface_upper[:, 1],
+            s=10,
+            c="tab:blue",
+            alpha=0.9,
+            label="upper points",
+            zorder=4,
+        )
+        ax.scatter(
+            self.surface_lower[:, 0],
+            self.surface_lower[:, 1],
+            s=10,
+            c="tab:orange",
+            alpha=0.9,
+            label="lower points",
+            zorder=4,
+        )
+
+        ax.set_xlim(self.x_left, self.x_right)
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.2)
+        ax.set_title("High-Resolution Blade Splines in Domain")
+        ax.legend(loc="best")
+
+        out_path = dir_base.joinpath(f"output/{fname}.png")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path, dpi=220)
+        print(f"Saved {out_path}")
+        if show:
+            plt.show()
+        plt.close(fig)
+
+    def refinement_global(self, debug_wall=False, debug_plot=False, debug_plot_name=None):
         V = self.V
         E = self.E2N
 
@@ -978,6 +1160,15 @@ class mesh_class():
                 key = (n1, n2) if n1 < n2 else (n2, n1)
                 boundary_type[key] = b
 
+        old_wall_nodes = None
+        if debug_plot and getattr(self, "BE", None) is not None and getattr(self, "B2E", None) is not None:
+            wall_mask_old = self.B2E[:, 2] == "wall"
+            old_wall_edges = self.BE[wall_mask_old, :2]
+            if old_wall_edges.size > 0:
+                old_wall_node_ids = np.unique(old_wall_edges)
+                old_wall_nodes = V[old_wall_node_ids - 1]
+
+        wall_split_records = []
         edge_mid = {}
         V_list = V.tolist()
 
@@ -987,12 +1178,46 @@ class mesh_class():
                 return edge_mid[key]
             p0 = V[n1 - 1]
             p1 = V[n2 - 1]
-            mid = 0.5 * (p0 + p1)
-            if boundary_type.get(key) == "wall":
-                mid = self.project_point_to_blade(mid)
+            mid_raw = 0.5 * (p0 + p1)
+            mid = mid_raw.copy()
+            btype = boundary_type.get(key)
+            proj_label = None
+            if btype == "wall":
+                le_corner = np.array([0.0, 18.0], dtype=float)
+                tol_corner = 1e-12
+                has_le_corner = (
+                    np.linalg.norm(p0 - le_corner) < tol_corner
+                    or np.linalg.norm(p1 - le_corner) < tol_corner
+                )
+                if self.skip_le_corner_wall_projection and has_le_corner:
+                    mid = mid_raw
+                    proj_label = "skipped_le_corner"
+                else:
+                    if debug_wall or debug_plot:
+                        mid, proj_label = self.project_point_to_blade(mid, return_label=True)
+                    else:
+                        mid = self.project_point_to_blade(mid)
             V_list.append([float(mid[0]), float(mid[1])])
             idx = len(V_list)  # 1-based index
             edge_mid[key] = idx
+            if debug_wall and btype == "wall":
+                proj_shift = float(np.linalg.norm(mid - mid_raw))
+                d_to_n1 = float(np.linalg.norm(mid - p0))
+                d_to_n2 = float(np.linalg.norm(mid - p1))
+                wall_split_records.append({
+                    "edge": key,
+                    "n1": int(n1),
+                    "n2": int(n2),
+                    "p0": np.array(p0, dtype=float),
+                    "p1": np.array(p1, dtype=float),
+                    "mid_raw": np.array(mid_raw, dtype=float),
+                    "mid_new": np.array(mid, dtype=float),
+                    "idx": int(idx),
+                    "proj_shift": proj_shift,
+                    "d_to_n1": d_to_n1,
+                    "d_to_n2": d_to_n2,
+                    "proj_label": proj_label,
+                })
             return idx
 
         new_E = []
@@ -1013,6 +1238,57 @@ class mesh_class():
         self.correct_edgehash_for_periodic_boundaries(plot_mode="revised")
         # self.smooth_cells(iterations=5, omega=0.5)
         self.populate_geom_matrices()
+        if debug_wall:
+            print(f"\nWall edges split during global refinement: {len(wall_split_records)}")
+            roi_records = []
+            for rec in wall_split_records:
+                x, y = rec["mid_new"]
+                if (abs(x) <= 0.5) and (abs(y - 18.0) <= 1.0):
+                    roi_records.append(rec)
+            print(
+                f"Wall splits in ROI (|x|<=0.5 and |y-18|<=1.0): "
+                f"{len(roi_records)}"
+            )
+            for rec in roi_records:
+                n1 = rec["n1"]
+                n2 = rec["n2"]
+                idx = rec["idx"]
+                xr, yr = rec["mid_raw"]
+                xn, yn = rec["mid_new"]
+                shift = rec["proj_shift"]
+                d1 = rec["d_to_n1"]
+                d2 = rec["d_to_n2"]
+                collapse_flag = " COLLAPSE?" if min(d1, d2) < 1e-8 else ""
+                print(
+                    f"wall edge ({n1}, {n2}) -> new node {idx}; "
+                    f"mid_raw=({xr:.12f}, {yr:.12f}); "
+                    f"mid_new=({xn:.12f}, {yn:.12f}); "
+                    f"|dproj|={shift:.6e}; "
+                    f"dist_to_endpoints=({d1:.6e}, {d2:.6e})"
+                    f"{collapse_flag}"
+                )
+        if debug_plot:
+            if debug_plot_name is None:
+                debug_plot_name = f"{self.label}_global_wall_splits"
+            self.plot_global_wall_split_debug(
+                old_wall_nodes=old_wall_nodes,
+                wall_split_records=wall_split_records,
+                fname=debug_plot_name,
+                show=True,
+            )
+            roi_records = []
+            for rec in wall_split_records:
+                x, y = rec["mid_new"]
+                if (abs(x) <= 0.5) and (abs(y - 18.0) <= 1.0):
+                    roi_records.append(rec)
+            if roi_records:
+                self.plot_wall_split_projection_details(
+                    wall_split_records=roi_records,
+                    fname=f"{debug_plot_name}_projection_details",
+                    show=True,
+                )
+            else:
+                print("No ROI wall splits available for projection-detail plot.")
         print(f"n_cells after global refinement {len(self.E2N)}")
         # self.flag_cells_for_refinement()
 
@@ -1025,7 +1301,7 @@ class mesh_class():
             es = self.I2E[self.I2E[:, ]]
 
 
-    def visual_mesh(self, fname="plot", color_by=None):
+    def visual_mesh(self, fname="plot", color_by=None, show_axes=False):
         # should the triplot be plotted?
         # should the cells be colored?
         # what level of refinement should it be?
@@ -1110,7 +1386,10 @@ class mesh_class():
         ax.set_xlim(1.01 * self.x_left, 1.01 * self.x_right)
         ax.set_ylim(1.01 * self.y_min, 1.01 * self.y_max)
         ax.legend(frameon=False, loc="lower left", fontsize=30)
-        ax.axis("off")
+        if show_axes:
+            ax.axis("on")
+        else:
+            ax.axis("off")
         ax.set_aspect("equal", adjustable="box")
         # ax.set_aspect("equal")
         # leave default layout to avoid awkward padding
@@ -1142,7 +1421,8 @@ def main():
     t_start = time.perf_counter()
 
     # initialize
-    m = mesh_class(label="coarse", h_bounds=(0.67, 4.20))
+    m = mesh_class(label="coarse", h_bounds=(0.58, 4),     use_pchip_lower_surface=True)
+    m.plot_splines_domain_high_res(fname="splines_domain_high_res", show=True)
     print(f"\nThere are {len(m.E2N)} cells in the base mesh")
 
     m.write_gri()
@@ -1153,9 +1433,9 @@ def main():
     # # m.visual_mesh(fname="mesh0")
 
     # refine locally
-    for _ in range(10): # 7 for report
+    for _ in range(10): # 7 for report, 10 is plenty
         m.refinement_local()
-        m.plot_by_distance(vmin=0, vmax=2)
+        # m.plot_by_distance(vmin=0, vmax=2)
     print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
     t_end = time.perf_counter()
     print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
@@ -1170,13 +1450,17 @@ def main():
 
     # refine globally afterwards
     for i in range(3): # 3
-        m.refinement_global()
+        m.refinement_global(
+            debug_wall=True,
+            debug_plot=True,
+            debug_plot_name=f"{m.label}_global_wall_splits_iter{i+1}",
+        )
         # m.refinement_local() # smoothing here!!
         # m.plot_by_distance()
         t_end = time.perf_counter()
         print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
         m.write_gri()
-        m.visual_mesh(fname=m.label)
+        m.visual_mesh(fname=m.label, show_axes=True)
         if i == 0:
             m.label = "32k"
         if i == 1:

@@ -60,9 +60,11 @@ int main(int argc, char **argv) {
               << ")" << std::endl;
 
     if (unsteady) {
-      solver.solveUnsteady(itercap, secondOrder, false, t_end);
+      // limited was false...
+      solver.solveUnsteady(itercap, secondOrder, true, t_end);
     } else {
-      solver.solveSteady(itercap, secondOrder, false);
+      // limited was false...
+      solver.solveSteady(itercap, secondOrder, true);
     }
 
     // Extract grid name from mesh file path

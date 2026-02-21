@@ -12,13 +12,13 @@ echo "  3. Compute force coefficient histories"
 echo ""
 
 # Configuration
-MESH="grids/2k.gri"
+MESH="grids/8k.gri"
 ORDER=2
-CFL=0.1
+CFL=0.5
 FLUX="hlle"
-MAXITER=100000000
+MAXITER=1000000
 MODE="unsteady"
-T_END=350
+T_END=1000000
 
 # Extract grid name for IC file
 GRID_NAME=$(basename $MESH .gri)
