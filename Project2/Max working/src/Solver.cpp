@@ -1,8 +1,41 @@
 #include "Solver.hpp"
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <fstream>
+#include <limits>
+#include <unordered_map>
+
+namespace {
+uint64_t spatialKey(int ix, int iy) {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
+         static_cast<uint32_t>(iy);
+}
+
+std::vector<Vec4> readStateBinary(const std::string &filename) {
+  std::ifstream in(filename, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("Could not open state file: " + filename);
+  }
+
+  int ne_file = 0;
+  in.read(reinterpret_cast<char *>(&ne_file), sizeof(int));
+  if (!in || ne_file <= 0) {
+    throw std::runtime_error("Invalid state header in: " + filename);
+  }
+
+  std::vector<Vec4> data(ne_file);
+  for (int i = 0; i < ne_file; ++i) {
+    in.read(reinterpret_cast<char *>(data[i].v), sizeof(double) * 4);
+    if (!in) {
+      throw std::runtime_error("Truncated state data in: " + filename);
+    }
+  }
+  return data;
+}
+} // namespace
 
 FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
   if (!mesh.readGRI(meshfile)) {
@@ -57,6 +90,128 @@ void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
   U0 = U;
   
   std::cout << "Successfully loaded initial condition from " << filename << std::endl;
+}
+
+void FiniteVolumeSolver::loadMappedInitialCondition(
+    const std::string &coarse_meshfile, const std::string &coarse_statefile) {
+  Mesh coarse_mesh;
+  if (!coarse_mesh.readGRI(coarse_meshfile)) {
+    throw std::runtime_error("Failed to read coarse mesh file: " + coarse_meshfile);
+  }
+
+  std::vector<Vec4> coarse_u = readStateBinary(coarse_statefile);
+  if (static_cast<int>(coarse_u.size()) != static_cast<int>(coarse_mesh.E.size())) {
+    throw std::runtime_error("Coarse state size mismatch: file has " +
+                             std::to_string(coarse_u.size()) + " cells, mesh has " +
+                             std::to_string(coarse_mesh.E.size()));
+  }
+
+  const auto &coarse_centroids = coarse_mesh.centroids;
+  if (coarse_centroids.empty()) {
+    throw std::runtime_error("Coarse mesh has zero centroids.");
+  }
+
+  double xmin = coarse_centroids[0].x, xmax = coarse_centroids[0].x;
+  double ymin = coarse_centroids[0].y, ymax = coarse_centroids[0].y;
+  for (const auto &c : coarse_centroids) {
+    xmin = std::min(xmin, c.x);
+    xmax = std::max(xmax, c.x);
+    ymin = std::min(ymin, c.y);
+    ymax = std::max(ymax, c.y);
+  }
+
+  int n_coarse = static_cast<int>(coarse_centroids.size());
+  int nx = std::max(8, static_cast<int>(std::sqrt(static_cast<double>(n_coarse))));
+  int ny = nx;
+  double hx = (xmax - xmin) / static_cast<double>(nx);
+  double hy = (ymax - ymin) / static_cast<double>(ny);
+  if (hx <= 0.0)
+    hx = 1.0;
+  if (hy <= 0.0)
+    hy = 1.0;
+
+  auto clampIndex = [](int i, int n) { return std::max(0, std::min(n - 1, i)); };
+  auto binCoords = [&](const Vec2 &p) {
+    int ix = static_cast<int>(std::floor((p.x - xmin) / hx));
+    int iy = static_cast<int>(std::floor((p.y - ymin) / hy));
+    ix = clampIndex(ix, nx);
+    iy = clampIndex(iy, ny);
+    return std::pair<int, int>(ix, iy);
+  };
+
+  std::unordered_map<uint64_t, std::vector<int>> bins;
+  bins.reserve(static_cast<size_t>(n_coarse) * 2);
+  for (int i = 0; i < n_coarse; ++i) {
+    auto [ix, iy] = binCoords(coarse_centroids[i]);
+    bins[spatialKey(ix, iy)].push_back(i);
+  }
+
+  int n_fine = static_cast<int>(mesh.E.size());
+  U.resize(n_fine);
+  int hash_fallback_count = 0;
+  int physical_fallback_count = 0;
+  const int max_radius = std::max(nx, ny);
+
+  for (int i = 0; i < n_fine; ++i) {
+    const Vec2 &cf = mesh.centroids[i];
+    auto [ix0, iy0] = binCoords(cf);
+    int best = -1;
+    double best_d2 = std::numeric_limits<double>::max();
+
+    for (int r = 0; r <= max_radius; ++r) {
+      bool found_any = false;
+      int x0 = std::max(0, ix0 - r);
+      int x1 = std::min(nx - 1, ix0 + r);
+      int y0 = std::max(0, iy0 - r);
+      int y1 = std::min(ny - 1, iy0 + r);
+      for (int bx = x0; bx <= x1; ++bx) {
+        for (int by = y0; by <= y1; ++by) {
+          auto it = bins.find(spatialKey(bx, by));
+          if (it == bins.end())
+            continue;
+          found_any = true;
+          for (int j : it->second) {
+            Vec2 d = coarse_centroids[j] - cf;
+            double d2 = d.normSq();
+            if (d2 < best_d2) {
+              best_d2 = d2;
+              best = j;
+            }
+          }
+        }
+      }
+      if (found_any)
+        break;
+    }
+
+    if (best < 0) {
+      hash_fallback_count++;
+      for (int j = 0; j < n_coarse; ++j) {
+        Vec2 d = coarse_centroids[j] - cf;
+        double d2 = d.normSq();
+        if (d2 < best_d2) {
+          best_d2 = d2;
+          best = j;
+        }
+      }
+    }
+
+    Vec4 mapped = coarse_u[best];
+    State s(mapped, gamma);
+    if (!std::isfinite(s.rho()) || !std::isfinite(s.p()) || s.rho() <= 0.0 ||
+        s.p() <= 0.0) {
+      physical_fallback_count++;
+      mapped = U0[i]; // freestream fallback from constructor IC
+    }
+    U[i] = mapped;
+  }
+
+  U0 = U;
+  std::cout << "Mapped IC loaded from coarse solution: " << coarse_statefile
+            << " onto mesh with " << n_fine << " cells (coarse cells: "
+            << n_coarse << ", hash_fallbacks: " << hash_fallback_count
+            << ", physical_fallbacks: " << physical_fallback_count << ")"
+            << std::endl;
 }
 
 FiniteVolumeSolver::ResidualResult
@@ -220,14 +375,20 @@ std::vector<Vec4> FiniteVolumeSolver::applyLimiter(const std::vector<Vec4> &Un,
     }
 
     Vec4 phi = {1, 1, 1, 1};
+    double dx = std::sqrt(mesh.areas[i]);
+    double eps2 = std::pow(5.0 * dx, 3.0); // Venkatakrishnan parameter K=5.0
+
     for (int v = 0; v < 3; ++v) {
       Vec2 r = mesh.V[mesh.E[i].v[v]] - mesh.centroids[i];
       Vec4 dU = gradX[i] * r.x + gradY[i] * r.y;
       for (int k = 0; k < 4; ++k) {
-        if (dU[k] > 1e-12)
-          phi[k] = std::min(phi[k], (Umax[k] - Un[i][k]) / dU[k]);
-        else if (dU[k] < -1e-12)
-          phi[k] = std::min(phi[k], (Umin[k] - Un[i][k]) / dU[k]);
+        if (std::abs(dU[k]) > 1e-12) {
+          double D1 = (dU[k] > 0) ? (Umax[k] - Un[i][k]) : (Umin[k] - Un[i][k]);
+          double D2 = dU[k];
+          double num = D1 * D1 + eps2 + 2.0 * D1 * D2;
+          double den = D1 * D1 + 2.0 * D2 * D2 + D1 * D2 + eps2;
+          phi[k] = std::min(phi[k], num / den);
+        }
       }
     }
     for (int k = 0; k < 4; ++k) {

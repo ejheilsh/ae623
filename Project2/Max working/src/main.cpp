@@ -5,7 +5,10 @@
 int main(int argc, char **argv) {
   std::cout << std::unitbuf; // Enable unbuffered output for immediate feedback
   if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <meshfile> [order] [CFL] [fluxname] [itercap] [steady/unsteady] [ic_file]"
+    std::cerr << "Usage: " << argv[0]
+              << " <meshfile> [order] [CFL] [fluxname] [itercap] "
+              << "[steady/unsteady] [ic_file] [t_end] "
+              << "[--map-ic <coarse_meshfile> <coarse_statefile>]"
               << std::endl;
     return 1;
   }
@@ -18,27 +21,52 @@ int main(int argc, char **argv) {
   bool unsteady = false;
   std::string ic_file = "";
   double t_end = -1.0;  // negative means run until itercap
+  bool use_mapped_ic = false;
+  std::string coarse_meshfile = "";
+  std::string coarse_statefile = "";
 
-  if (argc >= 3) {
+  auto is_flag_token = [](const char *s) {
+    return std::string(s).rfind("--", 0) == 0;
+  };
+
+  if (argc >= 3 && !is_flag_token(argv[2])) {
     secondOrder = (std::string(argv[2]) == "2");
   }
-  if (argc >= 4) {
+  if (argc >= 4 && !is_flag_token(argv[3])) {
     cfl = std::stod(argv[3]);
   }
-  if (argc >= 5) {
+  if (argc >= 5 && !is_flag_token(argv[4])) {
     fluxname = argv[4];
   }
-  if (argc >= 6) {
+  if (argc >= 6 && !is_flag_token(argv[5])) {
     itercap = std::stoi(argv[5]);
   }
-  if (argc >= 7) {
+  if (argc >= 7 && !is_flag_token(argv[6])) {
     unsteady = (std::string(argv[6]) == "unsteady");
   }
-  if (argc >= 8) {
+  if (argc >= 8 && !is_flag_token(argv[7])) {
     ic_file = argv[7];
   }
-  if (argc >= 9) {
+  if (argc >= 9 && !is_flag_token(argv[7]) && !is_flag_token(argv[8])) {
     t_end = std::stod(argv[8]);
+  }
+
+  for (int i = 2; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--map-ic") {
+      if (i + 2 >= argc) {
+        std::cerr << "Error: --map-ic requires <coarse_meshfile> <coarse_statefile>"
+                  << std::endl;
+        return 1;
+      }
+      use_mapped_ic = true;
+      coarse_meshfile = argv[i + 1];
+      coarse_statefile = argv[i + 2];
+      i += 2;
+    } else if (is_flag_token(argv[i])) {
+      std::cerr << "Error: Unknown option " << arg << std::endl;
+      return 1;
+    }
   }
 
   try {
@@ -46,8 +74,14 @@ int main(int argc, char **argv) {
     solver.CFL = cfl;
     solver.fluxname = fluxname;
     
-    // Load initial condition if provided
-    if (!ic_file.empty()) {
+    if (use_mapped_ic) {
+      if (!ic_file.empty()) {
+        std::cerr << "Warning: both ic_file and --map-ic provided; using --map-ic"
+                  << std::endl;
+      }
+      solver.loadMappedInitialCondition(coarse_meshfile, coarse_statefile);
+    } else if (!ic_file.empty()) {
+      // Load same-mesh initial condition if provided
       solver.loadInitialCondition(ic_file);
     }
 
@@ -57,6 +91,9 @@ int main(int argc, char **argv) {
               << ", IterCap: " << itercap 
               << ", Mode: " << (unsteady ? "Unsteady" : "Steady")
               << (t_end > 0.0 ? ", t_end: " + std::to_string(t_end) : "")
+              << (use_mapped_ic ? ", Mapped IC: " + coarse_meshfile + " + " +
+                                      coarse_statefile
+                                : "")
               << ")" << std::endl;
 
     if (unsteady) {

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ITERS_MAX="${ITERS_MAX:-1000000}"
 ORDER="${ORDER:-2}"
-CFL="${CFL:-0.5}"
+CFL="${CFL:-1}"
 FLUX="${FLUX:-hlle}"
 GRIDS_STR="${GRIDS:-8k}"
 read -r -a GRIDS_ARR <<< "$GRIDS_STR"
