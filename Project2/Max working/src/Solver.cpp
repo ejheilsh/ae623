@@ -376,7 +376,7 @@ FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
 }
 
 void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
-                                       bool limited) {
+                                       bool limited, double t_end) {
   int Ne = mesh.E.size();
   std::cout << "Beginning unsteady solver loop for " << itercap << " iterations..."
             << std::endl;
@@ -412,6 +412,18 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
     
     // Advance physical time
     current_time += dt_global;
+    
+    // Stop if t_end reached
+    if (t_end > 0.0 && current_time >= t_end) {
+      // Save a final snapshot at t_end
+      char filename[256];
+      snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin",
+               current_time, snapshot_count);
+      saveSnapshot(filename);
+      std::cout << "Saved snapshot: " << filename << std::endl;
+      std::cout << "Reached t_end = " << t_end << " at iteration " << niter << std::endl;
+      break;
+    }
     
     // Calculate residual norm (time derivative magnitude)
     double Rnorm = 0;

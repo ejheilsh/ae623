@@ -13,11 +13,12 @@ echo ""
 
 # Configuration
 MESH="grids/2k.gri"
-ORDER=1
+ORDER=2
 CFL=0.1
 FLUX="hlle"
-MAXITER=5000
+MAXITER=100000000
 MODE="unsteady"
+T_END=350
 
 # Extract grid name for IC file
 GRID_NAME=$(basename $MESH .gri)
@@ -30,22 +31,26 @@ echo "  CFL: $CFL"
 echo "  Flux: $FLUX"
 echo "  Max Iterations: $MAXITER"
 echo "  Mode: $MODE"
+echo "  t_end: $T_END"
 echo "  Initial Condition: $IC_FILE"
 echo ""
+
+# Step 0: Clean the files
+./clean_data.sh
 
 # Check if IC file exists, if not run steady first
 if [ ! -f "$IC_FILE" ]; then
     echo "Initial condition file not found. Running steady solver first..."
-    ./euler_solver $MESH $ORDER 0.5 $FLUX 10000 steady
+    ./euler_solver $MESH $ORDER 0.1 $FLUX 100000 steady
     echo ""
 fi
 
 # Step 1: Run the simulation
 echo "Step 1: Running unsteady simulation..."
-echo "Command: ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE"
+echo "Command: ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE $T_END"
 echo ""
 
-./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE
+./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE $T_END
 
 if [ $? -ne 0 ]; then
     echo "Error: Simulation failed!"
@@ -69,10 +74,10 @@ fi
 
 # Step 2: Generate plots
 echo "Step 2: Generating entropy field plots and force history..."
-echo "Command: python3 postproc/plot_unsteady.py $MESH data/"
+echo "Command: python3 postproc/plot_unsteady.py $MESH data/ unsteady_plots"
 echo ""
 
-python3 postproc/plot_unsteady.py $MESH data/
+python3 postproc/plot_unsteady.py $MESH data/ unsteady_plots
 
 if [ $? -ne 0 ]; then
     echo "Error: Plotting failed!"

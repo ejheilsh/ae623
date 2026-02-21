@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
   int itercap = 1e6;
   bool unsteady = false;
   std::string ic_file = "";
+  double t_end = -1.0;  // negative means run until itercap
 
   if (argc >= 3) {
     secondOrder = (std::string(argv[2]) == "2");
@@ -36,6 +37,9 @@ int main(int argc, char **argv) {
   if (argc >= 8) {
     ic_file = argv[7];
   }
+  if (argc >= 9) {
+    t_end = std::stod(argv[8]);
+  }
 
   try {
     FiniteVolumeSolver solver(meshfile);
@@ -51,10 +55,12 @@ int main(int argc, char **argv) {
               << " (Order: " << (secondOrder ? "2nd" : "1st")
               << ", CFL: " << cfl << ", Flux: " << fluxname
               << ", IterCap: " << itercap 
-              << ", Mode: " << (unsteady ? "Unsteady" : "Steady") << ")" << std::endl;
+              << ", Mode: " << (unsteady ? "Unsteady" : "Steady")
+              << (t_end > 0.0 ? ", t_end: " + std::to_string(t_end) : "")
+              << ")" << std::endl;
 
     if (unsteady) {
-      solver.solveUnsteady(itercap, secondOrder, false);
+      solver.solveUnsteady(itercap, secondOrder, false, t_end);
     } else {
       solver.solveSteady(itercap, secondOrder, false);
     }

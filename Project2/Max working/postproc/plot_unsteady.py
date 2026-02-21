@@ -302,12 +302,14 @@ def plot_unsteady_results(meshfile, results_dir, output_dir='unsteady_plots'):
     ax1.set_xlabel('Time')
     ax1.set_ylabel('$c_x$')
     ax1.set_title('Axial Force Coefficient vs Time')
+    ax1.set_xlim([0, 350])
     ax1.grid(True, alpha=0.3)
     
     ax2.plot(times, Cf_y_list, 'r-', linewidth=2)
     ax2.set_xlabel('Time')
     ax2.set_ylabel('$c_y$')
     ax2.set_title('Normal Force Coefficient vs Time')
+    ax2.set_xlim([0, 350])
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()

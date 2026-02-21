@@ -33,7 +33,7 @@ public:
   void solveSteady(int itercap = 1000000, bool secondOrder = false,
                    bool limited = false);
   void solveUnsteady(int itercap = 1000000, bool secondOrder = false,
-                     bool limited = false);
+                     bool limited = false, double t_end = -1.0);
   
   void saveSnapshot(const std::string &filename);
 
