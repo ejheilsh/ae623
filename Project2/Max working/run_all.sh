@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ITERS_MAX="${ITERS_MAX:-5000000}"
-ORDER="${ORDER:-1}"
+ITERS_MAX="${ITERS_MAX:-1000000}"
+ORDER="${ORDER:-2}"
 CFL="${CFL:-0.5}"
 FLUX="${FLUX:-hlle}"
-GRIDS_STR="${GRIDS:-2k 8k 32k 128k}"
+GRIDS_STR="${GRIDS:-8k}"
 read -r -a GRIDS_ARR <<< "$GRIDS_STR"
 OUTPUT_DIR="${OUTPUT_DIR:-output_final}"
 
