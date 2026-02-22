@@ -9,7 +9,7 @@ echo "======================================================================"
 # ── Global settings ──────────────────────────────────────────────────────────
 MESH_LIST=("grids/2k.gri" "grids/8k.gri" "grids/32k.gri")
 ORDER_LIST=(1 2)
-CFL=0.7
+CFL=0.1
 FLUX="hlle"
 MAXITER=100000000   # effectively unlimited — t_end controls termination
 T_END=300

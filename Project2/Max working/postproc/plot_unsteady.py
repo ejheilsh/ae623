@@ -110,9 +110,9 @@ def plot_entropy_snapshots(meshfile, results_dir, output_dir='unsteady_plots'):
         entropy_max = max(entropy_max, entropy.max())
     print(f"p/rho^gamma range (selected snapshots): [{entropy_min:.4f}, {entropy_max:.4f}]")
 
-    # One figure with three subplots side-by-side
+    # One figure with three subplots stacked vertically
     n = len(selected)
-    fig, axes = plt.subplots(1, n, figsize=(8 * n, 6))
+    fig, axes = plt.subplots(n, 1, figsize=(12, 6 * n))
     if n == 1:
         axes = [axes]
 
@@ -131,12 +131,12 @@ def plot_entropy_snapshots(meshfile, results_dir, output_dir='unsteady_plots'):
         ax.add_collection(pc)
         ax.autoscale()
         ax.set_aspect('equal')
-        fig.colorbar(pc, ax=ax, label=r'$p/\rho^\gamma$')
+        fig.colorbar(pc, ax=ax, label=r'$e^s = p/\rho^\gamma$')
         ax.set_title(f't = {actual_t:.1f}')
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
+        ax.set_xlabel('X [mm]')
+        ax.set_ylabel('Y [mm]')
 
-    plt.suptitle(r'Isentropic function $p/\rho^\gamma$', fontsize=14)
+    plt.suptitle(r'Entropy: $e^s = p/\rho^\gamma$', fontsize=14)
     plt.tight_layout()
     outfile = os.path.join(output_dir, 'entropy_t100_200_300.png')
     plt.savefig(outfile, dpi=150)

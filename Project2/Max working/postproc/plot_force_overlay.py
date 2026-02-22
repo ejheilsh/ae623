@@ -22,12 +22,12 @@ import sys
 # Use matplotlib's tab10 palette for consistent, visually appealing colors
 palette = plt.get_cmap("tab10").colors
 DATASETS = [
-    #("Order 1, coarse (2k)", "unsteady_data_1_2k", "grids/2k.gri", "-", palette[0]),
-    #("Order 2, coarse (2k)", "unsteady_data_2_2k", "grids/2k.gri", "-", palette[1]),
-    ("Order 1, fine (8k)",   "unsteady_data_1_8k", "grids/8k.gri", "--", palette[2]),
-    ("Order 2, fine (8k)",   "unsteady_data_2_8k", "grids/8k.gri", "--", palette[3]),
-    #("Order 1, fine (32k)",  "unsteady_data_1_32k", "grids/32k.gri", ":", palette[4]),
-    #("Order 2, fine (32k)",  "unsteady_data_2_32k", "grids/32k.gri", ":", palette[5]),
+    ("Order 1, coarse (2k)", "unsteady_data_1_2k", "grids/2k.gri", "-", palette[0], 1.0),
+    ("Order 2, coarse (2k)", "unsteady_data_2_2k", "grids/2k.gri", "--", palette[1], 1.0),
+    ("Order 1, fine (8k)",   "unsteady_data_1_8k", "grids/8k.gri", "-", palette[2], 1.0),
+    ("Order 2, fine (8k)",   "unsteady_data_2_8k", "grids/8k.gri", "--", palette[3], 1.0),
+    ("Order 1, fine (32k)",  "unsteady_data_1_32k", "grids/32k.gri", "-", palette[4], 1.0),
+    ("Order 2, fine (32k)",  "unsteady_data_2_32k", "grids/32k.gri", "--", palette[5], 1.0),
 ]
 
 GAMMA = 1.4
@@ -176,7 +176,7 @@ def main():
 
     fig, (ax_cx, ax_cy) = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
 
-    for label, data_dir, gri_file, ls, color in DATASETS:
+    for label, data_dir, gri_file, ls, color, alpha in DATASETS:
         if not os.path.isdir(data_dir):
             print(f"  SKIP {label}: directory '{data_dir}' not found")
             continue
@@ -188,8 +188,8 @@ def main():
             continue
 
         lw = 1.5 if "coarse" in label.lower() else 2.0
-        ax_cx.plot(t, cx, linestyle=ls, color=color, linewidth=lw, label=label)
-        ax_cy.plot(t, cy, linestyle=ls, color=color, linewidth=lw, label=label)
+        ax_cx.plot(t, cx, linestyle=ls, color=color, linewidth=lw, label=label, alpha=alpha)
+        ax_cy.plot(t, cy, linestyle=ls, color=color, linewidth=lw, label=label, alpha=alpha)
         print(f"  cx: mean={cx.mean():.4f} ± {cx.std():.4f}   "
               f"cy: mean={cy.mean():.4f} ± {cy.std():.4f}   n={len(t)}")
 
