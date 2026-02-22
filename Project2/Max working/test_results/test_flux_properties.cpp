@@ -1,24 +1,3 @@
-#!/bin/bash
-
-# Flux Property Verification Test
-# Directly tests Roe and HLLE flux functions for consistency and conservation
-
-echo "======================================================================"
-echo "Flux Property Verification Test"
-echo "======================================================================"
-echo ""
-echo "This test verifies that Roe and HLLE flux implementations satisfy"
-echo "the fundamental properties required of any numerical flux function:"
-echo ""
-echo "  1. CONSISTENCY: F(U,U,n) = f(U)·n  (physical flux)"
-echo "  2. CONSERVATION: F(UL,UR,n) = -F(UR,UL,-n)"
-echo ""
-
-TEST_DIR="test_results"
-mkdir -p $TEST_DIR
-
-# Create a simple test program to check flux properties
-cat > $TEST_DIR/test_flux_properties.cpp << 'CPPCODE'
 #include <iostream>
 #include <cmath>
 #include <iomanip>
@@ -248,24 +227,3 @@ int main() {
         return 1;
     }
 }
-CPPCODE
-
-# Compile the test program
-echo "Compiling flux property test..."
-g++ -std=c++17 -O2 -I. -o $TEST_DIR/test_flux_properties \
-    $TEST_DIR/test_flux_properties.cpp \
-    src/Fluxes.cpp src/State.cpp 2>&1
-
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
-    echo " Compilation failed"
-    exit 1
-fi
-
-echo ""
-echo "Running flux property tests..."
-echo ""
-
-# Run the test
-$TEST_DIR/test_flux_properties
-
-exit $?

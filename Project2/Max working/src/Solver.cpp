@@ -353,6 +353,34 @@ std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
   return Unp1;
 }
 
+// Overload: time-accurate unsteady SSP-RK2 with a single global dt for all cells
+std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
+                                             double dt_global,
+                                             bool secondOrder, bool limited,
+                                             double time,
+                                             bool use_unsteady_wake) {
+  int Ne = Un.size();
+
+  // Stage 1: U1 = Un - dt * L(Un)
+  ResidualResult res1 =
+      secondOrder ? calcResidualSecondOrder(Un, limited, time, use_unsteady_wake)
+                  : calcResidual(Un, time, use_unsteady_wake);
+  std::vector<Vec4> U1(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    U1[i] = Un[i] - (res1.R[i] / mesh.areas[i]) * dt_global;
+  }
+
+  // Stage 2: Unp1 = 0.5*Un + 0.5*(U1 - dt * L(U1))
+  ResidualResult res2 =
+      secondOrder ? calcResidualSecondOrder(U1, limited, time, use_unsteady_wake)
+                  : calcResidual(U1, time, use_unsteady_wake);
+  std::vector<Vec4> Unp1(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    Unp1[i] = Un[i] * 0.5 + (U1[i] - (res2.R[i] / mesh.areas[i]) * dt_global) * 0.5;
+  }
+  return Unp1;
+}
+
 std::vector<Vec4> FiniteVolumeSolver::applyLimiter(const std::vector<Vec4> &Un,
                                                    std::vector<Vec4> &gradX,
                                                    std::vector<Vec4> &gradY) {
@@ -554,22 +582,25 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
   system("mkdir -p data");
   
   for (int niter = 0; niter < itercap; ++niter) {
-    // Calculate residual (spatial flux divergence = time derivative)
-    ResidualResult res =
-        secondOrder ? calcResidualSecondOrder(U, limited, current_time, true) : calcResidual(U, current_time, true);
+    // Compute spectral radii via first-order residual (cheap, order-independent)
+    // to determine the global time step for time-accurate integration.
+    ResidualResult res_sdl = calcResidual(U, current_time, true);
 
-    // Calculate global time step (smallest over all cells for time-accurate unsteady)
+    // Global time step: minimum CFL-limited dt over all cells
     double dt_global = 1e10;
     for (int i = 0; i < Ne; ++i) {
-      double sdl = std::max(res.sdl[i], 1e-12);
+      double sdl = std::max(res_sdl.sdl[i], 1e-12);
       double dt_local = CFL * 2.0 * mesh.areas[i] / sdl;
       dt_global = std::min(dt_global, dt_local);
     }
-    
-    // Explicit Euler update with global time step
-    for (int i = 0; i < Ne; ++i) {
-      U[i] = U[i] - (res.R[i] / mesh.areas[i]) * dt_global;
-    }
+
+    // SSP-RK2 with uniform global dt (time-accurate)
+    std::vector<Vec4> U_new = sspRK2(U, dt_global, secondOrder, limited, current_time, true);
+
+    // Also keep res for logging (reuse res_sdl which has R from 1st-order;
+    // good enough for the residual norm printout)
+    ResidualResult &res = res_sdl;
+    U = U_new;
     
     // Advance physical time
     current_time += dt_global;

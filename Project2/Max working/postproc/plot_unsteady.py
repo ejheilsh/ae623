@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Postprocessing script for unsteady Euler solver results.
-Plots entropy and Mach fields at various timesteps, and computes force coefficients.
+Plot entropy field at t ≈ 100, 200, 300 from unsteady snapshot bins.
 
 Usage:
-    python postproc/plot_unsteady.py <meshfile> <results_dir>
-    
+    python postproc/plot_unsteady.py <meshfile> <results_dir> [output_dir]
+
 Example:
-    python postproc/plot_unsteady.py grids/coarse.gri data/
+    python postproc/plot_unsteady.py grids/32k.gri unsteady_data_2_32k unsteady_plots/
 """
 
 import numpy as np
@@ -18,38 +17,37 @@ import sys
 import glob
 import os
 
+TARGET_TIMES = [100.0, 200.0, 300.0]
+TIME_TOL     = 5.0   # pick the snapshot whose time is closest, within this window
+
 def read_results(filename):
-    """Read binary results file."""
     with open(filename, 'rb') as f:
         ne = struct.unpack('i', f.read(4))[0]
         data = struct.unpack('d' * 4 * ne, f.read(8 * 4 * ne))
         return np.array(data).reshape(ne, 4)
 
 def read_mesh(filename):
-    """Read mesh vertices."""
     with open(filename, 'r') as f:
         nn, ne, dim = map(int, f.readline().split())
         v = np.array([[float(s) for s in f.readline().split()] for _ in range(nn)])
         return v
 
 def get_elements_from_gri(filename):
-    """Extract element connectivity."""
     with open(filename, 'r') as f:
         nn, ne, dim = map(int, f.readline().split())
-        for _ in range(nn): 
+        for _ in range(nn):
             f.readline()
         nb = int(f.readline())
         for _ in range(nb):
             line = f.readline().split()
             nb_in = int(line[0])
-            for _ in range(nb_in): 
+            for _ in range(nb_in):
                 f.readline()
-        
         elements = []
         ne_total = 0
         while ne_total < ne:
             line = f.readline().split()
-            if not line: 
+            if not line:
                 break
             nei = int(line[0])
             for _ in range(nei):
@@ -57,284 +55,101 @@ def get_elements_from_gri(filename):
             ne_total += nei
         return np.array(elements)
 
-def get_boundary_edges_from_gri(filename):
-    """Extract boundary edges for force calculation."""
-    with open(filename, 'r') as f:
-        nn, ne, dim = map(int, f.readline().split())
-        for _ in range(nn): 
-            f.readline()
-        
-        nb = int(f.readline())
-        boundary_groups = {}
-        
-        for ib in range(nb):
-            line = f.readline().split()
-            nb_edges = int(line[0])
-            # Format: <num_edges> <boundary_type> <boundary_name>
-            bname = line[2] if len(line) > 2 else f"boundary_{ib}"
-            
-            edges = []
-            for _ in range(nb_edges):
-                edge_nodes = [int(s)-1 for s in f.readline().split()]
-                edges.append(edge_nodes)
-            boundary_groups[bname] = np.array(edges)
-        
-        return boundary_groups
-
 def extract_time_from_filename(filename):
-    """Extract time value from filename pattern like 'results_1.234567_0004.bin'."""
     basename = os.path.basename(filename)
     try:
         parts = basename.replace('results_', '').replace('.bin', '').split('_')
-        if len(parts) >= 1:
-            return float(parts[0])
+        return float(parts[0])
     except:
-        pass
-    return 0.0
+        return 0.0
 
-def compute_force_coefficients(v, elements, boundary_groups, u, gamma=1.4):
-    """
-    Compute force coefficients from wall pressure.
-    Normalized by q_out * chord following project requirements.
-    c_x and c_y = F_x and F_y normalized by q_out*c with c = 18.804mm
-    """
-    # Find wall boundary
-    wall_edges = None
-    for bname, edges in boundary_groups.items():
-        if bname.lower() == 'wall':
-            wall_edges = edges
-            break
-    
-    if wall_edges is None:
-        return 0.0, 0.0
-    
-    # Build element-to-edge map
-    elem_to_edge = {}
-    for elem_idx, elem in enumerate(elements):
-        edges_in_elem = [
-            tuple(sorted([elem[0], elem[1]])),
-            tuple(sorted([elem[1], elem[2]])),
-            tuple(sorted([elem[2], elem[0]]))
-        ]
-        for edge in edges_in_elem:
-            if edge not in elem_to_edge:
-                elem_to_edge[edge] = []
-            elem_to_edge[edge].append(elem_idx)
-    
-    # Calculate primitives
-    rho = u[:, 0]
-    rhou = u[:, 1]
-    rhov = u[:, 2]
-    rhoe = u[:, 3]
-    vel_u = rhou / rho
-    vel_v = rhov / rho
-    qsq = vel_u**2 + vel_v**2
-    p = (gamma - 1) * (rhoe - 0.5 * rho * qsq)
-    
-    # Reference conditions following project requirements
-    # q_out = 0.5 * gamma * p_out * M_out^2
-    # M_out^2 = (2/(gamma-1)) * [(p0/p_out)^((gamma-1)/gamma) - 1]
-    rho0 = 1.0
-    a0 = 1.0
-    p0 = a0**2 * rho0 / gamma
-    p_out = 0.7 * p0  # From solver BC: pout = 0.7 * p0
-    
-    pressure_ratio = p0 / p_out
-    M_out_sq = (2.0 / (gamma - 1.0)) * (pressure_ratio**((gamma - 1.0) / gamma) - 1.0)
-    q_out = 0.5 * gamma * p_out * M_out_sq
-    
-    # Integrate forces
-    Fx = 0.0
-    Fy = 0.0
-    
-    for edge in wall_edges:
-        n1, n2 = edge[0], edge[1]
-        edge_key = tuple(sorted([n1, n2]))
-        
-        if edge_key in elem_to_edge:
-            elem_idx = elem_to_edge[edge_key][0]
-            p_elem = p[elem_idx]
-            
-            # Edge vector and outward normal
-            edge_vec = v[n2] - v[n1]
-            edge_length = np.linalg.norm(edge_vec)
-            normal = np.array([edge_vec[1], -edge_vec[0]])
-            normal = normal / np.linalg.norm(normal)
-            
-            # Check if normal points outward
-            centroid = v[elements[elem_idx]].mean(axis=0)
-            edge_mid = 0.5 * (v[n1] + v[n2])
-            to_edge = edge_mid - centroid
-            if np.dot(normal, to_edge) < 0:
-                normal = -normal
-            
-            # Force = p * n * length
-            Fx += p_elem * normal[0] * edge_length
-            Fy += p_elem * normal[1] * edge_length
-    
-    # Force coefficients (normalized by q_out * chord)
-    # Note: mesh is in mm, so chord = 18.804 mm (not meters)
-    chord = 18.804  # Chord length in mm (same units as mesh)
-    c_x = Fx / (q_out * chord)
-    c_y = Fy / (q_out * chord)
-    
-    return c_x, c_y
-
-def plot_unsteady_results(meshfile, results_dir, output_dir='unsteady_plots'):
-    """Main plotting function."""
-    # Create output directory
+def plot_entropy_snapshots(meshfile, results_dir, output_dir='unsteady_plots'):
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Read mesh
+
     print(f"Reading mesh: {meshfile}")
     v = read_mesh(meshfile)
     e = get_elements_from_gri(meshfile)
-    boundary_groups = get_boundary_edges_from_gri(meshfile)
     verts = v[e]
-    
-    # Find all result files
+
     pattern = os.path.join(results_dir, "results_*.bin")
-    result_files = glob.glob(pattern)
-    
-    if len(result_files) == 0:
+    result_files = sorted(glob.glob(pattern), key=extract_time_from_filename)
+
+    if not result_files:
         print(f"Error: No files found matching {pattern}")
         return
-    
-    # Sort by time value extracted from filename, not alphabetically
-    result_files = sorted(result_files, key=extract_time_from_filename)
-    
-    print(f"Found {len(result_files)} result files")
-    
+
+    print(f"Found {len(result_files)} snapshot files")
+
+    # Build (time, filepath) list
+    all_times = [(extract_time_from_filename(f), f) for f in result_files]
+
+    # Select the closest snapshot to each target time
+    selected = {}
+    for target in TARGET_TIMES:
+        best_t, best_f = min(all_times, key=lambda tf: abs(tf[0] - target))
+        if abs(best_t - target) <= TIME_TOL:
+            selected[target] = (best_t, best_f)
+        else:
+            print(f"  Warning: no snapshot within {TIME_TOL} of t={target} "
+                  f"(closest is t={best_t:.2f})")
+
+    if not selected:
+        print("No snapshots matched the target times.")
+        return
+
+    # Compute entropy range across only the selected snapshots for a consistent colorbar
     gamma = 1.4
-    times = []
-    Cf_x_list = []
-    Cf_y_list = []
-    
-    # Determine global ranges for consistent colormaps
     entropy_min, entropy_max = np.inf, -np.inf
-    mach_min, mach_max = np.inf, -np.inf
-    
-    for resfile in result_files:
-        u = read_results(resfile)
-        rho = u[:, 0]
-        rhou = u[:, 1]
-        rhov = u[:, 2]
-        rhoe = u[:, 3]
-        vel_u = rhou / rho
-        vel_v = rhov / rho
-        qsq = vel_u**2 + vel_v**2
-        p = (gamma - 1) * (rhoe - 0.5 * rho * qsq)
-        mach = np.sqrt(qsq) / np.sqrt(gamma * p / rho)
-        entropy = np.log(p / rho**gamma)
-        
+    for target, (t, f) in selected.items():
+        u = read_results(f)
+        rho = u[:, 0]; rhou = u[:, 1]; rhov = u[:, 2]; rhoe = u[:, 3]
+        vel_u = rhou / rho; vel_v = rhov / rho
+        p = (gamma - 1) * (rhoe - 0.5 * rho * (vel_u**2 + vel_v**2))
+        entropy = p / rho**gamma        # isentropic function p/ρ^γ  (~0.7 in freestream)
         entropy_min = min(entropy_min, entropy.min())
         entropy_max = max(entropy_max, entropy.max())
-        mach_min = min(mach_min, mach.min())
-        mach_max = max(mach_max, mach.max())
-    
-    print(f"Entropy range: [{entropy_min:.6f}, {entropy_max:.6f}]")
-    print(f"Mach range: [{mach_min:.6f}, {mach_max:.6f}]")
-    
-    # Plot each timestep
-    for idx, resfile in enumerate(result_files):
-        time = extract_time_from_filename(resfile)
-        u = read_results(resfile)
-        
-        # Calculate primitives
-        rho = u[:, 0]
-        rhou = u[:, 1]
-        rhov = u[:, 2]
-        rhoe = u[:, 3]
-        vel_u = rhou / rho
-        vel_v = rhov / rho
-        qsq = vel_u**2 + vel_v**2
-        p = (gamma - 1) * (rhoe - 0.5 * rho * qsq)
-        mach = np.sqrt(qsq) / np.sqrt(gamma * p / rho)
-        entropy = np.log(p / rho**gamma)
-        
-        # Compute forces
-        Cf_x, Cf_y = compute_force_coefficients(v, e, boundary_groups, u, gamma)
-        times.append(time)
-        Cf_x_list.append(Cf_x)
-        Cf_y_list.append(Cf_y)
-        
-        # Create plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
-        
-        # Entropy
-        pc1 = PolyCollection(verts, cmap='viridis', edgecolors='none')
-        pc1.set_array(entropy)
-        pc1.set_clim(entropy_min, entropy_max)
-        ax1.add_collection(pc1)
-        ax1.autoscale()
-        ax1.set_aspect('equal')
-        fig.colorbar(pc1, ax=ax1, label='Entropy: log(p/ρ^γ)')
-        ax1.set_title(f'Entropy at t = {time:.6f}')
-        ax1.set_xlabel('X')
-        ax1.set_ylabel('Y')
-        
-        # Mach number
-        pc2 = PolyCollection(verts, cmap='jet', edgecolors='none')
-        pc2.set_array(mach)
-        pc2.set_clim(mach_min, mach_max)
-        ax2.add_collection(pc2)
-        ax2.autoscale()
-        ax2.set_aspect('equal')
-        fig.colorbar(pc2, ax=ax2, label='Mach Number')
-        ax2.set_title(f'Mach Number at t = {time:.6f}')
-        ax2.set_xlabel('X')
-        ax2.set_ylabel('Y')
-        
-        plt.tight_layout()
-        outfile = os.path.join(output_dir, f'entropy_field_{idx:04d}_t{time:.6f}.png')
-        plt.savefig(outfile, dpi=150)
-        plt.close()
-        print(f"Saved {outfile}")
-    
-    # Plot force history
-    times = np.array(times)
-    Cf_x_list = np.array(Cf_x_list)
-    Cf_y_list = np.array(Cf_y_list)
-    
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-    
-    ax1.plot(times, Cf_x_list, 'b-', linewidth=2)
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('$c_x$')
-    ax1.set_title('Axial Force Coefficient vs Time')
-    ax1.set_xlim([0, 350])
-    ax1.grid(True, alpha=0.3)
-    
-    ax2.plot(times, Cf_y_list, 'r-', linewidth=2)
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('$c_y$')
-    ax2.set_title('Normal Force Coefficient vs Time')
-    ax2.set_xlim([0, 350])
-    ax2.grid(True, alpha=0.3)
-    
+    print(f"p/rho^gamma range (selected snapshots): [{entropy_min:.4f}, {entropy_max:.4f}]")
+
+    # One figure with three subplots side-by-side
+    n = len(selected)
+    fig, axes = plt.subplots(1, n, figsize=(8 * n, 6))
+    if n == 1:
+        axes = [axes]
+
+    for ax, target in zip(axes, sorted(selected)):
+        actual_t, filepath = selected[target]
+        u = read_results(filepath)
+        rho = u[:, 0]; rhou = u[:, 1]; rhov = u[:, 2]; rhoe = u[:, 3]
+        vel_u = rhou / rho; vel_v = rhov / rho
+        vel_mag = np.sqrt(vel_u**2 + vel_v**2)
+        p = (gamma - 1) * (rhoe - 0.5 * rho * vel_mag**2)
+        entropy = p / rho**gamma        # isentropic function p/ρ^γ
+
+        pc = PolyCollection(verts, cmap='viridis', edgecolors='none')
+        pc.set_array(entropy)
+        pc.set_clim(entropy_min, entropy_max)
+        ax.add_collection(pc)
+        ax.autoscale()
+        ax.set_aspect('equal')
+        fig.colorbar(pc, ax=ax, label=r'$p/\rho^\gamma$')
+        ax.set_title(f't = {actual_t:.1f}')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+
+    plt.suptitle(r'Isentropic function $p/\rho^\gamma$', fontsize=14)
     plt.tight_layout()
-    force_file = os.path.join(output_dir, 'force_history.png')
-    plt.savefig(force_file, dpi=150)
-    print(f"\nSaved {force_file}")
-    
-    # Print statistics
-    print("\n" + "="*60)
-    print("Force Coefficient Statistics:")
-    print("="*60)
-    print(f"c_x: mean={Cf_x_list.mean():.6f}, std={Cf_x_list.std():.6f}")
-    print(f"c_y: mean={Cf_y_list.mean():.6f}, std={Cf_y_list.std():.6f}")
-    print("="*60)
+    outfile = os.path.join(output_dir, 'entropy_t100_200_300.png')
+    plt.savefig(outfile, dpi=150)
+    plt.close()
+    print(f"Saved {outfile}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)
-        print("\nUsage: python postproc/plot_unsteady.py <meshfile> <results_dir> [output_dir]")
-        print("Example: python postproc/plot_unsteady.py grids/coarse.gri data/")
-        print("         python postproc/plot_unsteady.py grids/coarse.gri data/ unsteady_plots/")
         sys.exit(1)
-    
-    meshfile = sys.argv[1]
+
+    meshfile   = sys.argv[1]
     results_dir = sys.argv[2]
-    output_dir = sys.argv[3] if len(sys.argv) > 3 else 'unsteady_plots'
-    
-    plot_unsteady_results(meshfile, results_dir, output_dir)
+    output_dir  = sys.argv[3] if len(sys.argv) > 3 else 'unsteady_plots'
+
+    plot_entropy_snapshots(meshfile, results_dir, output_dir)

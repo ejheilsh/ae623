@@ -1,95 +1,83 @@
 #!/bin/bash
-# Example workflow for running unsteady simulations and generating plots
+# Runs unsteady simulations for all mesh/order combinations and saves snapshot
+# bins into named per-case directories for later postprocessing.
 
 echo "======================================================================"
-echo "Example Unsteady Simulation Workflow"
+echo "Unsteady Simulation Suite"
 echo "======================================================================"
-echo ""
-echo "This script demonstrates how to:"
-echo "  1. Run an unsteady simulation"
-echo "  2. Generate entropy field plots at various timesteps"
-echo "  3. Compute force coefficient histories"
-echo ""
 
-# Configuration
-MESH="grids/8k.gri"
-ORDER=2
-CFL=0.5
+# ── Global settings ──────────────────────────────────────────────────────────
+MESH_LIST=("grids/2k.gri" "grids/8k.gri" "grids/32k.gri")
+ORDER_LIST=(1 2)
+CFL=0.7
 FLUX="hlle"
-MAXITER=1000000
+MAXITER=100000000   # effectively unlimited — t_end controls termination
+T_END=300
 MODE="unsteady"
-T_END=1000000
 
-# Extract grid name for IC file
-GRID_NAME=$(basename $MESH .gri)
-IC_FILE="data_steady/steady_${GRID_NAME}_results.bin"
+# rm -rf unsteady_data_*
+rm -f euler_solver
+./build.sh
 
-echo "Configuration:"
-echo "  Mesh: $MESH"
-echo "  Order: $ORDER"
-echo "  CFL: $CFL"
-echo "  Flux: $FLUX"
-echo "  Max Iterations: $MAXITER"
-echo "  Mode: $MODE"
-echo "  t_end: $T_END"
-echo "  Initial Condition: $IC_FILE"
-echo ""
+# ── Loop over every mesh × order combination ─────────────────────────────────
+for MESH in "${MESH_LIST[@]}"; do
+    GRID_NAME=$(basename $MESH .gri)
 
-# Step 0: Clean the files
-./clean_data.sh
+    for ORDER in "${ORDER_LIST[@]}"; do
 
-# Check if IC file exists, if not run steady first
-if [ ! -f "$IC_FILE" ]; then
-    echo "Initial condition file not found. Running steady solver first..."
-    ./euler_solver $MESH $ORDER 0.1 $FLUX 100000 steady
-    echo ""
-fi
+        # Directory where snapshot bins and force data will be saved
+        CASE_DIR="unsteady_data_${ORDER}_${GRID_NAME}"
+        IC_FILE="data_steady/steady_${GRID_NAME}_results.bin"
 
-# Step 1: Run the simulation
-echo "Step 1: Running unsteady simulation..."
-echo "Command: ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE $T_END"
-echo ""
+        echo ""
+        echo "======================================================================"
+        echo "Case: order=${ORDER}  mesh=${GRID_NAME}  →  ${CASE_DIR}"
+        echo "======================================================================"
 
-./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE $T_END
+        # Step 0: prepare output dir and clean the shared data/ staging area
+        mkdir -p "$CASE_DIR"
+        ./clean_data.sh > /dev/null
 
-if [ $? -ne 0 ]; then
-    echo "Error: Simulation failed!"
-    exit 1
-fi
+        # Step 1: run steady solver if IC is missing
+        if [ ! -f "$IC_FILE" ]; then
+            echo "  Running steady solver to generate IC..."
+            ./euler_solver $MESH 1 1.0 $FLUX 50000 steady
+            echo ""
+        fi
 
-echo ""
-echo "Simulation complete!"
-echo ""
+        # Step 2: run unsteady solver (snapshots go to data/)
+        echo "  Running: ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE $T_END"
+        ./euler_solver $MESH $ORDER $CFL $FLUX $MAXITER $MODE $IC_FILE $T_END
 
-# Check for snapshot files in data/
-SNAPSHOT_COUNT=$(ls data/results_*.bin 2>/dev/null | wc -l)
-echo "Found $SNAPSHOT_COUNT snapshot files in data/"
-echo ""
+        if [ $? -ne 0 ]; then
+            echo "  ERROR: solver failed for $CASE_DIR — aborting."
+            exit 1
+        fi
 
-if [ $SNAPSHOT_COUNT -eq 0 ]; then
-    echo "Warning: No snapshot files found in data/!"
-    echo "The simulation may not have run long enough or snapshots weren't saved."
-    exit 1
-fi
+        # Step 3: move snapshot bins into the case directory
+        BIN_COUNT=$(ls data/results_*.bin 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$BIN_COUNT" -eq 0 ]; then
+            echo "  WARNING: no snapshots found in data/ — skipping move."
+        else
+            mv data/results_*.bin "$CASE_DIR/"
+            echo "  Moved $BIN_COUNT snapshots → $CASE_DIR/"
+        fi
 
-# Step 2: Generate plots
-echo "Step 2: Generating entropy field plots and force history..."
-echo "Command: python3 postproc/plot_unsteady.py $MESH data/ unsteady_plots"
-echo ""
-
-python3 postproc/plot_unsteady.py $MESH data/ unsteady_plots
-
-if [ $? -ne 0 ]; then
-    echo "Error: Plotting failed!"
-    exit 1
-fi
+    done
+done
 
 echo ""
 echo "======================================================================"
-echo "Workflow complete!"
+echo "All cases complete. Generating overlay force coefficient plot..."
 echo "======================================================================"
+python3 postproc/plot_force_overlay.py
+
 echo ""
-echo "Generated files:"
-echo "  - unsteady_plots/entropy_field_*.png - Entropy fields at various times"
-echo "  - unsteady_plots/force_history.png - Force coefficient time history"
-echo ""
+echo "Done. Case directories:"
+for MESH in "${MESH_LIST[@]}"; do
+    GRID_NAME=$(basename $MESH .gri)
+    for ORDER in "${ORDER_LIST[@]}"; do
+        echo "  unsteady_data_${ORDER}_${GRID_NAME}/"
+    done
+done
+echo "  force_coefficient_overlay.png"

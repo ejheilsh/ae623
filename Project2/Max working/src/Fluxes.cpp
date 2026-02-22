@@ -95,7 +95,7 @@ Vec4 subsonicInflow(const Vec4 &Uplus, const Vec2 &n, double rho0, double a0,
     // Unsteady wake parameters
     const double f_wake = 0.1;      // Wake depth fraction
     const double delta = 0.1;       // Wake width parameter
-    const double delta_y = 0.018;   // 18mm in meters
+    const double delta_y = 18;   // 18mm in mm
     
     // Rotor speed equals stagnation speed of sound at inflow
     double V_rotor = a0;

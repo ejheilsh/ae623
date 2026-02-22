@@ -57,6 +57,10 @@ private:
   std::vector<Vec4> sspRK2(const std::vector<Vec4> &Un, bool secondOrder,
                            bool limited, double time = 0.0,
                            bool use_unsteady_wake = false);
+  // Fixed-dt overload for time-accurate unsteady (single global dt)
+  std::vector<Vec4> sspRK2(const std::vector<Vec4> &Un, double dt_global,
+                           bool secondOrder, bool limited, double time,
+                           bool use_unsteady_wake);
 
   std::vector<double> calcDt(const std::vector<double> &sdl);
   bool isPhysical(const std::vector<Vec4> &Un);
