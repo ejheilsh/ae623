@@ -1,0 +1,1071 @@
+#include "Solver.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <fstream>
+#include <limits>
+#include <unordered_map>
+
+namespace {
+uint64_t spatialKey(int ix, int iy) {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
+         static_cast<uint32_t>(iy);
+}
+
+std::vector<Vec4> readStateBinary(const std::string &filename) {
+  std::ifstream in(filename, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("Could not open state file: " + filename);
+  }
+
+  int ne_file = 0;
+  in.read(reinterpret_cast<char *>(&ne_file), sizeof(int));
+  if (!in || ne_file <= 0) {
+    throw std::runtime_error("Invalid state header in: " + filename);
+  }
+
+  std::vector<Vec4> data(ne_file);
+  for (int i = 0; i < ne_file; ++i) {
+    in.read(reinterpret_cast<char *>(data[i].v), sizeof(double) * 4);
+    if (!in) {
+      throw std::runtime_error("Truncated state data in: " + filename);
+    }
+  }
+  return data;
+}
+} // namespace
+
+FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
+  if (!mesh.readGRI(meshfile)) {
+    throw std::runtime_error("Failed to read mesh file");
+  }
+
+  // ← INSERT: Initialize DG parameters  
+  // p_order should be set BEFORE calling this constructor (or pass as parameter)
+  // Assume p_order is set externally or add parameter to constructor
+  ndof_per_elem = (p_order + 1) * (p_order + 2) / 2;
+  std::cout << "DG solver with p=" << p_order << ", ndof=" << ndof_per_elem << std::endl;
+  U_dg.resize(mesh.E.size(), std::vector<Vec4>(ndof_per_elem));
+  U0_dg.resize(mesh.E.size(), std::vector<Vec4>(ndof_per_elem));
+
+  
+  p0 = (rho0 * a0 * a0) / gamma;
+  pout = 0.7 * p0;
+  alpha = alpha * M_PI / 180.0;
+  
+  // ← INSERT: Compute mass matrix inverse once
+  computeMassMatrix();
+  
+  setInitialCondition();
+}
+
+void FiniteVolumeSolver::setInitialCondition() {
+  // ← INSERT: Allocate DG data structure
+  
+  
+  
+  int Ne = mesh.E.size();
+  U_dg.resize(Ne);
+  for (int e = 0; e < Ne; ++e) {
+    U_dg[e].resize(ndof_per_elem);
+  }
+  double rhou = rho0 * Minf * a0 * std::cos(alpha);
+  double rhov = rho0 * Minf * a0 * std::sin(alpha);
+  double rhoE = rho0 * (a0 * a0 / ((gamma - 1.0) * gamma) + 0.5 * Minf * Minf);
+  
+  for (int i = 0; i < Ne; ++i) {
+    U[i] = {rho0, rhou, rhov, rhoE};
+  }
+  for (int e = 0; e < Ne; ++e) {
+    for (int j = 0; j < ndof_per_elem; ++j) {
+      // ← PSEUDOCODE: For now, set all DOFs to the same value
+      // Later (p>0): you might want to project the initial condition onto basis
+
+      U_dg[e][j] = {rho0, rhou, rhov, rhoE};
+
+      // TODO: For p>0, consider projecting the initial condition onto the basis functions
+      for (int k = 0; k < ndof_per_elem; ++k) {
+        double phi_k = evaluateBasis(0.0, 0.0, p_order)[k]; // Evaluate basis at element centroid
+        U_dg[e][j] += U_dg[e][j] * (phi_k - (j == k ? 1.0 : 0.0)); // Simple projection (placeholder)
+      }
+    }
+  }
+  U0_dg = U_dg;
+  
+  // Also set old U for p=0 compatibility
+  if (p_order == 0) {
+    U.resize(Ne);
+    for (int e = 0; e < Ne; ++e) {
+      U[e] = U_dg[e][0];  // p=0: only 1 DOF
+    }
+    U0 = U;
+  }
+  
+  U0 = U;
+}
+
+void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
+  std::ifstream in(filename, std::ios::binary);
+  if (!in) {
+    std::cerr << "Warning: Could not open initial condition file " << filename 
+              << ", using default IC instead" << std::endl;
+    setInitialCondition();
+    return;
+  }
+  
+  int Ne_file;
+  in.read((char*)&Ne_file, sizeof(int));
+  
+  int Ne = mesh.E.size();
+  if (Ne_file != Ne) {
+    std::cerr << "Warning: Initial condition file has " << Ne_file 
+              << " elements but mesh has " << Ne 
+              << " elements. Using default IC instead." << std::endl;
+    in.close();
+    setInitialCondition();
+    return;
+  }
+  
+  U.resize(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    in.read((char*)U[i].v, sizeof(double) * 4);
+  }
+  in.close();
+  U0 = U;
+  
+  std::cout << "Successfully loaded initial condition from " << filename << std::endl;
+}
+
+void FiniteVolumeSolver::loadMappedInitialCondition(
+    const std::string &coarse_meshfile, const std::string &coarse_statefile) {
+  Mesh coarse_mesh;
+  if (!coarse_mesh.readGRI(coarse_meshfile)) {
+    throw std::runtime_error("Failed to read coarse mesh file: " + coarse_meshfile);
+  }
+
+  std::vector<Vec4> coarse_u = readStateBinary(coarse_statefile);
+  if (static_cast<int>(coarse_u.size()) != static_cast<int>(coarse_mesh.E.size())) {
+    throw std::runtime_error("Coarse state size mismatch: file has " +
+                             std::to_string(coarse_u.size()) + " cells, mesh has " +
+                             std::to_string(coarse_mesh.E.size()));
+  }
+
+  const auto &coarse_centroids = coarse_mesh.centroids;
+  if (coarse_centroids.empty()) {
+    throw std::runtime_error("Coarse mesh has zero centroids.");
+  }
+
+  double xmin = coarse_centroids[0].x, xmax = coarse_centroids[0].x;
+  double ymin = coarse_centroids[0].y, ymax = coarse_centroids[0].y;
+  for (const auto &c : coarse_centroids) {
+    xmin = std::min(xmin, c.x);
+    xmax = std::max(xmax, c.x);
+    ymin = std::min(ymin, c.y);
+    ymax = std::max(ymax, c.y);
+  }
+
+  int n_coarse = static_cast<int>(coarse_centroids.size());
+  int nx = std::max(8, static_cast<int>(std::sqrt(static_cast<double>(n_coarse))));
+  int ny = nx;
+  double hx = (xmax - xmin) / static_cast<double>(nx);
+  double hy = (ymax - ymin) / static_cast<double>(ny);
+  if (hx <= 0.0)
+    hx = 1.0;
+  if (hy <= 0.0)
+    hy = 1.0;
+
+  auto clampIndex = [](int i, int n) { return std::max(0, std::min(n - 1, i)); };
+  auto binCoords = [&](const Vec2 &p) {
+    int ix = static_cast<int>(std::floor((p.x - xmin) / hx));
+    int iy = static_cast<int>(std::floor((p.y - ymin) / hy));
+    ix = clampIndex(ix, nx);
+    iy = clampIndex(iy, ny);
+    return std::pair<int, int>(ix, iy);
+  };
+
+  std::unordered_map<uint64_t, std::vector<int>> bins;
+  bins.reserve(static_cast<size_t>(n_coarse) * 2);
+  for (int i = 0; i < n_coarse; ++i) {
+    auto [ix, iy] = binCoords(coarse_centroids[i]);
+    bins[spatialKey(ix, iy)].push_back(i);
+  }
+
+  int n_fine = static_cast<int>(mesh.E.size());
+  U.resize(n_fine);
+  int hash_fallback_count = 0;
+  int physical_fallback_count = 0;
+  const int max_radius = std::max(nx, ny);
+
+  for (int i = 0; i < n_fine; ++i) {
+    const Vec2 &cf = mesh.centroids[i];
+    auto [ix0, iy0] = binCoords(cf);
+    int best = -1;
+    double best_d2 = std::numeric_limits<double>::max();
+
+    for (int r = 0; r <= max_radius; ++r) {
+      bool found_any = false;
+      int x0 = std::max(0, ix0 - r);
+      int x1 = std::min(nx - 1, ix0 + r);
+      int y0 = std::max(0, iy0 - r);
+      int y1 = std::min(ny - 1, iy0 + r);
+      for (int bx = x0; bx <= x1; ++bx) {
+        for (int by = y0; by <= y1; ++by) {
+          auto it = bins.find(spatialKey(bx, by));
+          if (it == bins.end())
+            continue;
+          found_any = true;
+          for (int j : it->second) {
+            Vec2 d = coarse_centroids[j] - cf;
+            double d2 = d.normSq();
+            if (d2 < best_d2) {
+              best_d2 = d2;
+              best = j;
+            }
+          }
+        }
+      }
+      if (found_any)
+        break;
+    }
+
+    if (best < 0) {
+      hash_fallback_count++;
+      for (int j = 0; j < n_coarse; ++j) {
+        Vec2 d = coarse_centroids[j] - cf;
+        double d2 = d.normSq();
+        if (d2 < best_d2) {
+          best_d2 = d2;
+          best = j;
+        }
+      }
+    }
+
+    Vec4 mapped = coarse_u[best];
+    State s(mapped, gamma);
+    if (!std::isfinite(s.rho()) || !std::isfinite(s.p()) || s.rho() <= 0.0 ||
+        s.p() <= 0.0) {
+      physical_fallback_count++;
+      mapped = U0[i]; // freestream fallback from constructor IC
+    }
+    U[i] = mapped;
+  }
+
+  U0 = U;
+  std::cout << "Mapped IC loaded from coarse solution: " << coarse_statefile
+            << " onto mesh with " << n_fine << " cells (coarse cells: "
+            << n_coarse << ", hash_fallbacks: " << hash_fallback_count
+            << ", physical_fallbacks: " << physical_fallback_count << ")"
+            << std::endl;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DG BASIS FUNCTIONS (from shape.c)
+// ═══════════════════════════════════════════════════════════════
+std::vector<double> 
+FiniteVolumeSolver::evaluateBasis(double xi, double eta, int p) {
+  int ndof = (p+1)*(p+2)/2;
+  std::vector<double> phi(ndof);
+  
+  // Lagrange shape functions on reference triangle
+  // Reference coords: (0,0), (1,0), (0,1)
+  
+  switch (p) {
+    case 0:
+      phi[0] = 1.0;
+      break;
+      
+    case 1:
+      phi[0] = 1.0 - xi - eta;
+      phi[1] = xi;
+      phi[2] = eta;
+      break;
+      
+    case 2:
+      phi[0] = 1.0 - 3.0*xi - 3.0*eta + 2.0*xi*xi + 4.0*xi*eta + 2.0*eta*eta;
+      phi[1] = -xi + 2.0*xi*xi;
+      phi[2] = -eta + 2.0*eta*eta;
+      phi[3] = 4.0*xi*eta;
+      phi[4] = 4.0*eta - 4.0*xi*eta - 4.0*eta*eta;
+      phi[5] = 4.0*xi - 4.0*xi*xi - 4.0*xi*eta;
+      break;
+      
+    case 3:
+      phi[0] = 1.0 - 11.0/2.0*xi - 11.0/2.0*eta + 9.0*xi*xi + 18.0*xi*eta + 9.0*eta*eta 
+               - 9.0/2.0*xi*xi*xi - 27.0/2.0*xi*xi*eta - 27.0/2.0*xi*eta*eta - 9.0/2.0*eta*eta*eta;
+      phi[1] = xi - 9.0/2.0*xi*xi + 9.0/2.0*xi*xi*xi;
+      phi[2] = eta - 9.0/2.0*eta*eta + 9.0/2.0*eta*eta*eta;
+      phi[3] = -9.0/2.0*xi*eta + 27.0/2.0*xi*xi*eta;
+      phi[4] = -9.0/2.0*xi*eta + 27.0/2.0*xi*eta*eta;
+      phi[5] = -9.0/2.0*eta + 9.0/2.0*xi*eta + 18.0*eta*eta - 27.0/2.0*xi*eta*eta - 27.0/2.0*eta*eta*eta;
+      phi[6] = 9.0*eta - 45.0/2.0*xi*eta - 45.0/2.0*eta*eta + 27.0/2.0*xi*xi*eta + 27.0*xi*eta*eta + 27.0/2.0*eta*eta*eta;
+      phi[7] = 9.0*xi - 45.0/2.0*xi*xi - 45.0/2.0*xi*eta + 27.0/2.0*xi*xi*xi + 27.0*xi*xi*eta + 27.0/2.0*xi*eta*eta;
+      phi[8] = -9.0/2.0*xi + 18.0*xi*xi + 9.0/2.0*xi*eta - 27.0/2.0*xi*xi*xi - 27.0/2.0*xi*xi*eta;
+      phi[9] = 27.0*xi*eta - 27.0*xi*xi*eta - 27.0*xi*eta*eta;
+      break;
+      
+    default:
+      std::cerr << "evaluateBasis: p=" << p << " not implemented!" << std::endl;
+      exit(1);
+  }
+  
+  return phi;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// COMPUTE MASS MATRIX INVERSE
+// ═══════════════════════════════════════════════════════════════
+void FiniteVolumeSolver::computeMassMatrix() {
+  int ndof = ndof_per_elem;
+  MassMatrixInv.resize(ndof, std::vector<double>(ndof, 0.0));
+  
+  // Mass matrix M_ij = ∫∫ φ_i φ_j dA on reference triangle
+  // For simplicity, use analytical formulas for p=0,1,2,3
+  
+  if (p_order == 0) {
+    // M = area = 0.5 (reference triangle area)
+    // M^{-1} = 2.0 (will divide by actual element area later)
+    MassMatrixInv[0][0] = 2.0;
+  }
+  else if (p_order == 1) {
+    // Analytical mass matrix inverse for p=1 on reference triangle
+    // Area = 0.5, mass matrix has specific structure
+    // M^{-1} = 6 * [[3, -1, -1], [-1, 3, -1], [-1, -1, 3]]
+    MassMatrixInv[0][0] =  18.0;  MassMatrixInv[0][1] = -6.0;  MassMatrixInv[0][2] = -6.0;
+    MassMatrixInv[1][0] =  -6.0;  MassMatrixInv[1][1] = 18.0;  MassMatrixInv[1][2] = -6.0;
+    MassMatrixInv[2][0] =  -6.0;  MassMatrixInv[2][1] = -6.0;  MassMatrixInv[2][2] = 18.0;
+  }
+  else if (p_order == 2) {
+    // For p=2, mass matrix is 6x6 - use numerical integration or lookup table
+    // Simplified: use identity (not correct, but placeholder)
+    std::cerr << "Warning: Mass matrix for p=2 using placeholder identity!" << std::endl;
+    for (int i = 0; i < ndof; ++i) {
+      MassMatrixInv[i][i] = 1.0;
+    }
+  }
+  else if (p_order == 3) {
+    // For p=3, mass matrix is 10x10
+    std::cerr << "Warning: Mass matrix for p=3 using placeholder identity!" << std::endl;
+    for (int i = 0; i < ndof; ++i) {
+      MassMatrixInv[i][i] = 1.0;
+    }
+  }
+  else {
+    std::cerr << "computeMassMatrix: p > 3 not implemented!" << std::endl;
+    exit(1);
+  }
+}
+
+std::vector<double>
+FiniteVolumeSolver::evaluateBasisGrad(double xi, double eta, int p) {
+  // Gradients of basis functions (not yet implemented)
+  // Returns [dφ_0/dξ, dφ_1/dξ, ..., dφ_0/dη, dφ_1/dη, ...]
+  std::cerr << "evaluateBasisGrad not yet implemented!" << std::endl;
+  exit(1);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// QUADRATURE HELPER FUNCTION
+// ═══════════════════════════════════════════════════════════════
+FiniteVolumeSolver::QuadRule 
+FiniteVolumeSolver::getQuadratureRule(int p_order) {
+  QuadRule qr;
+  
+  // Choose number of points based on polynomial order
+  // For p-order basis, need to integrate degree ~2p polynomials (flux × basis)
+  // Use p+1 or p+2 points to be safe
+  
+  if (p_order == 0) {
+    // 1 point (exact for degree 1)
+    qr.n = 1;
+    qr.points = {0.5};
+    qr.weights = {1.0};
+  }
+  else if (p_order == 1) {
+    // 2 points (exact for degree 3)
+    qr.n = 2;
+    qr.points = {0.211324865405187, 0.788675134594813};
+    qr.weights = {0.5, 0.5};
+  }
+  else if (p_order == 2) {
+    // 3 points (exact for degree 5)
+    qr.n = 3;
+    qr.points = {0.112701665379258, 0.5, 0.887298334620742};
+    qr.weights = {0.277777777777778, 0.444444444444444, 0.277777777777778};
+  }
+  else if (p_order == 3) {
+    // 4 points (exact for degree 7)
+    qr.n = 4;
+    qr.points = {0.069431844202974, 0.330009478207572, 
+                 0.669990521792428, 0.930568155797026};
+    qr.weights = {0.173927422568727, 0.326072577431273,
+                  0.326072577431273, 0.173927422568727};
+  }
+  else {
+    std::cerr << "Quadrature not implemented for p > 3!" << std::endl;
+    exit(1);
+  }
+  
+  return qr;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ORIGINAL FV RESIDUAL (for backward compatibility)
+// ═══════════════════════════════════════════════════════════════
+FiniteVolumeSolver::ResidualResult
+FiniteVolumeSolver::calcResidual(const std::vector<Vec4> &Un, double time,
+                                 bool use_unsteady_wake) {
+  int Ne = mesh.E.size();
+  ResidualResult res;
+  res.R.assign(Ne, {0, 0, 0, 0});
+  res.sdl.assign(Ne, 0.0);
+
+  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+    int eL = mesh.IE[i].elemL;
+    int eR = mesh.IE[i].elemR;
+    FluxResult fr;
+    if (fluxname == "hlle")
+      fr = fluxHLLE(Un[eL], Un[eR], mesh.inormals[i], gamma);
+    else
+      fr = fluxRoe(Un[eL], Un[eR], mesh.inormals[i], gamma);
+
+    double len = mesh.ilengths[i];
+    res.R[eL] += fr.F * len;
+    res.R[eR] -= fr.F * len;
+    res.sdl[eL] += fr.smax * len;
+    res.sdl[eR] += fr.smax * len;
+  }
+
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    int bIdx = mesh.BE[i].bIndex;
+    std::string bName = mesh.Bname[bIdx];
+    Vec2 n = mesh.bnormals[i];
+    double len = mesh.blengths[i];
+
+    FluxResult fr;
+    if (bName == "inflow") {
+      Vec2 edge_midpoint = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
+      double y_pos = edge_midpoint.y;
+      Vec4 Ub = subsonicInflow(Un[eL], n, rho0, a0, alpha, gamma, y_pos, time, use_unsteady_wake);
+      if (fluxname == "hlle")
+        fr = fluxHLLE(Un[eL], Ub, n, gamma);
+      else
+        fr = fluxRoe(Un[eL], Ub, n, gamma);
+    } else if (bName == "outflow") {
+      Vec4 Ub = subsonicOutflow(Un[eL], n, pout, gamma);
+      if (fluxname == "hlle")
+        fr = fluxHLLE(Un[eL], Ub, n, gamma);
+      else
+        fr = fluxRoe(Un[eL], Ub, n, gamma);
+    } else if (bName == "wall") {
+      fr = inviscidWallFlux(Un[eL], n, gamma);
+    }
+
+    res.R[eL] += fr.F * len;
+    res.sdl[eL] += fr.smax * len;
+  }
+  return res;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DG RESIDUAL CALCULATION
+// ═══════════════════════════════════════════════════════════════
+FiniteVolumeSolver::ResidualResult
+FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
+                                    double time, bool use_unsteady_wake) {
+  int Ne = mesh.E.size();
+  ResidualResult res;
+  
+  // ← INSERT: Residual now has [nelem][ndof] structure
+  res.R.resize(Ne * ndof_per_elem);  // flatten for now, or use 2D vector
+  res.sdl.assign(Ne, 0.0);
+  
+  // Initialize residual to zero
+  for (int e = 0; e < Ne; ++e) {
+    for (int j = 0; j < ndof_per_elem; ++j) {
+      res.R[e * ndof_per_elem + j] = {0, 0, 0, 0};
+    }
+  }
+
+  // Get quadrature rule for this polynomial order
+  QuadRule qr = getQuadratureRule(p_order);
+  
+  // ═══════════════════════════════════════════════════════════════
+  // INTERIOR EDGES
+  // ═══════════════════════════════════════════════════════════════
+  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+    int eL = mesh.IE[i].elemL;
+    int eR = mesh.IE[i].elemR;
+    Vec2 normal = mesh.inormals[i];
+    double len = mesh.ilengths[i];
+    
+    // Simplified for p=0: use element average (centroid)
+    if (p_order == 0) {
+      // For p=0, only 1 DOF per element (cell average)
+      Vec4 uL = Un_dg[eL][0];
+      Vec4 uR = Un_dg[eR][0];
+      
+      FluxResult fr;
+      if (fluxname == "hlle")
+        fr = fluxHLLE(uL, uR, normal, gamma);
+      else
+        fr = fluxRoe(uL, uR, normal, gamma);
+      
+      res.R[eL * ndof_per_elem + 0] += fr.F * len;
+      res.R[eR * ndof_per_elem + 0] -= fr.F * len;
+      res.sdl[eL] += fr.smax * len;
+      res.sdl[eR] += fr.smax * len;
+    }
+    else {
+      // For p>0: Use quadrature integration
+      // Loop over quadrature points
+      for (int q = 0; q < qr.n; ++q) {
+        // Map quadrature point from [0,1] to reference coordinates
+        // Simplified: use edge 0 parameterization (ξ=t, η=0) for all edges
+        double t = qr.points[q];  // parameter along edge [0,1]
+        double xi_q = t;          // map to reference: edge 0 has ξ=t
+        double eta_q = 0.0;       // edge 0 has η=0
+        
+        // Evaluate basis functions at this quadrature point
+        std::vector<double> phiL = evaluateBasis(xi_q, eta_q, p_order);
+        std::vector<double> phiR = evaluateBasis(xi_q, eta_q, p_order);
+        
+        // Reconstruct solution at quadrature point
+        Vec4 u_L = {0,0,0,0};
+        Vec4 u_R = {0,0,0,0};
+        for (int j = 0; j < ndof_per_elem; ++j) {
+          u_L += Un_dg[eL][j] * phiL[j];  // u = Σ u_j φ_j
+          u_R += Un_dg[eR][j] * phiR[j];
+        }
+        
+        // Compute Riemann flux at this point
+        FluxResult fr;
+        if (fluxname == "hlle")
+          fr = fluxHLLE(u_L, u_R, normal, gamma);
+        else
+          fr = fluxRoe(u_L, u_R, normal, gamma);
+        
+        // Integrate: add to residual for each DOF
+        for (int j = 0; j < ndof_per_elem; ++j) {
+          // R_j += weight * F* * φ_j * edge_length
+          res.R[eL * ndof_per_elem + j] += fr.F * (qr.weights[q] * phiL[j] * len);
+          res.R[eR * ndof_per_elem + j] -= fr.F * (qr.weights[q] * phiR[j] * len);
+        }
+        
+        // Spectral radius for time step (same as FV)
+        res.sdl[eL] += fr.smax * len;
+        res.sdl[eR] += fr.smax * len;
+      } // end quadrature loop
+    }
+  } // end interior edge loop
+  
+  // ═══════════════════════════════════════════════════════════════
+  // BOUNDARY EDGES - same concept
+  // ═══════════════════════════════════════════════════════════════
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    int bIdx = mesh.BE[i].bIndex;
+    std::string bName = mesh.Bname[bIdx];
+    Vec2 n = mesh.bnormals[i];
+    double len = mesh.blengths[i];
+    
+    // Simplified for p=0
+    if (p_order == 0) {
+      Vec4 u_int = Un_dg[eL][0];
+      
+      FluxResult fr;
+      if (bName == "inflow") {
+        Vec2 edge_midpoint = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
+        Vec4 Ub = subsonicInflow(u_int, n, rho0, a0, alpha, gamma, 
+                                 edge_midpoint.y, time, use_unsteady_wake);
+        if (fluxname == "hlle")
+          fr = fluxHLLE(u_int, Ub, n, gamma);
+        else
+          fr = fluxRoe(u_int, Ub, n, gamma);
+      } else if (bName == "outflow") {
+        Vec4 Ub = subsonicOutflow(u_int, n, pout, gamma);
+        if (fluxname == "hlle")
+          fr = fluxHLLE(u_int, Ub, n, gamma);
+        else
+          fr = fluxRoe(u_int, Ub, n, gamma);
+      } else if (bName == "wall") {
+        fr = inviscidWallFlux(u_int, n, gamma);
+      }
+      
+      res.R[eL * ndof_per_elem + 0] += fr.F * len;
+      res.sdl[eL] += fr.smax * len;
+    }
+    else {
+      // For p>0: quadrature loop
+      for (int q = 0; q < qr.n; ++q) {
+        // Map quadrature point to reference coordinates
+        double t = qr.points[q];  // parameter along edge [0,1]
+        double xi_q = t;          // simplified mapping
+        double eta_q = 0.0;       // simplified mapping
+        std::vector<double> phi = evaluateBasis(xi_q, eta_q, p_order);
+        
+        // Reconstruct interior state
+        Vec4 u_int = {0,0,0,0};
+        for (int j = 0; j < ndof_per_elem; ++j) {
+          u_int += Un_dg[eL][j] * phi[j];
+        }
+        
+        // Compute physical position of quadrature point on edge
+        // Linear interpolation between edge vertices
+        Vec2 edge_pos = mesh.V[mesh.BE[i].v[0]] * (1.0 - t) + 
+                        mesh.V[mesh.BE[i].v[1]] * t;
+        
+        // Apply boundary condition to get exterior state
+        Vec4 u_ext;
+        
+        FluxResult fr;
+        if (bName == "inflow") {
+          u_ext = subsonicInflow(u_int, n, rho0, a0, alpha, gamma, 
+                                 edge_pos.y, time, use_unsteady_wake);
+          if (fluxname == "hlle")
+            fr = fluxHLLE(u_int, u_ext, n, gamma);
+          else
+            fr = fluxRoe(u_int, u_ext, n, gamma);
+        } else if (bName == "outflow") {
+          u_ext = subsonicOutflow(u_int, n, pout, gamma);
+          if (fluxname == "hlle")
+            fr = fluxHLLE(u_int, u_ext, n, gamma);
+          else
+            fr = fluxRoe(u_int, u_ext, n, gamma);
+        } else if (bName == "wall") {
+          fr = inviscidWallFlux(u_int, n, gamma);
+        }
+        
+        // Integrate
+        for (int j = 0; j < ndof_per_elem; ++j) {
+          res.R[eL * ndof_per_elem + j] += fr.F * (qr.weights[q] * phi[j] * len);
+        }
+        res.sdl[eL] += fr.smax * len;
+      }
+    }
+  }
+  
+  return res;
+}
+
+void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
+                                     bool limited) {
+  int Ne = mesh.E.size();
+  std::cout << "Beginning solver loop for " << itercap << " iterations..."
+            << std::endl;
+  for (int niter = 0; niter < itercap; ++niter) {
+    // Calculate residual just for the norm and sdl (for dt)
+    ResidualResult res =
+        secondOrder ? calcResidualSecondOrder(U, limited, 0.0, false) : calcResidual(U, 0.0, false);
+
+    double Rnorm = 0;
+    for (const auto &r : res.R) {
+      Rnorm +=
+          std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+    }
+    res_history.push_back(Rnorm);
+
+    if (niter % 10 == 0 || Rnorm < rtol) {
+      double minRho = 1e10, minP = 1e10;
+      cell_residuals.resize(Ne);
+      for (int i = 0; i < Ne; ++i) {
+        const auto &u = U[i];
+        const auto &r = res.R[i];
+        cell_residuals[i] =
+            std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+
+        State s(u, gamma);
+        minRho = std::min(minRho, s.rho());
+        minP = std::min(minP, s.p());
+      }
+      std::cout << "Iter: " << std::setw(6) << niter
+                << " | Residual: " << std::scientific << std::setprecision(6)
+                << Rnorm << " | Min Rho: " << minRho << " | Min P: " << minP
+                << std::endl;
+    }
+
+    if (Rnorm < rtol) {
+      std::cout << "Converged in " << niter << " iterations." << std::endl;
+      break;
+    }
+
+    // Use SSP-RK2 for time integration
+    U = sspRK2(U, secondOrder, limited, 0.0, false);
+
+    if (!isPhysical(U)) {
+      std::cerr << "Non-physical state detected at iteration " << niter
+                << std::endl;
+      break;
+    }
+  }
+}
+
+std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
+                                             bool secondOrder, bool limited, double time,
+                                             bool use_unsteady_wake) {
+  int Ne = Un.size();
+  ResidualResult res1 =
+      secondOrder ? calcResidualSecondOrder(Un, limited, time, use_unsteady_wake) : calcResidual(Un, time, use_unsteady_wake);
+  std::vector<Vec4> U1(Ne);
+  double cfl_eff = CFL;
+  if (secondOrder && limited)
+    // cfl_eff *= 0.2;
+    cfl_eff *= 1;
+
+  for (int i = 0; i < Ne; ++i) {
+    double sdl = std::max(res1.sdl[i], 1e-12);
+    double dt = cfl_eff * 2.0 * mesh.areas[i] / sdl;
+    U1[i] = Un[i] - (res1.R[i] / mesh.areas[i]) * dt;
+  }
+
+  ResidualResult res2 =
+      secondOrder ? calcResidualSecondOrder(U1, limited, time, use_unsteady_wake) : calcResidual(U1, time, use_unsteady_wake);
+  std::vector<Vec4> Unp1(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    double sdl = std::max(res1.sdl[i], 1e-12);
+    double dt = cfl_eff * 2.0 * mesh.areas[i] / sdl;
+    Unp1[i] = Un[i] * 0.5 + (U1[i] - (res2.R[i] / mesh.areas[i]) * dt) * 0.5;
+  }
+  return Unp1;
+}
+
+// Overload: time-accurate unsteady SSP-RK2 with a single global dt for all cells
+std::vector<Vec4> FiniteVolumeSolver::sspRK2(const std::vector<Vec4> &Un,
+                                             double dt_global,
+                                             bool secondOrder, bool limited,
+                                             double time,
+                                             bool use_unsteady_wake) {
+  int Ne = Un.size();
+
+  // Stage 1: U1 = Un - dt * L(Un)
+  ResidualResult res1 =
+      secondOrder ? calcResidualSecondOrder(Un, limited, time, use_unsteady_wake)
+                  : calcResidual(Un, time, use_unsteady_wake);
+  std::vector<Vec4> U1(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    U1[i] = Un[i] - (res1.R[i] / mesh.areas[i]) * dt_global;
+  }
+
+  // Stage 2: Unp1 = 0.5*Un + 0.5*(U1 - dt * L(U1))
+  ResidualResult res2 =
+      secondOrder ? calcResidualSecondOrder(U1, limited, time, use_unsteady_wake)
+                  : calcResidual(U1, time, use_unsteady_wake);
+  std::vector<Vec4> Unp1(Ne);
+  for (int i = 0; i < Ne; ++i) {
+    Unp1[i] = Un[i] * 0.5 + (U1[i] - (res2.R[i] / mesh.areas[i]) * dt_global) * 0.5;
+  }
+  return Unp1;
+}
+
+std::vector<Vec4> FiniteVolumeSolver::applyLimiter(const std::vector<Vec4> &Un,
+                                                   std::vector<Vec4> &gradX,
+                                                   std::vector<Vec4> &gradY) {
+  int Ne = mesh.E.size();
+  std::vector<std::vector<int>> neighbors(Ne);
+  for (const auto &ie : mesh.IE) {
+    neighbors[ie.elemL].push_back(ie.elemR);
+    neighbors[ie.elemR].push_back(ie.elemL);
+  }
+  // (Boundary neighbors are technically included if we want, but let's stick to
+  // Python logic)
+
+  for (int i = 0; i < Ne; ++i) {
+    Vec4 Umin = Un[i], Umax = Un[i];
+    for (int nbor : neighbors[i]) {
+      for (int k = 0; k < 4; ++k) {
+        Umin[k] = std::min(Umin[k], Un[nbor][k]);
+        Umax[k] = std::max(Umax[k], Un[nbor][k]);
+      }
+    }
+
+    Vec4 phi = {1, 1, 1, 1};
+    double dx = std::sqrt(mesh.areas[i]);
+    double eps2 = std::pow(5.0 * dx, 3.0); // Venkatakrishnan parameter K=5.0
+
+    for (int v = 0; v < 3; ++v) {
+      Vec2 r = mesh.V[mesh.E[i].v[v]] - mesh.centroids[i];
+      Vec4 dU = gradX[i] * r.x + gradY[i] * r.y;
+      for (int k = 0; k < 4; ++k) {
+        if (std::abs(dU[k]) > 1e-12) {
+          double D1 = (dU[k] > 0) ? (Umax[k] - Un[i][k]) : (Umin[k] - Un[i][k]);
+          double D2 = dU[k];
+          double num = D1 * D1 + eps2 + 2.0 * D1 * D2;
+          double den = D1 * D1 + 2.0 * D2 * D2 + D1 * D2 + eps2;
+          phi[k] = std::min(phi[k], num / den);
+        }
+      }
+    }
+    for (int k = 0; k < 4; ++k) {
+      phi[k] = std::max(0.0, std::min(1.0, phi[k]));
+      gradX[i][k] *= phi[k];
+      gradY[i][k] *= phi[k];
+    }
+  }
+  return Un; // Gradient is modified in-place
+}
+
+bool FiniteVolumeSolver::isPhysical(const std::vector<Vec4> &Un) {
+  for (const auto &u : Un) {
+    State s(u, gamma);
+    if (s.rho() <= 0 || s.p() <= 0)
+      return false;
+  }
+  return true;
+}
+
+FiniteVolumeSolver::ResidualResult
+FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
+                                            bool limited, double time,
+                                            bool use_unsteady_wake) {
+  // Basic implementation for now, mirroring the calcResidual structure but with
+  // gradients This part requires more complex logic for Green-Gauss gradients
+  // and limiting. Given the task's scope, I'll provide a simplified version or
+  // the first order for now if time is tight, but the user expects second
+  // order. Let's implement the gradient logic.
+  int Ne = mesh.E.size();
+  std::vector<Vec4> gradX(Ne, {0, 0, 0, 0}), gradY(Ne, {0, 0, 0, 0});
+
+  // Green-Gauss Gradient
+  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+    int eL = mesh.IE[i].elemL;
+    int eR = mesh.IE[i].elemR;
+    Vec4 u_hat = (Un[eL] + Un[eR]) * 0.5;
+    Vec2 n = mesh.inormals[i];
+    double len = mesh.ilengths[i];
+    gradX[eL] += u_hat * (n.x * len);
+    gradY[eL] += u_hat * (n.y * len);
+    gradX[eR] -= u_hat * (n.x * len);
+    gradY[eR] -= u_hat * (n.y * len);
+  }
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    Vec4 Ub;
+    std::string bName = mesh.Bname[mesh.BE[i].bIndex];
+    if (bName == "inflow") {
+      Vec2 edge_midpoint = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
+      double y_pos = edge_midpoint.y;
+      Ub = subsonicInflow(Un[eL], mesh.bnormals[i], rho0, a0, alpha, gamma, y_pos, time);
+    } else if (bName == "outflow")
+      Ub = subsonicOutflow(Un[eL], mesh.bnormals[i], pout, gamma);
+    else if (bName == "wall")
+      Ub = inviscidWallState(Un[eL], mesh.bnormals[i], gamma);
+
+    Vec4 u_hat = (Un[eL] + Ub) * 0.5;
+    Vec2 n = mesh.bnormals[i];
+    double len = mesh.blengths[i];
+    gradX[eL] += u_hat * (n.x * len);
+    gradY[eL] += u_hat * (n.y * len);
+  }
+
+  for (int i = 0; i < Ne; ++i) {
+    gradX[i] = gradX[i] / mesh.areas[i];
+    gradY[i] = gradY[i] / mesh.areas[i];
+  }
+
+  if (limited) {
+    applyLimiter(Un, gradX, gradY);
+  }
+
+  ResidualResult res;
+  res.R.assign(Ne, {0, 0, 0, 0});
+  res.sdl.assign(Ne, 0.0);
+
+  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+    int eL = mesh.IE[i].elemL;
+    int eR = mesh.IE[i].elemR;
+    Vec2 xf = (mesh.V[mesh.IE[i].v[0]] + mesh.V[mesh.IE[i].v[1]]) * 0.5;
+
+    Vec2 dL = xf - mesh.centroids[eL];
+    Vec2 dR = xf - mesh.centroids[eR];
+
+    // Periodic shift correction (standard 18.0 as per user mesh fixes)
+    if (std::abs(dL.y) > 9.0) {
+      if (dL.y > 0)
+        dL.y -= 18.0;
+      else
+        dL.y += 18.0;
+    }
+    if (std::abs(dR.y) > 9.0) {
+      if (dR.y > 0)
+        dR.y -= 18.0;
+      else
+        dR.y += 18.0;
+    }
+
+    Vec4 ULf = Un[eL] + gradX[eL] * dL.x + gradY[eL] * dL.y;
+    Vec4 URf = Un[eR] + gradX[eR] * dR.x + gradY[eR] * dR.y;
+
+    FluxResult fr;
+    if (fluxname == "hlle")
+      fr = fluxHLLE(ULf, URf, mesh.inormals[i], gamma);
+    else
+      fr = fluxRoe(ULf, URf, mesh.inormals[i], gamma);
+
+    double len = mesh.ilengths[i];
+    res.R[eL] += fr.F * len;
+    res.R[eR] -= fr.F * len;
+    res.sdl[eL] += fr.smax * len;
+    res.sdl[eR] += fr.smax * len;
+  }
+
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    Vec2 xf = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
+    Vec2 dL = xf - mesh.centroids[eL];
+    Vec4 ULf = Un[eL] + gradX[eL] * dL.x + gradY[eL] * dL.y;
+
+    std::string bName = mesh.Bname[mesh.BE[i].bIndex];
+    Vec2 n = mesh.bnormals[i];
+    double len = mesh.blengths[i];
+    FluxResult fr;
+    if (bName == "inflow") {
+      double y_pos = xf.y;
+      Vec4 Ub = subsonicInflow(ULf, n, rho0, a0, alpha, gamma, y_pos, time, use_unsteady_wake);
+      if (fluxname == "hlle")
+        fr = fluxHLLE(ULf, Ub, n, gamma);
+      else
+        fr = fluxRoe(ULf, Ub, n, gamma);
+    } else if (bName == "outflow") {
+      Vec4 Ub = subsonicOutflow(ULf, n, pout, gamma);
+      if (fluxname == "hlle")
+        fr = fluxHLLE(ULf, Ub, n, gamma);
+      else
+        fr = fluxRoe(ULf, Ub, n, gamma);
+    } else if (bName == "wall") {
+      fr = inviscidWallFlux(ULf, n, gamma);
+    }
+    res.R[eL] += fr.F * len;
+    res.sdl[eL] += fr.smax * len;
+  }
+  return res;
+}
+
+void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
+                                       bool limited, double t_end) {
+  int Ne = mesh.E.size();
+  std::cout << "Beginning unsteady solver loop for " << itercap << " iterations..."
+            << std::endl;
+  
+  // For unsteady, use a global time step (smallest over all cells)
+  current_time = 0.0;
+  std::vector<Vec4> U_prev = U;  // Store previous solution for monitoring change
+  
+  // Snapshot saving parameters
+  int snapshot_interval = 100;  // Save every N iterations
+  int snapshot_count = 0;
+  
+  // Create data directory if it doesn't exist
+  system("mkdir -p data");
+  
+  for (int niter = 0; niter < itercap; ++niter) {
+    // Compute spectral radii via first-order residual (cheap, order-independent)
+    // to determine the global time step for time-accurate integration.
+    ResidualResult res_sdl = calcResidual(U, current_time, true);
+
+    // Global time step: minimum CFL-limited dt over all cells
+    double dt_global = 1e10;
+    for (int i = 0; i < Ne; ++i) {
+      double sdl = std::max(res_sdl.sdl[i], 1e-12);
+      double dt_local = CFL * 2.0 * mesh.areas[i] / sdl;
+      dt_global = std::min(dt_global, dt_local);
+    }
+
+    // SSP-RK2 with uniform global dt (time-accurate)
+    std::vector<Vec4> U_new = sspRK2(U, dt_global, secondOrder, limited, current_time, true);
+
+    // Also keep res for logging (reuse res_sdl which has R from 1st-order;
+    // good enough for the residual norm printout)
+    ResidualResult &res = res_sdl;
+    U = U_new;
+    
+    // Advance physical time
+    current_time += dt_global;
+    
+    // Stop if t_end reached
+    if (t_end > 0.0 && current_time >= t_end) {
+      // Save a final snapshot at t_end
+      char filename[256];
+      snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin",
+               current_time, snapshot_count);
+      saveSnapshot(filename);
+      std::cout << "Saved snapshot: " << filename << std::endl;
+      std::cout << "Reached t_end = " << t_end << " at iteration " << niter << std::endl;
+      break;
+    }
+    
+    // Calculate residual norm (time derivative magnitude)
+    double Rnorm = 0;
+    for (const auto &r : res.R) {
+      Rnorm += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+    }
+    res_history.push_back(Rnorm);
+    
+    // Calculate solution change from previous time step
+    double dU_norm = 0;
+    for (int i = 0; i < Ne; ++i) {
+      Vec4 dU = U[i] - U_prev[i];
+      dU_norm += std::abs(dU[0]) + std::abs(dU[1]) + std::abs(dU[2]) + std::abs(dU[3]);
+    }
+
+    // Save periodic snapshots
+    if (niter % snapshot_interval == 0) {
+      char filename[256];
+      snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin", 
+               current_time, snapshot_count);
+      saveSnapshot(filename);
+      std::cout << "Saved snapshot: " << filename << std::endl;
+      snapshot_count++;
+    }
+
+    if (niter % 1 == 0) {
+      double minRho = 1e10, minP = 1e10;
+      cell_residuals.resize(Ne);
+      for (int i = 0; i < Ne; ++i) {
+        const auto &u = U[i];
+        const auto &r = res.R[i];
+        cell_residuals[i] =
+            std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+
+        State s(u, gamma);
+        minRho = std::min(minRho, s.rho());
+        minP = std::min(minP, s.p());
+      }
+      std::cout << "Iter: " << std::setw(6) << niter
+                << " | ||dU/dt||: " << std::scientific << std::setprecision(6)
+                << Rnorm << " | ||ΔU||: " << dU_norm 
+                << " | dt: " << dt_global
+                << " | time: " << current_time
+                << " | Min Rho: " << minRho << " | Min P: " << minP
+                << std::endl;
+    }
+
+    // Check for convergence (solution stopped changing)
+    if (dU_norm < rtol) {
+      std::cout << "Reached steady state (solution stopped changing) at iteration " 
+                << niter << std::endl;
+      break;
+    }
+    
+    // Check for NaN/Inf
+    if (!isPhysical(U)) {
+      std::cerr << "Non-physical state detected at iteration " << niter
+                << std::endl;
+      break;
+    }
+    
+    // Store current solution for next iteration comparison
+    U_prev = U;
+  }
+}
+
+void FiniteVolumeSolver::saveSnapshot(const std::string &filename) {
+  std::ofstream out(filename, std::ios::binary);
+  int Ne = U.size();
+  out.write((char *)&Ne, sizeof(int));
+  for (const auto &u : U) {
+    out.write((char *)u.v, sizeof(double) * 4);
+  }
+  out.close();
+}
