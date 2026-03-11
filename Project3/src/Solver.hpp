@@ -36,6 +36,7 @@ public:
 
   FiniteVolumeSolver(const std::string &meshfile);
 
+  void initializeDG();  // Call after setting p_order
   void setInitialCondition();
   void loadInitialCondition(const std::string &filename);
   void loadMappedInitialCondition(const std::string &coarse_meshfile,
@@ -55,6 +56,7 @@ private:
 
   // Mass matrix storage (pre-computed per element or global)
   std::vector<std::vector<double>> MassMatrixInv;  // [ndof][ndof] - inverted mass matrix
+  double mass_spectral_radius = 2.0;               // max eigenvalue of M_ref^{-1} (=2 for p=0)
   
   // Basis function helper
   void computeMassMatrix();                         // compute M^{-1} once
@@ -77,6 +79,20 @@ private:
   ResidualResult calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg, 
     double time = 0.0, 
     bool use_unsteady_wake = false);
+
+  // BR2 diffusion residual (removed — not needed for inviscid Euler).
+
+  // Weights w_j = int(phi_j dA_ref) / A_ref  for cell-average computation.
+  std::vector<double> cellAvgWeights;  // length ndof_per_elem
+
+  // Compute the L2 cell average: u_bar = sum_j w_j * U_dg[e][j]
+  Vec4 cellAverage(const std::vector<Vec4> &dofs) const;
+
+  // Venkatakrishnan DG limiter (Cockburn & Shu 1998 minmod-based projection).
+  // Projects higher-order DOFs onto a limited linear reconstruction to suppress
+  // spurious oscillations near shocks.  Applied after each RK stage when
+  // p_order > 0.
+  void applyLimiterDG(std::vector<std::vector<Vec4>> &Un_dg);
     
   ResidualResult calcResidualSecondOrder(const std::vector<Vec4> &Un,
                                          bool limited, double time = 0.0,
@@ -93,8 +109,23 @@ private:
                            bool secondOrder, bool limited, double time,
                            bool use_unsteady_wake);
 
+  // DG time stepping functions
+  // Local time-stepping (steady): accepts an optional pre-computed Stage-1 residual
+  // to avoid recomputing it when the caller already has it.
+  std::vector<std::vector<Vec4>> sspRK2_DG(const std::vector<std::vector<Vec4>> &Un_dg,
+                                            double time = 0.0,
+                                            bool use_unsteady_wake = false,
+                                            const ResidualResult *res1_precomputed = nullptr);
+  // Global time-stepping (unsteady): accepts an optional pre-computed Stage-1 residual.
+  std::vector<std::vector<Vec4>> sspRK2_DG(const std::vector<std::vector<Vec4>> &Un_dg,
+                                            double dt_global,
+                                            double time,
+                                            bool use_unsteady_wake,
+                                            const ResidualResult *res1_precomputed = nullptr);
+
   std::vector<double> calcDt(const std::vector<double> &sdl);
   bool isPhysical(const std::vector<Vec4> &Un);
+  bool isPhysicalDG(const std::vector<std::vector<Vec4>> &Un_dg);
 };
 
 #endif

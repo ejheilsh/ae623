@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
   }
 
   std::string meshfile = argv[1];
-  bool secondOrder = false;
+  int p_order = 0;  // DG polynomial order (0, 1, 2, 3)
   double cfl = 1.0;
   std::string fluxname = "roe";
   int itercap = 1e6;
@@ -30,7 +30,11 @@ int main(int argc, char **argv) {
   };
 
   if (argc >= 3 && !is_flag_token(argv[2])) {
-    secondOrder = (std::string(argv[2]) == "2");
+    p_order = std::stoi(argv[2]);  // Parse as integer for DG order
+    if (p_order < 0 || p_order > 3) {
+      std::cerr << "Error: order must be 0, 1, 2, or 3" << std::endl;
+      return 1;
+    }
   }
   if (argc >= 4 && !is_flag_token(argv[3])) {
     cfl = std::stod(argv[3]);
@@ -71,6 +75,8 @@ int main(int argc, char **argv) {
 
   try {
     FiniteVolumeSolver solver(meshfile);
+    solver.p_order = p_order;  // Set DG polynomial order
+    solver.initializeDG();     // Initialize DG structures based on p_order
     solver.CFL = cfl;
     solver.fluxname = fluxname;
     
@@ -86,7 +92,7 @@ int main(int argc, char **argv) {
     }
 
     std::cerr << "Starting solver for " << meshfile
-              << " (Order: " << (secondOrder ? "2nd" : "1st")
+              << " (DG Order p=" << p_order
               << ", CFL: " << cfl << ", Flux: " << fluxname
               << ", IterCap: " << itercap 
               << ", Mode: " << (unsteady ? "Unsteady" : "Steady")
@@ -97,11 +103,9 @@ int main(int argc, char **argv) {
               << ")" << std::endl;
 
     if (unsteady) {
-      // limited was false...
-      solver.solveUnsteady(itercap, secondOrder, true, t_end);
+      solver.solveUnsteady(itercap, false, true, t_end);  // DG doesn't use secondOrder flag
     } else {
-      // limited was false...
-      solver.solveSteady(itercap, secondOrder, true);
+      solver.solveSteady(itercap, false, true);  // DG doesn't use secondOrder flag
     }
 
     // Extract grid name from mesh file path

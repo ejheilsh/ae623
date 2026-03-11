@@ -44,23 +44,50 @@ bool Mesh::readGRI(const std::string &filename) {
 
   E.clear();
   int Ne_read = 0;
+  q_order_global = 1;
+  has_curved_elements = false;
+  int gri_degree_hint = 1;  // the 'degree' field in the GRI element block
+
   while (Ne_read < Ne && f.good()) {
     int ne, degree;
     std::string type;
     if (!(f >> ne >> degree >> type))
       break;
 
+    // In this GRI format the 'degree' field records the intended solution
+    // polynomial order (not the number of geometry nodes per element).
+    // All triangular elements are stored with exactly 3 corner nodes regardless
+    // of degree.  We track the maximum degree as a hint for the solver.
+    if (degree > gri_degree_hint) gri_degree_hint = degree;
+
+    // Number of nodes per element: always 3 corner nodes in this GRI convention.
+    // True isoparametric curved elements (q>1) would require 6 or 10 nodes per
+    // element line; since none of the meshes in this project include them, we
+    // keep the geometry strictly linear (q=1) for all elements.
+    int nodes_per_elem = 3;
+
     for (int i = 0; i < ne; ++i) {
       Element el;
-      if (!(f >> el.v[0] >> el.v[1] >> el.v[2]))
-        break;
-      el.v[0]--;
-      el.v[1]--;
-      el.v[2]--; // 1-based to 0-based
+      el.q_order = 1;  // straight triangle (geometry always linear in this dataset)
+      std::vector<int> allnodes(nodes_per_elem);
+      for (int k = 0; k < nodes_per_elem; ++k) {
+        if (!(f >> allnodes[k])) break;
+        allnodes[k]--;  // 1-based to 0-based
+      }
+      el.v[0] = allnodes[0];
+      el.v[1] = allnodes[1];
+      el.v[2] = allnodes[2];
       E.push_back(el);
     }
     Ne_read += ne;
   }
+
+  // Expose the solution-degree hint via q_order_global so the solver can read it.
+  // has_curved_elements stays false because no mesh in this project encodes
+  // extra high-order geometry nodes.
+  // Cap the hint at 3 (max supported DG order); larger values indicate an
+  // alternate GRI variant where the field does not encode the element count.
+  q_order_global = (gri_degree_hint <= 3) ? gri_degree_hint : 1;
 
   if (Ne_read < Ne) {
     std::cerr << "Error: Only read " << Ne_read << " elements, expected " << Ne
@@ -149,6 +176,9 @@ bool Mesh::readGRI(const std::string &filename) {
   computeGeometry();
   std::cout << "Mesh loaded: Ni=" << IE.size() << ", Nb=" << BE.size()
             << ", Ne=" << E.size() << std::endl;
+  std::cout << "Mesh GRI degree hint: p_intended=" << q_order_global
+            << "  [geometry is always q=1 straight triangles in this dataset]"
+            << std::endl;
   return true;
 }
 
@@ -401,4 +431,178 @@ void Mesh::computeGeometry() {
       bnormals[i] = bnormals[i] * -1.0;
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mesh::globalToReference — Newton-Raphson inverse coordinate mapping
+//   global (x,y)  →  reference (xi, eta)   for element e.
+//
+// Implements the algorithm from Listing 4.4.1 of the course notes.
+// For straight (q=1) elements the mapping is affine so this converges in one
+// Newton step; for curved (q>1) elements it iterates to the requested tolerance.
+//
+// The reference triangle has corners:  v0→(0,0),  v1→(1,0),  v2→(0,1).
+// The isoparametric mapping for a degree-q triangle is:
+//   x(ξ,η) = Σ_k  N_k(ξ,η) * x_k
+// where N_k are the nodal Lagrange shape functions and x_k are the physical
+// positions of all geometry nodes (corners + high-order nodes).
+//
+// For q=1: x = x0*(1-ξ-η) + x1*ξ + x2*η   (exactly 3 nodes, affine)
+// For q=2: 6 nodes, quadratic mapping
+// For q=3: 10 nodes, cubic mapping
+//
+// The Jacobian J = ∂x/∂ξ  (2×2) is computed analytically from the shape
+// function gradients and inverted analytically (2×2 case).
+// ─────────────────────────────────────────────────────────────────────────────
+bool Mesh::globalToReference(int e, const Vec2 &xglob,
+                             double &xi, double &eta,
+                             double tol, int maxIter) const {
+  const Element &el = E[e];
+  int q = el.q_order;
+
+  // Collect physical positions of all geometry nodes in the canonical order:
+  //   q=1: [v0, v1, v2]
+  //   q=2: [v0, v1, v2, mid01, mid12, mid02]
+  //   q=3: [v0, v1, v2, third01a, third01b, third12a, third12b, third20a, third20b, interior]
+  std::vector<Vec2> xnode;
+  xnode.push_back(V[el.v[0]]);
+  xnode.push_back(V[el.v[1]]);
+  xnode.push_back(V[el.v[2]]);
+  for (int idx : el.ho_nodes) xnode.push_back(V[idx]);
+
+  int nnode = (int)xnode.size();
+
+  // Reference coordinates of the geometry nodes (same ordering as xnode)
+  // q=1: (0,0),(1,0),(0,1)
+  // q=2: adds (0.5,0),(0.5,0.5),(0,0.5)
+  // q=3: adds (1/3,0),(2/3,0),(2/3,1/3),(1/3,2/3),(0,2/3),(0,1/3),(1/3,1/3)
+  std::vector<double> xi_ref, eta_ref;
+  if (q == 1) {
+    xi_ref  = {0.0, 1.0, 0.0};
+    eta_ref = {0.0, 0.0, 1.0};
+  } else if (q == 2) {
+    xi_ref  = {0.0, 1.0, 0.0, 0.5, 0.5, 0.0};
+    eta_ref = {0.0, 0.0, 1.0, 0.0, 0.5, 0.5};
+  } else { // q == 3
+    xi_ref  = {0.0, 1.0, 0.0, 1.0/3, 2.0/3, 2.0/3, 1.0/3, 0.0,     0.0,     1.0/3};
+    eta_ref = {0.0, 0.0, 1.0, 0.0,   0.0,   1.0/3, 2.0/3, 2.0/3,   1.0/3,   1.0/3};
+  }
+
+  // Lagrange shape functions N_k(ξ,η) for the geometry nodes
+  // evaluated at a given reference point — and their gradients.
+  // We implement this inline for q=1,2,3.
+  auto evalGeomBasis = [&](double xi_q, double eta_q,
+                           std::vector<double> &N,
+                           std::vector<double> &dNdxi,
+                           std::vector<double> &dNdeta) {
+    N.assign(nnode, 0.0);
+    dNdxi.assign(nnode, 0.0);
+    dNdeta.assign(nnode, 0.0);
+    if (q == 1) {
+      // Standard linear triangle shape functions
+      N[0] = 1.0 - xi_q - eta_q;  N[1] = xi_q;  N[2] = eta_q;
+      dNdxi[0]  = -1.0; dNdxi[1]  = 1.0; dNdxi[2]  = 0.0;
+      dNdeta[0] = -1.0; dNdeta[1] = 0.0; dNdeta[2] = 1.0;
+    } else if (q == 2) {
+      // Serendipity / full quadratic 6-node triangle (barycentric λ1=1-ξ-η, λ2=ξ, λ3=η)
+      double l1 = 1.0 - xi_q - eta_q, l2 = xi_q, l3 = eta_q;
+      N[0] = l1*(2*l1-1);  N[1] = l2*(2*l2-1);  N[2] = l3*(2*l3-1);
+      N[3] = 4*l1*l2;      N[4] = 4*l2*l3;      N[5] = 4*l3*l1;
+      dNdxi[0]  = (2*l1-1)*(-1) + l1*(-2);   // d/dξ of l1*(2l1-1): dl1/dξ=-1
+      dNdxi[1]  = (2*l2-1)*(1)  + l2*(2);
+      dNdxi[2]  = 0.0;
+      dNdxi[3]  = 4*((-1)*l2 + l1*(1));
+      dNdxi[4]  = 4*(l3*(1));
+      dNdxi[5]  = 4*(l3*(-1));
+      dNdeta[0] = (2*l1-1)*(-1) + l1*(-2);   // dl1/dη=-1
+      dNdeta[1] = 0.0;
+      dNdeta[2] = (2*l3-1)*(1)  + l3*(2);
+      dNdeta[3] = 4*((-1)*l2);
+      dNdeta[4] = 4*(l2*(1));
+      dNdeta[5] = 4*((1)*l1 + l3*(-1));
+    } else { // q == 3: 10-node cubic triangle (same as evaluateBasis p=3 in Solver.cpp)
+      double xi2 = xi_q*xi_q, xi3 = xi_q*xi2;
+      double et2 = eta_q*eta_q, et3 = eta_q*et2;
+      N[0] = 1.0 - 11.0/2*xi_q - 11.0/2*eta_q + 9*xi2 + 18*xi_q*eta_q + 9*et2
+             - 9.0/2*xi3 - 27.0/2*xi2*eta_q - 27.0/2*xi_q*et2 - 9.0/2*et3;
+      N[1] = xi_q - 9.0/2*xi2 + 9.0/2*xi3;
+      N[2] = eta_q - 9.0/2*et2 + 9.0/2*et3;
+      N[3] = -9.0/2*xi_q*eta_q + 27.0/2*xi2*eta_q;
+      N[4] = -9.0/2*xi_q*eta_q + 27.0/2*xi_q*et2;
+      N[5] = -9.0/2*eta_q + 9.0/2*xi_q*eta_q + 18*et2 - 27.0/2*xi_q*et2 - 27.0/2*et3;
+      N[6] = 9*eta_q - 45.0/2*xi_q*eta_q - 45.0/2*et2 + 27.0/2*xi2*eta_q + 27*xi_q*et2 + 27.0/2*et3;
+      N[7] = 9*xi_q - 45.0/2*xi2 - 45.0/2*xi_q*eta_q + 27.0/2*xi3 + 27*xi2*eta_q + 27.0/2*xi_q*et2;
+      N[8] = -9.0/2*xi_q + 18*xi2 + 9.0/2*xi_q*eta_q - 27.0/2*xi3 - 27.0/2*xi2*eta_q;
+      N[9] = 27*xi_q*eta_q - 27*xi2*eta_q - 27*xi_q*et2;
+      // Gradients dN/dξ
+      dNdxi[0]  = -11.0/2 + 18*xi_q + 18*eta_q - 27.0/2*xi2 - 27*xi_q*eta_q - 27.0/2*et2;
+      dNdxi[1]  = 1 - 9*xi_q + 27.0/2*xi2;
+      dNdxi[2]  = 0.0;
+      dNdxi[3]  = -9.0/2*eta_q + 27*xi_q*eta_q;
+      dNdxi[4]  = -9.0/2*eta_q + 27.0/2*et2;
+      dNdxi[5]  = 9.0/2*eta_q - 27.0/2*et2;
+      dNdxi[6]  = -45.0/2*eta_q + 27*xi_q*eta_q + 27*et2;
+      dNdxi[7]  = 9 - 45*xi_q - 45.0/2*eta_q + 81.0/2*xi2 + 54*xi_q*eta_q + 27.0/2*et2;
+      dNdxi[8]  = -9.0/2 + 36*xi_q + 9.0/2*eta_q - 81.0/2*xi2 - 27*xi_q*eta_q;
+      dNdxi[9]  = 27*eta_q - 54*xi_q*eta_q - 27*et2;
+      // Gradients dN/dη
+      dNdeta[0] = -11.0/2 + 18*xi_q + 18*eta_q - 27.0/2*xi2 - 27*xi_q*eta_q - 27.0/2*et2;
+      dNdeta[1] = 0.0;
+      dNdeta[2] = 1 - 9*eta_q + 27.0/2*et2;
+      dNdeta[3] = -9.0/2*xi_q + 27.0/2*xi2;
+      dNdeta[4] = -9.0/2*xi_q + 27*xi_q*eta_q;
+      dNdeta[5] = -9.0/2 + 9.0/2*xi_q + 36*eta_q - 27*xi_q*eta_q - 81.0/2*et2;
+      dNdeta[6] = 9 - 45.0/2*xi_q - 45*eta_q + 27.0/2*xi2 + 54*xi_q*eta_q + 81.0/2*et2;
+      dNdeta[7] = -45.0/2*xi_q + 27*xi2 + 27*xi_q*eta_q;
+      dNdeta[8] = 9.0/2*xi_q - 27.0/2*xi2;
+      dNdeta[9] = 27*xi_q - 27*xi2 - 54*xi_q*eta_q;
+    }
+  };
+
+  // Initialise Newton at the centroid of the reference triangle
+  xi  = 1.0/3.0;
+  eta = 1.0/3.0;
+  const double dmax = 1.0;  // maximum update magnitude (per Listing 4.4.1 line 30)
+
+  std::vector<double> N, dNdxi_vec, dNdeta_vec;
+  for (int iter = 0; iter < maxIter; ++iter) {
+    evalGeomBasis(xi, eta, N, dNdxi_vec, dNdeta_vec);
+
+    // Evaluate x(ξ,η) = Σ N_k * xnode_k
+    Vec2 x = {0.0, 0.0};
+    for (int k = 0; k < nnode; ++k) {
+      x.x += N[k] * xnode[k].x;
+      x.y += N[k] * xnode[k].y;
+    }
+
+    // Residual R = x(ξ,η) − xglob
+    Vec2 R = x - xglob;
+    if (std::sqrt(R.x*R.x + R.y*R.y) < tol) return true;
+
+    // Jacobian J = ∂x/∂(ξ,η):  J[0]=∂x/∂ξ, J[1]=∂x/∂η, J[2]=∂y/∂ξ, J[3]=∂y/∂η
+    double J00 = 0, J01 = 0, J10 = 0, J11 = 0;
+    for (int k = 0; k < nnode; ++k) {
+      J00 += dNdxi_vec[k]  * xnode[k].x;
+      J01 += dNdeta_vec[k] * xnode[k].x;
+      J10 += dNdxi_vec[k]  * xnode[k].y;
+      J11 += dNdeta_vec[k] * xnode[k].y;
+    }
+
+    // Analytical 2×2 inverse:  J^{-1} = 1/det * [[J11,-J01],[-J10,J00]]
+    double det = J00*J11 - J01*J10;
+    if (std::abs(det) < 1e-14) return false;  // singular — not inside this element
+    double inv_det = 1.0 / det;
+
+    // Newton update: dxref = -J^{-1} * R
+    double dxi  = inv_det * (-J11*R.x + J01*R.y);
+    double deta = inv_det * ( J10*R.x - J00*R.y);
+
+    // Limit update magnitude to dmax (Listing 4.4.1 lines 29-30)
+    double d = std::max(std::abs(dxi), std::abs(deta));
+    if (d > dmax) { dxi *= dmax/d; deta *= dmax/d; }
+
+    xi  += dxi;
+    eta += deta;
+  }
+  return false;  // did not converge within maxIter
 }
