@@ -489,7 +489,7 @@ void FiniteVolumeSolver::computeMassMatrix() {
     }
     mass_spectral_radius = lambda;
     std::cout << "  M_ref^{-1} spectral radius (p=" << p_order << "): " 
-              << mass_spectral_radius << " -> CFL scale factor: "
+              << mass_spectral_radius << " -> CFL scale factor 2/sr: "
               << 2.0 / mass_spectral_radius << std::endl;
   }
 }
@@ -741,10 +741,8 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       // but the loop still runs in the correct order per the spec.
       qpts2d = {{1.0/3.0, 1.0/3.0, 0.5}};
     } else if (p_order == 1) {
-      qpts2d = {{1.0/6.0, 1.0/6.0, 1.0/6.0},
-                {2.0/3.0, 1.0/6.0, 1.0/6.0},
-                {1.0/6.0, 2.0/3.0, 1.0/6.0}};
-    } else if (p_order == 2) {
+      // Over-integration: degree 4 rule (6 pts) for nonlinear Euler flux
+      // (flux is quadratic in U, ∇φ is constant → integrand is degree ~3)
       qpts2d = {
         {0.108103018168070, 0.445948490915965, 0.111690794839005},
         {0.445948490915965, 0.108103018168070, 0.111690794839005},
@@ -753,20 +751,38 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
         {0.091576213509771, 0.816847572980459, 0.054975871827661},
         {0.091576213509771, 0.091576213509771, 0.054975871827661},
       };
-    } else { // p_order == 3
+    } else if (p_order == 2) {
+      // Over-integration: degree 5 rule (7 pts) for p=2 nonlinear flux
+      // (flux degree ~4, ∇φ degree 1 → integrand degree ~5)
       qpts2d = {
-        {0.063089014491502, 0.063089014491502, 0.025422453185104},
-        {0.063089014491502, 0.873821971016996, 0.025422453185104},
-        {0.873821971016996, 0.063089014491502, 0.025422453185104},
-        {0.249286745170910, 0.249286745170910, 0.058393137863189},
-        {0.249286745170910, 0.501426509658179, 0.058393137863189},
-        {0.501426509658179, 0.249286745170910, 0.058393137863189},
-        {0.053145049844816, 0.310352451033785, 0.041425537809187},
-        {0.053145049844816, 0.636502499121399, 0.041425537809187},
-        {0.310352451033785, 0.053145049844816, 0.041425537809187},
-        {0.310352451033785, 0.636502499121399, 0.041425537809187},
-        {0.636502499121399, 0.053145049844816, 0.041425537809187},
-        {0.636502499121399, 0.310352451033785, 0.041425537809187},
+        {0.333333333333333, 0.333333333333333, 0.112500000000000},
+        {0.059715871789770, 0.470142064105115, 0.066197076394253},
+        {0.470142064105115, 0.059715871789770, 0.066197076394253},
+        {0.470142064105115, 0.470142064105115, 0.066197076394253},
+        {0.797426985353087, 0.101286507323456, 0.062969590272414},
+        {0.101286507323456, 0.797426985353087, 0.062969590272414},
+        {0.101286507323456, 0.101286507323456, 0.062969590272414},
+      };
+    } else { // p_order == 3
+      // Over-integration: degree 8 rule (16 pts) for p=3 nonlinear flux
+      // (flux degree ~6, ∇φ degree 2 → integrand degree ~8)
+      qpts2d = {
+        {0.333333333333333, 0.333333333333333, 0.072157803838894},
+        {0.081414823414554, 0.459292588292723, 0.047545817133642},
+        {0.459292588292723, 0.081414823414554, 0.047545817133642},
+        {0.459292588292723, 0.459292588292723, 0.047545817133642},
+        {0.658861384496480, 0.170569307751760, 0.051608685267359},
+        {0.170569307751760, 0.658861384496480, 0.051608685267359},
+        {0.170569307751760, 0.170569307751760, 0.051608685267359},
+        {0.898905543365938, 0.050547228317031, 0.016229248811599},
+        {0.050547228317031, 0.898905543365938, 0.016229248811599},
+        {0.050547228317031, 0.050547228317031, 0.016229248811599},
+        {0.008394777409958, 0.263112829634638, 0.013615157087217},
+        {0.263112829634638, 0.728492392955404, 0.013615157087217},
+        {0.728492392955404, 0.008394777409958, 0.013615157087217},
+        {0.263112829634638, 0.008394777409958, 0.013615157087217},
+        {0.728492392955404, 0.263112829634638, 0.013615157087217},
+        {0.008394777409958, 0.728492392955404, 0.013615157087217},
       };
     }
 
@@ -825,11 +841,16 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       res.sdl[eL] += fr.smax * len;
       res.sdl[eR] += fr.smax * len;
     } else {
-      // Find reference parameterizations for this edge in each element
+      // Find reference parameterizations for this edge in each element.
+      // For periodic edges, the right element's edge nodes differ from the
+      // left element's (top vs bottom periodic nodes).  mesh.IE[i].vR[]
+      // stores the correct right-side vertex indices.
+      int vaR = mesh.IE[i].vR[0];
+      int vbR = mesh.IE[i].vR[1];
       double xiL0, etaL0, xiL1, etaL1;
       double xiR0, etaR0, xiR1, etaR1;
       edgeRefParam(mesh.E[eL].v, va, vb, xiL0, etaL0, xiL1, etaL1);
-      edgeRefParam(mesh.E[eR].v, va, vb, xiR0, etaR0, xiR1, etaR1);
+      edgeRefParam(mesh.E[eR].v, vaR, vbR, xiR0, etaR0, xiR1, etaR1);
 
       for (int q = 0; q < qr.n; ++q) {
         double t = qr.points[q];
@@ -959,144 +980,7 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
   return res;
 }
 
-// DG LIMITER — Venkatakrishnan / minmod moment-limiting
-// Reference: Cockburn & Shu, "The Runge-Kutta discontinuous Galerkin
-//   method for conservation laws V", JCP 141 (1998).
-void FiniteVolumeSolver::applyLimiterDG(std::vector<std::vector<Vec4>> &Un_dg) {
-  if (p_order == 0) return;  // nothing to limit for piecewise-constant
-  int Ne = mesh.E.size();
-
-  // Build neighbour list (shared-edge neighbours only)
-  std::vector<std::vector<int>> nbrs(Ne);
-  for (const auto &ie : mesh.IE) {
-    nbrs[ie.elemL].push_back(ie.elemR);
-    nbrs[ie.elemR].push_back(ie.elemL);
-  }
-
-  // Pre-collect true cell averages using cellAverage() — NOT DOF 0 for p>=1.
-  // For a nodal Lagrange basis DOF 0 is the value at vertex (0,0), not the
-  // integral average.  Conservation requires using the true mean.
-  std::vector<Vec4> ubar(Ne);
-  for (int e = 0; e < Ne; ++e) ubar[e] = cellAverage(Un_dg[e]);
-
-  for (int e = 0; e < Ne; ++e) {
-    if (nbrs[e].empty()) continue;
-
-    // ── Step 1: neighbour bounds on the cell average ─────────────────────
-    Vec4 umin = ubar[e], umax = ubar[e];
-    for (int nb : nbrs[e]) {
-      for (int k = 0; k < 4; ++k) {
-        umin[k] = std::min(umin[k], ubar[nb][k]);
-        umax[k] = std::max(umax[k], ubar[nb][k]);
-      }
-    }
-
-    // ── Step 2: evaluate the reconstructed solution at the vertices ───────
-    // For a p-order DG element the value at vertex v_i (reference (ξ_i,η_i)) is:
-    //   u(v_i) = Σ_j U_dg[e][j] * φ_j(ξ_i, η_i)
-    // The three reference vertices of the standard triangle are (0,0),(1,0),(0,1).
-    static const double xiv[3]  = {0.0, 1.0, 0.0};
-    static const double etav[3] = {0.0, 0.0, 1.0};
-
-    bool troubled = false;
-    const double eps = 1e-12;
-    for (int vi = 0; vi < 3 && !troubled; ++vi) {
-      std::vector<double> phi = evaluateBasis(xiv[vi], etav[vi], p_order);
-      Vec4 uv = {0,0,0,0};
-      for (int j = 0; j < ndof_per_elem; ++j)
-        uv += Un_dg[e][j] * phi[j];
-      for (int k = 0; k < 4; ++k) {
-        if (uv[k] < umin[k] - eps || uv[k] > umax[k] + eps) {
-          troubled = true; break;
-        }
-      }
-    }
-    if (!troubled) continue;
-
-    // ── Step 3: Venkatakrishnan-limited linear reconstruction ─────────────
-    // Compute the unlimited gradient of the cell average across neighbours
-    // using a Green-Gauss-like least-squares formula (simple centroid-to-centroid).
-    // Then apply the Venkatakrishnan limiter to scale the gradient.
-    Vec4 gradx_e = {0,0,0,0}, grady_e = {0,0,0,0};
-    double sw = 0;
-    for (int nb : nbrs[e]) {
-      Vec2 dr = mesh.centroids[nb] - mesh.centroids[e];
-      double d2 = dr.x*dr.x + dr.y*dr.y;
-      double w  = 1.0 / d2;
-      sw += w;
-      Vec4 du = (ubar[nb] - ubar[e]) * w;
-      gradx_e += du * dr.x;
-      grady_e += du * dr.y;
-    }
-    if (sw > 0) { gradx_e = gradx_e * (1.0/sw); grady_e = grady_e * (1.0/sw); }
-
-    // Venkatakrishnan limiter factor φ applied to the gradient
-    double dx = std::sqrt(mesh.areas[e]);
-    double eps2 = std::pow(1.0 * dx, 3.0);  // K=1 (conservative)
-    Vec4 phi_lim = {1,1,1,1};
-    for (int vi = 0; vi < 3; ++vi) {
-      Vec2 r = mesh.V[mesh.E[e].v[vi]] - mesh.centroids[e];
-      Vec4 dU = gradx_e * r.x + grady_e * r.y;
-      for (int k = 0; k < 4; ++k) {
-        if (std::abs(dU[k]) > 1e-12) {
-          double D1 = (dU[k] > 0) ? (umax[k]-ubar[e][k]) : (umin[k]-ubar[e][k]);
-          double D2 = dU[k];
-          double num = D1*D1 + eps2 + 2.0*D1*D2;
-          double den = D1*D1 + 2.0*D2*D2 + D1*D2 + eps2;
-          phi_lim[k] = std::min(phi_lim[k], num/den);
-        }
-      }
-    }
-    for (int k = 0; k < 4; ++k)
-      phi_lim[k] = std::max(0.0, std::min(1.0, phi_lim[k]));
-
-    // Apply per-component limiter factor to the gradient
-    for (int k = 0; k < 4; ++k) {
-      gradx_e[k] *= phi_lim[k];
-      grady_e[k] *= phi_lim[k];
-    }
-
-    // ── Step 4: re-project ALL DG DOFs to match the limited linear field ──
-    // The limited linear reconstruction is:
-    //   u_lim(x,y) = ubar + gradx*(x-xc) + grady*(y-yc)
-    // Re-project by evaluating u_lim at every nodal DOF position.
-    // DOF j lives at physical position: x_j = v0 + (v1-v0)*xi_j + (v2-v0)*eta_j
-    // This correctly handles p=1 (3 vertex nodes), p=2 (6 nodes), p=3 (10 nodes).
-    // Conservation is preserved because cellAverage(u_lim_nodal) = ubar exactly
-    // (the linear reconstruction has ubar as its mean over any triangle).
-    Vec2 v0 = mesh.V[mesh.E[e].v[0]];
-    Vec2 v1 = mesh.V[mesh.E[e].v[1]];
-    Vec2 v2 = mesh.V[mesh.E[e].v[2]];
-    Vec2 xc = mesh.centroids[e];
-
-    // Reference coordinates of the Lagrange nodes for each p (canonical ordering)
-    static const double xi_nodes_p1[3]  = {0.0, 1.0, 0.0};
-    static const double eta_nodes_p1[3] = {0.0, 0.0, 1.0};
-    static const double xi_nodes_p2[6]  = {0.0, 1.0, 0.0, 0.5, 0.5, 0.0};
-    static const double eta_nodes_p2[6] = {0.0, 0.0, 1.0, 0.5, 0.0, 0.5};
-    // p=2 node order confirmed: DOF3→(0.5,0.5), DOF4→(0.0,0.5), DOF5→(0.5,0.0)
-    // (matches evaluateBasis Kronecker delta check)
-    static const double xi_nodes_p3[10]  = {0.0,1.0,0.0, 2./3,1./3, 0.0, 0.0,1./3,2./3,1./3};
-    static const double eta_nodes_p3[10] = {0.0,0.0,1.0, 0.0, 0.0,1./3,2./3,2./3,1./3,1./3};
-
-    const double *xi_n = nullptr, *eta_n = nullptr;
-    if (p_order == 1) { xi_n = xi_nodes_p1; eta_n = eta_nodes_p1; }
-    else if (p_order == 2) { xi_n = xi_nodes_p2; eta_n = eta_nodes_p2; }
-    else { xi_n = xi_nodes_p3; eta_n = eta_nodes_p3; }
-
-    for (int j = 0; j < ndof_per_elem; ++j) {
-      // Physical position of node j
-      double xj = v0.x + (v1.x-v0.x)*xi_n[j] + (v2.x-v0.x)*eta_n[j];
-      double yj = v0.y + (v1.y-v0.y)*xi_n[j] + (v2.y-v0.y)*eta_n[j];
-      // Evaluate limited linear reconstruction at this node
-      Un_dg[e][j] = ubar[e] + gradx_e*(xj-xc.x) + grady_e*(yj-xc.y);
-    }
-    // Note: cellAverage(Un_dg[e]) == ubar[e] after this re-projection
-    // because the linear function integrates to its centroid value (=ubar[e]).
-  }
-}
-void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
-                                     bool limited) {
+void FiniteVolumeSolver::solveSteady(int itercap) {
   int Ne = mesh.E.size();
   std::cout << "Beginning DG solver loop for " << itercap << " iterations (p=" 
             << p_order << ")..." << std::endl;
@@ -1113,7 +997,7 @@ void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
     }
     res_history.push_back(Rnorm);
 
-    if (niter % 10 == 0 || Rnorm < rtol) {
+    if (niter % 1000 == 0 || Rnorm < rtol) {
       double minRho = 1e10, minP = 1e10;
       cell_residuals.resize(Ne);
       
@@ -1144,9 +1028,9 @@ void FiniteVolumeSolver::solveSteady(int itercap, bool secondOrder,
       break;
     }
 
-    // STEP 5: Advance in time using SSP-RK2, reusing the residual already
+    // STEP 5: Advance in time using RK4, reusing the residual already
     //         computed above as Stage 1 (avoids a redundant calcResidualDG call).
-    U_dg = sspRK2_DG(U_dg, 0.0, false, &res);
+    U_dg = rk4_DG(U_dg, 0.0, false, &res);
 
     // Check for non-physical states
     if (!isPhysicalDG(U_dg)) {
@@ -1403,8 +1287,7 @@ FiniteVolumeSolver::calcResidualSecondOrder(const std::vector<Vec4> &Un,
   return res;
 }
 
-void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
-                                       bool limited, double t_end) {
+void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
   int Ne = mesh.E.size();
   std::cout << "Beginning unsteady DG solver loop for " << itercap 
             << " iterations (p=" << p_order << ")..." << std::endl;
@@ -1433,9 +1316,9 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, bool secondOrder,
       dt_global = std::min(dt_global, dt_local);
     }
 
-    // STEP 5: Advance in time using SSP-RK2 with the residual already computed
+    // STEP 5: Advance in time using RK4 with the residual already computed
     //         above reused as Stage 1 (avoids a redundant calcResidualDG call).
-    std::vector<std::vector<Vec4>> U_new_dg = sspRK2_DG(U_dg, dt_global, current_time, true, &res_sdl);
+    std::vector<std::vector<Vec4>> U_new_dg = rk4_DG(U_dg, dt_global, current_time, true, &res_sdl);
 
     U_dg = U_new_dg;
     
@@ -1524,8 +1407,20 @@ void FiniteVolumeSolver::saveSnapshot(const std::string &filename) {
 // DG TIME STEPPING FUNCTIONS
 // ═══════════════════════════════════════════════════════════════
 
-// DG SSP-RK2 with local time stepping (for steady state)
-std::vector<std::vector<Vec4>> FiniteVolumeSolver::sspRK2_DG(
+// Helper: apply M^{-1} * R for one element, return the result vector
+static void applyMassInv(const std::vector<std::vector<double>> &Minv,
+                         const Vec4 *R_elem, int ndof, double area_scale,
+                         Vec4 *out) {
+  for (int i = 0; i < ndof; ++i) {
+    Vec4 rhs = {0,0,0,0};
+    for (int j = 0; j < ndof; ++j)
+      rhs += R_elem[j] * (Minv[i][j] / area_scale);
+    out[i] = rhs;
+  }
+}
+
+// DG RK4 with local time stepping (for steady state)
+std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
     const std::vector<std::vector<Vec4>> &Un_dg,
     double time,
     bool use_unsteady_wake,
@@ -1533,69 +1428,77 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::sspRK2_DG(
   
   int Ne = Un_dg.size();
   
-  // Stage 1: use pre-computed residual if supplied (avoids a redundant evaluation),
-  //          otherwise compute it now.
+  // CFL scaling: for nodal DG with mass-matrix lumping, the spectral radius of
+  // M_ref^{-1} governs the max stable CFL.  Use 2/spectral_radius(M_ref^{-1}).
+  // For p=0: sr=2, scale=1.0.  p=1: sr=24, scale=1/12.  p=2: sr≈96, scale≈1/48.
+  double cfl_eff = CFL * (2.0 / mass_spectral_radius);
+
+  // --- Stage 1: k1 = M^{-1} R(Un) ---
   ResidualResult res1 = res1_precomputed ? *res1_precomputed
                                          : calcResidualDG(Un_dg, time, use_unsteady_wake);
 
-  // Scale CFL by 2/spectral_radius(M_ref^{-1}) so the nodal DG time step is stable.
-  // For p=0: spectral_radius=2, scale=1.0 (no change).
-  // For p=1: spectral_radius=24, scale=1/12.
-  // For p=2: spectral_radius≈96.4, scale≈1/48.
-  // For p=3: spectral_radius≈224, scale≈1/112.
-  double cfl_eff = CFL * (2.0 / mass_spectral_radius);
-  std::vector<std::vector<Vec4>> U1_dg(Ne, std::vector<Vec4>(ndof_per_elem));
-  
+  // Compute local dt for each element (used for all stages)
+  std::vector<double> dt_elem(Ne);
   for (int e = 0; e < Ne; ++e) {
     double sdl = std::max(res1.sdl[e], 1e-12);
-    double dt = cfl_eff * 2.0 * mesh.areas[e] / sdl;
-    
-    // Apply mass matrix inverse scaled by actual element area
-    double area_scale = mesh.areas[e] / 0.5;  // A_actual / A_ref
-    
-    for (int i = 0; i < ndof_per_elem; ++i) {
-      Vec4 rhs = {0, 0, 0, 0};
-      for (int j = 0; j < ndof_per_elem; ++j) {
-        // M_actual^{-1}_{ij} * R_j = M_ref^{-1}_{ij} * R_j / area_scale
-        rhs += res1.R[e * ndof_per_elem + j] * (MassMatrixInv[i][j] / area_scale);
-      }
-      // Forward Euler step: U1 = Un - dt * M^{-1} * R
-      U1_dg[e][i] = Un_dg[e][i] - rhs * dt;
-    }
+    dt_elem[e] = cfl_eff * 2.0 * mesh.areas[e] / sdl;
   }
-  
-  // Stage 2: Compute residual of U1
-  // Apply limiter to Stage 1 result before re-evaluating the residual (Cockburn & Shu 1998).
-  if (p_order > 0) applyLimiterDG(U1_dg);
-  ResidualResult res2 = calcResidualDG(U1_dg, time, use_unsteady_wake);
-  
-  std::vector<std::vector<Vec4>> Unp1_dg(Ne, std::vector<Vec4>(ndof_per_elem));
-  
+
+  // k1 = M^{-1} R(Un)
+  std::vector<std::vector<Vec4>> k1(Ne, std::vector<Vec4>(ndof_per_elem));
   for (int e = 0; e < Ne; ++e) {
-    double sdl = std::max(res1.sdl[e], 1e-12);
-    double dt = cfl_eff * 2.0 * mesh.areas[e] / sdl;
-    
     double area_scale = mesh.areas[e] / 0.5;
-    
-    for (int i = 0; i < ndof_per_elem; ++i) {
-      Vec4 rhs2 = {0, 0, 0, 0};
-      for (int j = 0; j < ndof_per_elem; ++j) {
-        rhs2 += res2.R[e * ndof_per_elem + j] * (MassMatrixInv[i][j] / area_scale);
-      }
-      // SSP-RK2: Unp1 = 0.5*Un + 0.5*(U1 - dt*M^{-1}*R2)
-      Unp1_dg[e][i] = Un_dg[e][i] * 0.5 + 
-                      (U1_dg[e][i] - rhs2 * dt) * 0.5;
-    }
+    applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, area_scale, k1[e].data());
   }
 
-  // Apply limiter to the final stage result.
-  if (p_order > 0) applyLimiterDG(Unp1_dg);
+  // --- Stage 2: k2 = M^{-1} R(Un - 0.5*dt*k1) ---
+  std::vector<std::vector<Vec4>> Utmp(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Utmp[e][i] = Un_dg[e][i] - k1[e][i] * (0.5 * dt_elem[e]);
 
-  return Unp1_dg;
+  ResidualResult res2 = calcResidualDG(Utmp, time, use_unsteady_wake);
+  std::vector<std::vector<Vec4>> k2(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e) {
+    double area_scale = mesh.areas[e] / 0.5;
+    applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, area_scale, k2[e].data());
+  }
+
+  // --- Stage 3: k3 = M^{-1} R(Un - 0.5*dt*k2) ---
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Utmp[e][i] = Un_dg[e][i] - k2[e][i] * (0.5 * dt_elem[e]);
+
+  ResidualResult res3 = calcResidualDG(Utmp, time, use_unsteady_wake);
+  std::vector<std::vector<Vec4>> k3(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e) {
+    double area_scale = mesh.areas[e] / 0.5;
+    applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, area_scale, k3[e].data());
+  }
+
+  // --- Stage 4: k4 = M^{-1} R(Un - dt*k3) ---
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Utmp[e][i] = Un_dg[e][i] - k3[e][i] * dt_elem[e];
+
+  ResidualResult res4 = calcResidualDG(Utmp, time, use_unsteady_wake);
+  std::vector<std::vector<Vec4>> k4(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e) {
+    double area_scale = mesh.areas[e] / 0.5;
+    applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, area_scale, k4[e].data());
+  }
+
+  // --- Update: Un+1 = Un - dt/6 * (k1 + 2*k2 + 2*k3 + k4) ---
+  std::vector<std::vector<Vec4>> Unp1(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Unp1[e][i] = Un_dg[e][i] - (k1[e][i] + k2[e][i]*2.0 + k3[e][i]*2.0 + k4[e][i]) * (dt_elem[e] / 6.0);
+
+  return Unp1;
 }
 
-// DG SSP-RK2 with global time step (for time-accurate unsteady)
-std::vector<std::vector<Vec4>> FiniteVolumeSolver::sspRK2_DG(
+// DG RK4 with global time step (for time-accurate unsteady)
+std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
     const std::vector<std::vector<Vec4>> &Un_dg,
     double dt_global,
     double time,
@@ -1604,56 +1507,67 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::sspRK2_DG(
   
   int Ne = Un_dg.size();
   
-  // Stage 1: use pre-computed residual if supplied (avoids a redundant evaluation),
-  //          otherwise compute it now.
+  // --- Stage 1: k1 = M^{-1} R(Un) ---
   ResidualResult res1 = res1_precomputed ? *res1_precomputed
                                          : calcResidualDG(Un_dg, time, use_unsteady_wake);
-  std::vector<std::vector<Vec4>> U1_dg(Ne, std::vector<Vec4>(ndof_per_elem));
-  
+
+  std::vector<std::vector<Vec4>> k1(Ne, std::vector<Vec4>(ndof_per_elem));
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
-    
-    for (int i = 0; i < ndof_per_elem; ++i) {
-      Vec4 rhs = {0, 0, 0, 0};
-      for (int j = 0; j < ndof_per_elem; ++j) {
-        rhs += res1.R[e * ndof_per_elem + j] * (MassMatrixInv[i][j] / area_scale);
-      }
-      U1_dg[e][i] = Un_dg[e][i] - rhs * dt_global;
-    }
+    applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, area_scale, k1[e].data());
   }
-  
-  // Stage 2
-  // Apply limiter to Stage 1 result before re-evaluating the residual.
-  if (p_order > 0) applyLimiterDG(U1_dg);
-  ResidualResult res2 = calcResidualDG(U1_dg, time, use_unsteady_wake);
-  std::vector<std::vector<Vec4>> Unp1_dg(Ne, std::vector<Vec4>(ndof_per_elem));
-  
+
+  // --- Stage 2: k2 = M^{-1} R(Un - 0.5*dt*k1) ---
+  std::vector<std::vector<Vec4>> Utmp(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Utmp[e][i] = Un_dg[e][i] - k1[e][i] * (0.5 * dt_global);
+
+  ResidualResult res2 = calcResidualDG(Utmp, time, use_unsteady_wake);
+  std::vector<std::vector<Vec4>> k2(Ne, std::vector<Vec4>(ndof_per_elem));
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
-    
-    for (int i = 0; i < ndof_per_elem; ++i) {
-      Vec4 rhs2 = {0, 0, 0, 0};
-      for (int j = 0; j < ndof_per_elem; ++j) {
-        rhs2 += res2.R[e * ndof_per_elem + j] * (MassMatrixInv[i][j] / area_scale);
-      }
-      Unp1_dg[e][i] = Un_dg[e][i] * 0.5 + 
-                      (U1_dg[e][i] - rhs2 * dt_global) * 0.5;
-    }
+    applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, area_scale, k2[e].data());
   }
 
-  // Apply limiter to the final stage result.
-  if (p_order > 0) applyLimiterDG(Unp1_dg);
+  // --- Stage 3: k3 = M^{-1} R(Un - 0.5*dt*k2) ---
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Utmp[e][i] = Un_dg[e][i] - k2[e][i] * (0.5 * dt_global);
 
-  return Unp1_dg;
+  ResidualResult res3 = calcResidualDG(Utmp, time, use_unsteady_wake);
+  std::vector<std::vector<Vec4>> k3(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e) {
+    double area_scale = mesh.areas[e] / 0.5;
+    applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, area_scale, k3[e].data());
+  }
+
+  // --- Stage 4: k4 = M^{-1} R(Un - dt*k3) ---
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Utmp[e][i] = Un_dg[e][i] - k3[e][i] * dt_global;
+
+  ResidualResult res4 = calcResidualDG(Utmp, time, use_unsteady_wake);
+  std::vector<std::vector<Vec4>> k4(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e) {
+    double area_scale = mesh.areas[e] / 0.5;
+    applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, area_scale, k4[e].data());
+  }
+
+  // --- Update: Un+1 = Un - dt/6 * (k1 + 2*k2 + 2*k3 + k4) ---
+  std::vector<std::vector<Vec4>> Unp1(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < ndof_per_elem; ++i)
+      Unp1[e][i] = Un_dg[e][i] - (k1[e][i] + k2[e][i]*2.0 + k3[e][i]*2.0 + k4[e][i]) * (dt_global / 6.0);
+
+  return Unp1;
 }
 
 // Check if DG solution is physical
 bool FiniteVolumeSolver::isPhysicalDG(const std::vector<std::vector<Vec4>> &Un_dg) {
-  // Check the true cell average of each element for physicality.
-  // The cell average is conserved by the DG scheme so this is the right quantity.
   for (const auto &u_elem : Un_dg) {
     State s(cellAverage(u_elem), gamma);
-    if (s.rho() <= 0 || s.p() <= 0)
+    if (!(s.rho() > 0) || !(s.p() > 0))   // catches NaN as well
       return false;
   }
   return true;

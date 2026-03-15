@@ -17,7 +17,9 @@ struct Element {
 };
 
 struct Edge {
-  int v[2]; // vertex indices
+  int v[2];    // vertex indices for elemL's side of the edge
+  int vR[2];   // vertex indices for elemR's side (same as v[] for regular edges,
+               // different top-periodic nodes for periodic edges)
   int elemL, elemR;
 };
 

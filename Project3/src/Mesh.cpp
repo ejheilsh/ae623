@@ -288,7 +288,12 @@ void Mesh::appendPeriodicToIE() {
 
       const int elemL = itBottom->second[0];
       const int elemR = itTop->second[0];
-      IE.push_back({n1b, n2b, elemL, elemR});
+      // v[] = bottom nodes (elemL's side), vR[] = top nodes (elemR's side).
+      // Match orientation: t1 corresponds to b1 (same x-position), t2 to b2.
+      // n1b,n2b may be swapped for left-to-right ordering; apply same swap to top.
+      int n1t = t1, n2t = t2;
+      if (n1b == b2) { std::swap(n1t, n2t); }  // b1<->b2 were swapped above, mirror for top
+      IE.push_back({n1b, n2b, n1t, n2t, elemL, elemR});
       ieSet.insert(keyBottom);
       addedCount += 1;
       std::cout << "Periodic IE added count: " << addedCount << std::endl;
@@ -350,7 +355,7 @@ void Mesh::edgeHash(const std::vector<std::vector<std::vector<int>>> &B) {
       if (H.count({n2, n1})) {
         int eL = H[{n2, n1}] - 1;
         int eR = e;
-        IE.push_back({n2, n1, eL, eR});
+        IE.push_back({n2, n1, n2, n1, eL, eR});
         H.erase({n2, n1});
       } else {
         H[{n1, n2}] = e + 1;

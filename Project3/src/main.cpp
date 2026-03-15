@@ -9,6 +9,19 @@ int main(int argc, char **argv) {
               << " <meshfile> [order] [CFL] [fluxname] [itercap] "
               << "[steady/unsteady] [ic_file] [t_end] "
               << "[--map-ic <coarse_meshfile> <coarse_statefile>]"
+              << "\n\nArguments:"
+              << "\n  meshfile      : Grid file (e.g., grids/2k.gri)"
+              << "\n  order         : DG polynomial order (0, 1, 2, or 3) [default: 0]"
+              << "\n  CFL           : CFL number [default: 1.0]"
+              << "\n  fluxname      : Flux scheme (roe or hlle) [default: roe]"
+              << "\n  itercap       : Maximum iterations [default: 1e6]"
+              << "\n  steady/unsteady : Solution mode [default: steady]"
+              << "\n  ic_file       : Initial condition file (optional)"
+              << "\n  t_end         : End time for unsteady (optional, requires ic_file)"
+              << "\n  --map-ic      : Load IC from coarser mesh (optional)"
+              << "\n\nNotes:"
+              << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
+              << "\n  - Output files tagged by order: steady_<mesh>_p<order>_results.bin"
               << std::endl;
     return 1;
   }
@@ -75,6 +88,18 @@ int main(int argc, char **argv) {
 
   try {
     FiniteVolumeSolver solver(meshfile);
+
+    // Extract grid name from mesh file path (needed for auto-chaining filenames)
+    std::string grid_name = meshfile;
+    size_t last_slash = grid_name.find_last_of("/\\");
+    if (last_slash != std::string::npos) {
+      grid_name = grid_name.substr(last_slash + 1);
+    }
+    size_t dot_pos = grid_name.find_last_of(".");
+    if (dot_pos != std::string::npos) {
+      grid_name = grid_name.substr(0, dot_pos);
+    }
+
     solver.p_order = p_order;  // Set DG polynomial order
     solver.initializeDG();     // Initialize DG structures based on p_order
     solver.CFL = cfl;
@@ -89,6 +114,38 @@ int main(int argc, char **argv) {
     } else if (!ic_file.empty()) {
       // Load same-mesh initial condition if provided
       solver.loadInitialCondition(ic_file);
+    } else if (p_order > 0 && !unsteady) {
+      // Automatically converge p=0 first, then use as IC for p>0
+      std::cerr << "Auto-chaining: converging p=0 first to seed p=" 
+                << p_order << " IC..." << std::endl;
+      
+      // Save current DG order and initialize as p=0
+      int saved_order = solver.p_order;
+      solver.p_order = 0;
+      solver.initializeDG();
+      solver.CFL = 1.0;  // p=0 can use larger CFL
+      solver.solveSteady(itercap);
+      
+      // Save p=0 result to temporary file
+      system("mkdir -p data_steady");
+      std::string p0_file = "data_steady/steady_" + grid_name + "_p0_results.bin";
+      {
+        std::ofstream p0out(p0_file, std::ios::binary);
+        int Ne = solver.U.size();
+        p0out.write((char *)&Ne, sizeof(int));
+        for (const auto &u : solver.U)
+          p0out.write((char *)u.v, sizeof(double) * 4);
+        p0out.close();
+      }
+      std::cerr << "p=0 converged. Saved to " << p0_file << std::endl;
+      
+      // Now re-initialize at the target order and load p=0 IC
+      solver.p_order = saved_order;
+      solver.initializeDG();
+      solver.CFL = cfl;
+      solver.res_history.clear();
+      solver.loadInitialCondition(p0_file);
+      std::cerr << "Loaded p=0 solution as IC for p=" << saved_order << std::endl;
     }
 
     std::cerr << "Starting solver for " << meshfile
@@ -103,25 +160,15 @@ int main(int argc, char **argv) {
               << ")" << std::endl;
 
     if (unsteady) {
-      solver.solveUnsteady(itercap, false, true, t_end);  // DG doesn't use secondOrder flag
+      solver.solveUnsteady(itercap, t_end);
     } else {
-      solver.solveSteady(itercap, false, true);  // DG doesn't use secondOrder flag
+      solver.solveSteady(itercap);
     }
 
-    // Extract grid name from mesh file path
-    std::string grid_name = meshfile;
-    size_t last_slash = grid_name.find_last_of("/\\");
-    if (last_slash != std::string::npos) {
-      grid_name = grid_name.substr(last_slash + 1);
-    }
-    size_t dot_pos = grid_name.find_last_of(".");
-    if (dot_pos != std::string::npos) {
-      grid_name = grid_name.substr(0, dot_pos);
-    }
-
-    // Determine output directory and filename prefix
+    // Determine output directory and filename prefix (include DG order)
     std::string output_dir = unsteady ? "." : "data_steady";
-    std::string file_prefix = unsteady ? "" : "steady_" + grid_name + "_";
+    std::string order_tag = "p" + std::to_string(p_order);
+    std::string file_prefix = unsteady ? "" : "steady_" + grid_name + "_" + order_tag + "_";
     
     // Create data_steady directory for steady results
     if (!unsteady) {
