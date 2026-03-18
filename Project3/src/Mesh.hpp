@@ -10,10 +10,12 @@
 struct Element {
   int v[3]; // corner vertex indices (always 3 for triangles)
   int q_order = 1;  // geometric degree of this element (1 = straight, 2/3 = curved)
-  // For q>1, high-order nodes beyond the 3 corners are stored in ho_nodes[].
-  // p=2 triangle: 3 corner + 3 edge-midpoint = 6 nodes  -> ho_nodes has 3 entries
-  // p=3 triangle: 3 corner + 6 edge + 1 interior  = 10  -> ho_nodes has 7 entries
-  std::vector<int> ho_nodes; // indices into Mesh::V of the extra high-order nodes
+  // For q=1, ho_nodes is empty (corners are in v[]).
+  // For q>1, ho_nodes stores ALL geometry node indices in GRI row-by-row order
+  // (including corners).  v[0..2] hold the 3 corner indices extracted from
+  // GRI positions 0, q, npe-1.  The globalToReference function permutes
+  // ho_nodes from GRI order to shape.c order for the isoparametric mapping.
+  std::vector<int> ho_nodes;
 };
 
 struct Edge {

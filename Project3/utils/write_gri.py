@@ -127,10 +127,21 @@ def write_gri_file(filename, V, E, I2E_matrix, B2E_matrix,
                 f.write(f"{edge[0]} {edge[1]}\n")
         
         # Element groups (all triangles in one group)
-        f.write(f"1 3 TriLagrange\n")
+        # GRI format: nElements degree TriLagrange
+        # degree = geometry order (1 = straight, 2 = quadratic, 3 = cubic)
+        nodes_per_elem = E.shape[1]
+        if nodes_per_elem == 3:
+            q_geom = 1
+        elif nodes_per_elem == 6:
+            q_geom = 2
+        elif nodes_per_elem == 10:
+            q_geom = 3
+        else:
+            q_geom = 1
+        f.write(f"{nelem} {q_geom} TriLagrange\n")
         for i in range(nelem):
             # Convert to 1-based indexing
-            f.write(f"{E[i, 0] + 1} {E[i, 1] + 1} {E[i, 2] + 1}\n")
+            f.write(" ".join(str(E[i, k] + 1) for k in range(nodes_per_elem)) + "\n")
         
         # Periodic groups
         if len(periodic_pairs) > 0:

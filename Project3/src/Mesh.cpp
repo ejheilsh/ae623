@@ -46,7 +46,6 @@ bool Mesh::readGRI(const std::string &filename) {
   int Ne_read = 0;
   q_order_global = 1;
   has_curved_elements = false;
-  int gri_degree_hint = 1;  // the 'degree' field in the GRI element block
 
   while (Ne_read < Ne && f.good()) {
     int ne, degree;
@@ -54,40 +53,57 @@ bool Mesh::readGRI(const std::string &filename) {
     if (!(f >> ne >> degree >> type))
       break;
 
-    // In this GRI format the 'degree' field records the intended solution
-    // polynomial order (not the number of geometry nodes per element).
-    // All triangular elements are stored with exactly 3 corner nodes regardless
-    // of degree.  We track the maximum degree as a hint for the solver.
-    if (degree > gri_degree_hint) gri_degree_hint = degree;
+    // Standard GRI format: nElements degree TriLagrange
+    // degree = geometry order: 1 → 3 nodes, 2 → 6 nodes, 3 → 10 nodes
+    // nodes_per_elem = (degree+1)*(degree+2)/2
+    int nodes_per_elem = (degree + 1) * (degree + 2) / 2;
+    int q = degree;
 
-    // Number of nodes per element: always 3 corner nodes in this GRI convention.
-    // True isoparametric curved elements (q>1) would require 6 or 10 nodes per
-    // element line; since none of the meshes in this project include them, we
-    // keep the geometry strictly linear (q=1) for all elements.
-    int nodes_per_elem = 3;
+    // Sanity check: degree should be 1, 2, or 3 for TriLagrange
+    if (nodes_per_elem < 3 || nodes_per_elem > 10) {
+      std::cerr << "Warning: unexpected degree " << degree
+                << " in element block (nodes_per_elem=" << nodes_per_elem
+                << "). Falling back to 3 nodes (q=1)." << std::endl;
+      nodes_per_elem = 3;
+      q = 1;
+    }
+
+    if (q > q_order_global) q_order_global = q;
+    if (q > 1) has_curved_elements = true;
 
     for (int i = 0; i < ne; ++i) {
       Element el;
-      el.q_order = 1;  // straight triangle (geometry always linear in this dataset)
+      el.q_order = q;
       std::vector<int> allnodes(nodes_per_elem);
       for (int k = 0; k < nodes_per_elem; ++k) {
         if (!(f >> allnodes[k])) break;
         allnodes[k]--;  // 1-based to 0-based
       }
-      el.v[0] = allnodes[0];
-      el.v[1] = allnodes[1];
-      el.v[2] = allnodes[2];
+
+      if (q == 1) {
+        // q=1: all 3 nodes are corners
+        el.v[0] = allnodes[0];
+        el.v[1] = allnodes[1];
+        el.v[2] = allnodes[2];
+      } else {
+        // q>1: GRI uses row-by-row ordering.  Corners are at positions:
+        //   v0 = index 0,  v1 = index q,  v2 = index npe-1
+        // (q=2: 0,2,5;  q=3: 0,3,9)
+        // Store ALL geometry nodes in GRI order in ho_nodes for the
+        // isoparametric mapping; extract corners into v[0..2] for
+        // edge-hashing and connectivity.
+        el.v[0] = allnodes[0];
+        el.v[1] = allnodes[q];
+        el.v[2] = allnodes[nodes_per_elem - 1];
+        for (int k = 0; k < nodes_per_elem; ++k)
+          el.ho_nodes.push_back(allnodes[k]);
+      }
       E.push_back(el);
     }
     Ne_read += ne;
   }
 
-  // Expose the solution-degree hint via q_order_global so the solver can read it.
-  // has_curved_elements stays false because no mesh in this project encodes
-  // extra high-order geometry nodes.
-  // Cap the hint at 3 (max supported DG order); larger values indicate an
-  // alternate GRI variant where the field does not encode the element count.
-  q_order_global = (gri_degree_hint <= 3) ? gri_degree_hint : 1;
+  q_order_global = std::max(q_order_global, 1);
 
   if (Ne_read < Ne) {
     std::cerr << "Error: Only read " << Ne_read << " elements, expected " << Ne
@@ -176,9 +192,11 @@ bool Mesh::readGRI(const std::string &filename) {
   computeGeometry();
   std::cout << "Mesh loaded: Ni=" << IE.size() << ", Nb=" << BE.size()
             << ", Ne=" << E.size() << std::endl;
-  std::cout << "Mesh GRI degree hint: p_intended=" << q_order_global
-            << "  [geometry is always q=1 straight triangles in this dataset]"
-            << std::endl;
+  std::cout << "Mesh geometry order: q=" << q_order_global;
+  if (has_curved_elements)
+    std::cout << " (curved elements present)" << std::endl;
+  else
+    std::cout << " (straight triangles)" << std::endl;
   return true;
 }
 
@@ -465,15 +483,41 @@ bool Mesh::globalToReference(int e, const Vec2 &xglob,
   const Element &el = E[e];
   int q = el.q_order;
 
-  // Collect physical positions of all geometry nodes in the canonical order:
-  //   q=1: [v0, v1, v2]
-  //   q=2: [v0, v1, v2, mid01, mid12, mid02]
-  //   q=3: [v0, v1, v2, third01a, third01b, third12a, third12b, third20a, third20b, interior]
+  // Collect physical positions of all geometry nodes in shape.c order.
+  // The shape functions in evalGeomBasis below use the shape.c convention
+  // (corners first: v0, v1, v2, then edge/interior nodes).
+  //
+  // For q=1 the GRI order matches shape.c: [v0, v1, v2].
+  // For q>1 the GRI uses row-by-row ordering and ho_nodes stores ALL nodes
+  // in GRI order.  We apply a permutation to convert GRI → shape.c order.
+  //
+  //   shape.c p=2 ref coords:
+  //     0:(0,0)  1:(1,0)  2:(0,1)  3:(½,½)  4:(0,½)  5:(½,0)
+  //   GRI row-by-row p=2:
+  //     0:(0,0)  1:(½,0)  2:(1,0)  3:(0,½)  4:(½,½)  5:(0,1)
+  //   perm_q2[shape_k] = gri_index:  {0, 2, 5, 4, 3, 1}
+  //
+  //   shape.c p=3 ref coords:
+  //     0:(0,0) 1:(1,0) 2:(0,1) 3:(⅔,⅓) 4:(⅓,⅔) 5:(0,⅔) 6:(0,⅓)
+  //     7:(⅓,0) 8:(⅔,0) 9:(⅓,⅓)
+  //   GRI row-by-row p=3:
+  //     0:(0,0) 1:(⅓,0) 2:(⅔,0) 3:(1,0) 4:(0,⅓) 5:(⅓,⅓) 6:(⅔,⅓)
+  //     7:(0,⅔) 8:(⅓,⅔) 9:(0,1)
+  //   perm_q3[shape_k] = gri_index:  {0, 3, 9, 6, 8, 7, 4, 1, 2, 5}
+
+  static const int perm_q2[] = {0, 2, 5, 4, 3, 1};
+  static const int perm_q3[] = {0, 3, 9, 6, 8, 7, 4, 1, 2, 5};
+
   std::vector<Vec2> xnode;
-  xnode.push_back(V[el.v[0]]);
-  xnode.push_back(V[el.v[1]]);
-  xnode.push_back(V[el.v[2]]);
-  for (int idx : el.ho_nodes) xnode.push_back(V[idx]);
+  if (q == 1) {
+    xnode = {V[el.v[0]], V[el.v[1]], V[el.v[2]]};
+  } else if (q == 2) {
+    xnode.resize(6);
+    for (int k = 0; k < 6; ++k) xnode[k] = V[el.ho_nodes[perm_q2[k]]];
+  } else { // q == 3
+    xnode.resize(10);
+    for (int k = 0; k < 10; ++k) xnode[k] = V[el.ho_nodes[perm_q3[k]]];
+  }
 
   int nnode = (int)xnode.size();
 

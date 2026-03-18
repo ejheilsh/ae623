@@ -61,27 +61,32 @@ void FiniteVolumeSolver::initializeDG() {
             << ", ndof_per_elem=" << ndof_per_elem << std::endl;
 
   // ── Curved element verification ──────────────────────────────────────────
-  // The GRI 'degree' field records the intended solution polynomial order,
-  // not the number of geometry nodes.  All meshes in this project use straight
-  // triangular elements (q=1 geometry).  True isoparametric curved elements
-  // would require 6 or 10 nodes per element in the GRI file.
+  // The GRI 'degree' field encodes the geometry order of each element block:
+  //   degree 1 → 3 nodes (straight), 2 → 6 nodes (quadratic), 3 → 10 nodes (cubic)
   //
   // Superparametric requirement (from course notes):
   //   p=1 solution  →  needs q >= 2 geometry (superparametric)
   //   p >= 2 solution →  isoparametric (q=p) or subparametric (q<p) acceptable
   {
-    int p_hint = mesh.q_order_global;  // GRI degree field = intended solution order
-    std::cout << "  GRI degree hint (intended solution order): " << p_hint << std::endl;
-    std::cout << "  Actual mesh geometry: q=1 (straight triangles, no curved elements)" << std::endl;
-    if (p_order == 1) {
+    int q_geom = mesh.q_order_global;
+    std::cout << "  Mesh geometry order: q=" << q_geom;
+    if (mesh.has_curved_elements)
+      std::cout << " (curved elements present)" << std::endl;
+    else
+      std::cout << " (straight triangles, no curved elements)" << std::endl;
+
+    if (q_geom >= p_order) {
+      std::cout << "  Geometry q=" << q_geom << " >= solution p=" << p_order
+                << " — isoparametric or superparametric. Good." << std::endl;
+    } else if (p_order == 1 && q_geom < 2) {
       std::cout << "  NOTE: p=1 solution ideally requires superparametric geometry "
-                   "(q_geom >= 2) on curved boundaries.  Current meshes are straight "
-                   "(q_geom=1); accept some geometric approximation error." << std::endl;
-    } else if (p_order >= 2) {
-      std::cout << "  NOTE: p=" << p_order << " solution on straight (q=1) mesh — "
+                   "(q_geom >= 2) on curved boundaries.  Current mesh is q="
+                << q_geom << "; accept some geometric approximation error." << std::endl;
+    } else if (p_order >= 2 && q_geom < p_order) {
+      std::cout << "  NOTE: p=" << p_order << " solution on q=" << q_geom << " mesh — "
                    "subparametric.  Acceptable per course notes for p>=2." << std::endl;
     }
-    // Run the Newton inverse-mapping spot check on element 0 (always straight → one step)
+    // Run the Newton inverse-mapping spot check on element 0
     double xi_c = 0.0, eta_c = 0.0;
     bool ok = mesh.globalToReference(0, mesh.centroids[0], xi_c, eta_c);
     std::cout << "  Inverse mapping check (elem 0 centroid): "
