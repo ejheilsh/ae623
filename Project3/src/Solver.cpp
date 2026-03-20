@@ -8,6 +8,10 @@
 #include <limits>
 #include <unordered_map>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace {
 uint64_t spatialKey(int ix, int iy) {
   return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
@@ -732,6 +736,17 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
 
   QuadRule qr = getQuadratureRule(p_order);
 
+  // For p>0, several face-time-step and monitoring calculations only need the
+  // cell-average state.  Cache it once per residual evaluation instead of
+  // recomputing cellAverage(...) repeatedly inside the face loops.
+  std::vector<Vec4> Uavg;
+  if (p_order > 0) {
+    Uavg.resize(Ne);
+    for (int e = 0; e < Ne; ++e) {
+      Uavg[e] = cellAverage(Un_dg[e]);
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // STEP 4a — VOLUME INTEGRALS (element interiors, loop first per spec)
   // R_j -= ∫_T F(u) · ∇_x φ_j dV   (the "by parts" volume term, Eq. 4.3.12 second term)
@@ -740,57 +755,77 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
   // ═══════════════════════════════════════════════════════════════
   {
     struct QP2D { double xi, eta, w; };
-    std::vector<QP2D> qpts2d;
-    if (p_order == 0) {
-      // 1-point centroid rule — gradients are zero so contributions vanish,
-      // but the loop still runs in the correct order per the spec.
-      qpts2d = {{1.0/3.0, 1.0/3.0, 0.5}};
-    } else if (p_order == 1) {
-      // Over-integration: degree 4 rule (6 pts) for nonlinear Euler flux
-      // (flux is quadratic in U, ∇φ is constant → integrand is degree ~3)
-      qpts2d = {
-        {0.108103018168070, 0.445948490915965, 0.111690794839005},
-        {0.445948490915965, 0.108103018168070, 0.111690794839005},
-        {0.445948490915965, 0.445948490915965, 0.111690794839005},
-        {0.816847572980459, 0.091576213509771, 0.054975871827661},
-        {0.091576213509771, 0.816847572980459, 0.054975871827661},
-        {0.091576213509771, 0.091576213509771, 0.054975871827661},
-      };
-    } else if (p_order == 2) {
-      // Over-integration: degree 5 rule (7 pts) for p=2 nonlinear flux
-      // (flux degree ~4, ∇φ degree 1 → integrand degree ~5)
-      qpts2d = {
-        {0.333333333333333, 0.333333333333333, 0.112500000000000},
-        {0.059715871789770, 0.470142064105115, 0.066197076394253},
-        {0.470142064105115, 0.059715871789770, 0.066197076394253},
-        {0.470142064105115, 0.470142064105115, 0.066197076394253},
-        {0.797426985353087, 0.101286507323456, 0.062969590272414},
-        {0.101286507323456, 0.797426985353087, 0.062969590272414},
-        {0.101286507323456, 0.101286507323456, 0.062969590272414},
-      };
-    } else { // p_order == 3
-      // Over-integration: degree 8 rule (16 pts) for p=3 nonlinear flux
-      // (flux degree ~6, ∇φ degree 2 → integrand degree ~8)
-      qpts2d = {
-        {0.333333333333333, 0.333333333333333, 0.072157803838894},
-        {0.081414823414554, 0.459292588292723, 0.047545817133642},
-        {0.459292588292723, 0.081414823414554, 0.047545817133642},
-        {0.459292588292723, 0.459292588292723, 0.047545817133642},
-        {0.658861384496480, 0.170569307751760, 0.051608685267359},
-        {0.170569307751760, 0.658861384496480, 0.051608685267359},
-        {0.170569307751760, 0.170569307751760, 0.051608685267359},
-        {0.898905543365938, 0.050547228317031, 0.016229248811599},
-        {0.050547228317031, 0.898905543365938, 0.016229248811599},
-        {0.050547228317031, 0.050547228317031, 0.016229248811599},
-        {0.008394777409958, 0.263112829634638, 0.013615157087217},
-        {0.263112829634638, 0.728492392955404, 0.013615157087217},
-        {0.728492392955404, 0.008394777409958, 0.013615157087217},
-        {0.263112829634638, 0.008394777409958, 0.013615157087217},
-        {0.728492392955404, 0.263112829634638, 0.013615157087217},
-        {0.008394777409958, 0.728492392955404, 0.013615157087217},
-      };
-    }
+    struct VolumeQuadCache {
+      std::vector<QP2D> qpts;
+      std::vector<std::vector<double>> phi;
+      std::vector<std::vector<double>> gphi;
+    };
 
+    auto buildVolumeQuadCache = [&](int p) {
+      VolumeQuadCache cache;
+      if (p == 0) {
+        cache.qpts = {{1.0/3.0, 1.0/3.0, 0.5}};
+      } else if (p == 1) {
+        cache.qpts = {
+          {0.108103018168070, 0.445948490915965, 0.111690794839005},
+          {0.445948490915965, 0.108103018168070, 0.111690794839005},
+          {0.445948490915965, 0.445948490915965, 0.111690794839005},
+          {0.816847572980459, 0.091576213509771, 0.054975871827661},
+          {0.091576213509771, 0.816847572980459, 0.054975871827661},
+          {0.091576213509771, 0.091576213509771, 0.054975871827661},
+        };
+      } else if (p == 2) {
+        cache.qpts = {
+          {0.333333333333333, 0.333333333333333, 0.112500000000000},
+          {0.059715871789770, 0.470142064105115, 0.066197076394253},
+          {0.470142064105115, 0.059715871789770, 0.066197076394253},
+          {0.470142064105115, 0.470142064105115, 0.066197076394253},
+          {0.797426985353087, 0.101286507323456, 0.062969590272414},
+          {0.101286507323456, 0.797426985353087, 0.062969590272414},
+          {0.101286507323456, 0.101286507323456, 0.062969590272414},
+        };
+      } else {
+        cache.qpts = {
+          {0.333333333333333, 0.333333333333333, 0.072157803838894},
+          {0.081414823414554, 0.459292588292723, 0.047545817133642},
+          {0.459292588292723, 0.081414823414554, 0.047545817133642},
+          {0.459292588292723, 0.459292588292723, 0.047545817133642},
+          {0.658861384496480, 0.170569307751760, 0.051608685267359},
+          {0.170569307751760, 0.658861384496480, 0.051608685267359},
+          {0.170569307751760, 0.170569307751760, 0.051608685267359},
+          {0.898905543365938, 0.050547228317031, 0.016229248811599},
+          {0.050547228317031, 0.898905543365938, 0.016229248811599},
+          {0.050547228317031, 0.050547228317031, 0.016229248811599},
+          {0.008394777409958, 0.263112829634638, 0.013615157087217},
+          {0.263112829634638, 0.728492392955404, 0.013615157087217},
+          {0.728492392955404, 0.008394777409958, 0.013615157087217},
+          {0.263112829634638, 0.008394777409958, 0.013615157087217},
+          {0.728492392955404, 0.263112829634638, 0.013615157087217},
+          {0.008394777409958, 0.728492392955404, 0.013615157087217},
+        };
+      }
+      cache.phi.reserve(cache.qpts.size());
+      cache.gphi.reserve(cache.qpts.size());
+      for (const auto &qp : cache.qpts) {
+        cache.phi.push_back(evaluateBasis(qp.xi, qp.eta, p));
+        cache.gphi.push_back(evaluateBasisGrad(qp.xi, qp.eta, p));
+      }
+      return cache;
+    };
+
+    // These quadrature points are fixed for each polynomial order, so cache the
+    // basis data once and reuse it for every element in the volume loop.
+    static const VolumeQuadCache vol_cache_p0 = buildVolumeQuadCache(0);
+    static const VolumeQuadCache vol_cache_p1 = buildVolumeQuadCache(1);
+    static const VolumeQuadCache vol_cache_p2 = buildVolumeQuadCache(2);
+    static const VolumeQuadCache vol_cache_p3 = buildVolumeQuadCache(3);
+    const VolumeQuadCache *vol_cache =
+        (p_order == 0) ? &vol_cache_p0 :
+        (p_order == 1) ? &vol_cache_p1 :
+        (p_order == 2) ? &vol_cache_p2 : &vol_cache_p3;
+
+    // Volume contributions are element-local, so each thread can safely own one element.
+#pragma omp parallel for if (Ne > 64)
     for (int e = 0; e < Ne; ++e) {
       Vec2 v0 = mesh.V[mesh.E[e].v[0]];
       Vec2 v1 = mesh.V[mesh.E[e].v[1]];
@@ -801,9 +836,10 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       //   (∂φ/∂x)*|J| =  ∂φ/∂ξ * dy2 - ∂φ/∂η * dy1
       //   (∂φ/∂y)*|J| = -∂φ/∂ξ * dx2 + ∂φ/∂η * dx1
 
-      for (const auto &qp : qpts2d) {
-        std::vector<double> phi  = evaluateBasis(qp.xi, qp.eta, p_order);
-        std::vector<double> gphi = evaluateBasisGrad(qp.xi, qp.eta, p_order);
+      for (size_t q = 0; q < vol_cache->qpts.size(); ++q) {
+        const auto &qp = vol_cache->qpts[q];
+        const auto &phi  = vol_cache->phi[q];
+        const auto &gphi = vol_cache->gphi[q];
 
         Vec4 u = {0,0,0,0};
         for (int j = 0; j < ndof_per_elem; ++j)
@@ -826,10 +862,50 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
     }
   }
 
+  // Precompute basis values on each directed local edge at the fixed 1-D face
+  // quadrature points.  For straight triangles the reference-space edge points
+  // depend only on local endpoint ordering, not on the specific element.
+  struct FaceQuadCache {
+    std::vector<std::vector<std::vector<std::vector<double>>>> phi;
+  };
+
+  auto buildFaceQuadCache = [&](int p, const QuadRule &rule) {
+    FaceQuadCache cache;
+    int ndof = (p + 1) * (p + 2) / 2;
+    cache.phi.assign(3, std::vector<std::vector<std::vector<double>>>(
+                            3, std::vector<std::vector<double>>(
+                                   rule.n, std::vector<double>(ndof, 0.0))));
+
+    const double rx[3] = {0.0, 1.0, 0.0};
+    const double ry[3] = {0.0, 0.0, 1.0};
+    for (int ia = 0; ia < 3; ++ia) {
+      for (int ib = 0; ib < 3; ++ib) {
+        if (ia == ib) continue;
+        for (int q = 0; q < rule.n; ++q) {
+          double t = rule.points[q];
+          double xi  = rx[ia] + t * (rx[ib] - rx[ia]);
+          double eta = ry[ia] + t * (ry[ib] - ry[ia]);
+          cache.phi[ia][ib][q] = evaluateBasis(xi, eta, p);
+        }
+      }
+    }
+    return cache;
+  };
+
+  const FaceQuadCache *face_cache = nullptr;
+  if (p_order > 0) {
+    static const FaceQuadCache face_cache_p1 = buildFaceQuadCache(1, getQuadratureRule(1));
+    static const FaceQuadCache face_cache_p2 = buildFaceQuadCache(2, getQuadratureRule(2));
+    static const FaceQuadCache face_cache_p3 = buildFaceQuadCache(3, getQuadratureRule(3));
+    face_cache = (p_order == 1) ? &face_cache_p1 :
+                 (p_order == 2) ? &face_cache_p2 : &face_cache_p3;
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // STEP 4b — INTERIOR INTERFACE FLUXES (Eq. 4.3.12 third term)
   // ═══════════════════════════════════════════════════════════════
-  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+  auto accumulateInteriorFace = [&](int i, std::vector<Vec4> &Racc,
+                                    std::vector<double> &sdlacc) {
     int eL = mesh.IE[i].elemL;
     int eR = mesh.IE[i].elemR;
     int va  = mesh.IE[i].v[0];
@@ -841,10 +917,10 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       FluxResult fr;
       if (fluxname == "hlle") fr = fluxHLLE(Un_dg[eL][0], Un_dg[eR][0], normal, gamma);
       else                     fr = fluxRoe (Un_dg[eL][0], Un_dg[eR][0], normal, gamma);
-      res.R[eL * ndof_per_elem] += fr.F * len;
-      res.R[eR * ndof_per_elem] -= fr.F * len;
-      res.sdl[eL] += fr.smax * len;
-      res.sdl[eR] += fr.smax * len;
+      Racc[eL * ndof_per_elem] += fr.F * len;
+      Racc[eR * ndof_per_elem] -= fr.F * len;
+      sdlacc[eL] += fr.smax * len;
+      sdlacc[eR] += fr.smax * len;
     } else {
       // Find reference parameterizations for this edge in each element.
       // For periodic edges, the right element's edge nodes differ from the
@@ -857,15 +933,24 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       edgeRefParam(mesh.E[eL].v, va, vb, xiL0, etaL0, xiL1, etaL1);
       edgeRefParam(mesh.E[eR].v, vaR, vbR, xiR0, etaR0, xiR1, etaR1);
 
+      int iaL = -1, ibL = -1, iaR = -1, ibR = -1;
+      for (int k = 0; k < 3; ++k) {
+        if (mesh.E[eL].v[k] == va)  iaL = k;
+        if (mesh.E[eL].v[k] == vb)  ibL = k;
+        if (mesh.E[eR].v[k] == vaR) iaR = k;
+        if (mesh.E[eR].v[k] == vbR) ibR = k;
+      }
+
       for (int q = 0; q < qr.n; ++q) {
         double t = qr.points[q];
-        double xiL  = xiL0  + t * (xiL1  - xiL0);
-        double etaL = etaL0 + t * (etaL1 - etaL0);
-        double xiR  = xiR0  + t * (xiR1  - xiR0);
-        double etaR = etaR0 + t * (etaR1 - etaR0);
-
-        std::vector<double> phiL = evaluateBasis(xiL,  etaL,  p_order);
-        std::vector<double> phiR = evaluateBasis(xiR,  etaR,  p_order);
+        const auto &phiL =
+            (iaL >= 0 && ibL >= 0) ? face_cache->phi[iaL][ibL][q]
+                                   : evaluateBasis(xiL0 + t * (xiL1 - xiL0),
+                                                   etaL0 + t * (etaL1 - etaL0), p_order);
+        const auto &phiR =
+            (iaR >= 0 && ibR >= 0) ? face_cache->phi[iaR][ibR][q]
+                                   : evaluateBasis(xiR0 + t * (xiR1 - xiR0),
+                                                   etaR0 + t * (etaR1 - etaR0), p_order);
 
         Vec4 u_L = {0,0,0,0}, u_R = {0,0,0,0};
         for (int j = 0; j < ndof_per_elem; ++j) {
@@ -879,28 +964,62 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
 
         double w = qr.weights[q] * len;
         for (int j = 0; j < ndof_per_elem; ++j) {
-          res.R[eL * ndof_per_elem + j] += fr.F * (w * phiL[j]);
-          res.R[eR * ndof_per_elem + j] -= fr.F * (w * phiR[j]);
+          Racc[eL * ndof_per_elem + j] += fr.F * (w * phiL[j]);
+          Racc[eR * ndof_per_elem + j] -= fr.F * (w * phiR[j]);
         }
       }
       // Use the true cell-average state to compute sdl for time step sizing.
       // For p>=1 DOF 0 is the vertex value, not the integral mean — use cellAverage().
       {
-        Vec4 uavgL = cellAverage(Un_dg[eL]);
-        Vec4 uavgR = cellAverage(Un_dg[eR]);
+        const Vec4 &uavgL = Uavg[eL];
+        const Vec4 &uavgR = Uavg[eR];
         FluxResult fr0;
         if (fluxname == "hlle") fr0 = fluxHLLE(uavgL, uavgR, normal, gamma);
         else                     fr0 = fluxRoe (uavgL, uavgR, normal, gamma);
-        res.sdl[eL] += fr0.smax * len;
-        res.sdl[eR] += fr0.smax * len;
+        sdlacc[eL] += fr0.smax * len;
+        sdlacc[eR] += fr0.smax * len;
       }
+    }
+  };
+
+  int ie_threads = 1;
+#ifdef _OPENMP
+  ie_threads = omp_get_max_threads();
+#endif
+  if (ie_threads > 1 && (int)mesh.IE.size() > 128) {
+    // Interior faces touch neighboring elements, so parallel accumulation uses
+    // thread-local residual/sdl buffers followed by a reduction.
+    std::vector<std::vector<Vec4>> Rpriv(
+        ie_threads, std::vector<Vec4>(Ne * ndof_per_elem, {0.0, 0.0, 0.0, 0.0}));
+    std::vector<std::vector<double>> sdlpriv(
+        ie_threads, std::vector<double>(Ne, 0.0));
+#pragma omp parallel
+    {
+#ifdef _OPENMP
+      int tid = omp_get_thread_num();
+#else
+      int tid = 0;
+#endif
+#pragma omp for
+      for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+        accumulateInteriorFace(i, Rpriv[tid], sdlpriv[tid]);
+      }
+    }
+    for (int t = 0; t < ie_threads; ++t) {
+      for (int k = 0; k < Ne * ndof_per_elem; ++k) res.R[k] += Rpriv[t][k];
+      for (int e = 0; e < Ne; ++e) res.sdl[e] += sdlpriv[t][e];
+    }
+  } else {
+    for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+      accumulateInteriorFace(i, res.R, res.sdl);
     }
   }
 
   // ═══════════════════════════════════════════════════════════════
   // STEP 4c — BOUNDARY INTERFACE FLUXES (special treatment per spec)
   // ═══════════════════════════════════════════════════════════════
-  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+  auto accumulateBoundaryFace = [&](int i, std::vector<Vec4> &Racc,
+                                    std::vector<double> &sdlacc) {
     int eL   = mesh.BE[i].elemL;
     int va   = mesh.BE[i].v[0];
     int vb   = mesh.BE[i].v[1];
@@ -924,18 +1043,23 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       } else {
         fr = inviscidWallFlux(u_int, n, gamma);
       }
-      res.R[eL * ndof_per_elem] += fr.F * len;
-      res.sdl[eL] += fr.smax * len;
+      Racc[eL * ndof_per_elem] += fr.F * len;
+      sdlacc[eL] += fr.smax * len;
     } else {
       double xi0, eta0, xi1, eta1;
       edgeRefParam(mesh.E[eL].v, va, vb, xi0, eta0, xi1, eta1);
+      int ia = -1, ib = -1;
+      for (int k = 0; k < 3; ++k) {
+        if (mesh.E[eL].v[k] == va) ia = k;
+        if (mesh.E[eL].v[k] == vb) ib = k;
+      }
 
       for (int q = 0; q < qr.n; ++q) {
         double t    = qr.points[q];
-        double xi_q = xi0  + t * (xi1  - xi0);
-        double eta_q= eta0 + t * (eta1 - eta0);
-
-        std::vector<double> phi = evaluateBasis(xi_q, eta_q, p_order);
+        const auto &phi =
+            (ia >= 0 && ib >= 0) ? face_cache->phi[ia][ib][q]
+                                 : evaluateBasis(xi0 + t * (xi1 - xi0),
+                                                 eta0 + t * (eta1 - eta0), p_order);
 
         Vec4 u_int = {0,0,0,0};
         for (int j = 0; j < ndof_per_elem; ++j)
@@ -960,12 +1084,12 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
 
         double w = qr.weights[q] * len;
         for (int j = 0; j < ndof_per_elem; ++j)
-          res.R[eL * ndof_per_elem + j] += fr.F * (w * phi[j]);
+          Racc[eL * ndof_per_elem + j] += fr.F * (w * phi[j]);
       }
       // Use the true cell-average state for sdl computation.
       // For p>=1 DOF 0 is the vertex value at (0,0), not the integral mean.
       {
-        Vec4 u_int0 = cellAverage(Un_dg[eL]);
+        const Vec4 &u_int0 = Uavg[eL];
         FluxResult fr0;
         if (bName == "inflow") {
           Vec2 edge_mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
@@ -977,8 +1101,41 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
         } else {
           fr0 = inviscidWallFlux(u_int0, n, gamma);
         }
-        res.sdl[eL] += fr0.smax * len;
+        sdlacc[eL] += fr0.smax * len;
       }
+    }
+  };
+
+  int be_threads = 1;
+#ifdef _OPENMP
+  be_threads = omp_get_max_threads();
+#endif
+  if (be_threads > 1 && (int)mesh.BE.size() > 128) {
+    // Boundary faces only write into their owning element, but multiple faces
+    // may still hit the same element, so use thread-local buffers here as well.
+    std::vector<std::vector<Vec4>> Rpriv(
+        be_threads, std::vector<Vec4>(Ne * ndof_per_elem, {0.0, 0.0, 0.0, 0.0}));
+    std::vector<std::vector<double>> sdlpriv(
+        be_threads, std::vector<double>(Ne, 0.0));
+#pragma omp parallel
+    {
+#ifdef _OPENMP
+      int tid = omp_get_thread_num();
+#else
+      int tid = 0;
+#endif
+#pragma omp for
+      for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+        accumulateBoundaryFace(i, Rpriv[tid], sdlpriv[tid]);
+      }
+    }
+    for (int t = 0; t < be_threads; ++t) {
+      for (int k = 0; k < Ne * ndof_per_elem; ++k) res.R[k] += Rpriv[t][k];
+      for (int e = 0; e < Ne; ++e) res.sdl[e] += sdlpriv[t][e];
+    }
+  } else {
+    for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+      accumulateBoundaryFace(i, res.R, res.sdl);
     }
   }
 
@@ -1342,7 +1499,11 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
       snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin",
                current_time, snapshot_count);
       saveSnapshot(filename);
+      std::string dg_filename(filename);
+      dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
+      saveDGSnapshot(dg_filename);
       std::cout << "Saved snapshot: " << filename << std::endl;
+      std::cout << "Saved DG snapshot: " << dg_filename << std::endl;
       std::cout << "Reached t_end = " << t_end << " at iteration " << niter << std::endl;
       break;
     }
@@ -1369,6 +1530,9 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
       snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin",
                current_time, snapshot_count);
       saveSnapshot(filename);
+      std::string dg_filename(filename);
+      dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
+      saveDGSnapshot(dg_filename);
       snapshot_count++;
       
       std::cout << "Iter: " << std::setw(6) << niter
@@ -1376,6 +1540,8 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
                 << " | dt: " << std::scientific << dt_global
                 << " | Residual: " << Rnorm
                 << " | dU: " << dU_norm
+                << " | Saved snapshot: " << filename
+                << " | Saved DG snapshot: " << dg_filename
                 << std::endl;
     }
 
@@ -1404,6 +1570,20 @@ void FiniteVolumeSolver::saveSnapshot(const std::string &filename) {
   out.write((char *)&Ne, sizeof(int));
   for (const auto &u : U) {
     out.write((char *)u.v, sizeof(double) * 4);
+  }
+  out.close();
+}
+
+void FiniteVolumeSolver::saveDGSnapshot(const std::string &filename) {
+  std::ofstream out(filename, std::ios::binary);
+  int Ne = U_dg.size();
+  out.write((char *)&Ne, sizeof(int));
+  out.write((char *)&p_order, sizeof(int));
+  out.write((char *)&ndof_per_elem, sizeof(int));
+  for (const auto &elem_dofs : U_dg) {
+    for (const auto &u : elem_dofs) {
+      out.write((char *)u.v, sizeof(double) * 4);
+    }
   }
   out.close();
 }
@@ -1444,6 +1624,8 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // Compute local dt for each element (used for all stages)
   std::vector<double> dt_elem(Ne);
+  // Per-element CFL sizing is independent across elements.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double sdl = std::max(res1.sdl[e], 1e-12);
     dt_elem[e] = cfl_eff * 2.0 * mesh.areas[e] / sdl;
@@ -1451,6 +1633,8 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // k1 = M^{-1} R(Un)
   std::vector<std::vector<Vec4>> k1(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k1[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, area_scale, k1[e].data());
@@ -1458,36 +1642,48 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // --- Stage 2: k2 = M^{-1} R(Un - 0.5*dt*k1) ---
   std::vector<std::vector<Vec4>> Utmp(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Build the stage-2 state independently for each element.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Utmp[e][i] = Un_dg[e][i] - k1[e][i] * (0.5 * dt_elem[e]);
 
   ResidualResult res2 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k2(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k2[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, area_scale, k2[e].data());
   }
 
   // --- Stage 3: k3 = M^{-1} R(Un - 0.5*dt*k2) ---
+  // Build the stage-3 state independently for each element.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Utmp[e][i] = Un_dg[e][i] - k2[e][i] * (0.5 * dt_elem[e]);
 
   ResidualResult res3 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k3(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k3[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, area_scale, k3[e].data());
   }
 
   // --- Stage 4: k4 = M^{-1} R(Un - dt*k3) ---
+  // Build the stage-4 state independently for each element.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Utmp[e][i] = Un_dg[e][i] - k3[e][i] * dt_elem[e];
 
   ResidualResult res4 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k4(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k4[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, area_scale, k4[e].data());
@@ -1495,6 +1691,8 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // --- Update: Un+1 = Un - dt/6 * (k1 + 2*k2 + 2*k3 + k4) ---
   std::vector<std::vector<Vec4>> Unp1(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Final RK update is element-local.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Unp1[e][i] = Un_dg[e][i] - (k1[e][i] + k2[e][i]*2.0 + k3[e][i]*2.0 + k4[e][i]) * (dt_elem[e] / 6.0);
@@ -1517,6 +1715,8 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
                                          : calcResidualDG(Un_dg, time, use_unsteady_wake);
 
   std::vector<std::vector<Vec4>> k1(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k1[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, area_scale, k1[e].data());
@@ -1524,36 +1724,48 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // --- Stage 2: k2 = M^{-1} R(Un - 0.5*dt*k1) ---
   std::vector<std::vector<Vec4>> Utmp(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Build the stage-2 state independently for each element.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Utmp[e][i] = Un_dg[e][i] - k1[e][i] * (0.5 * dt_global);
 
   ResidualResult res2 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k2(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k2[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, area_scale, k2[e].data());
   }
 
   // --- Stage 3: k3 = M^{-1} R(Un - 0.5*dt*k2) ---
+  // Build the stage-3 state independently for each element.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Utmp[e][i] = Un_dg[e][i] - k2[e][i] * (0.5 * dt_global);
 
   ResidualResult res3 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k3(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k3[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, area_scale, k3[e].data());
   }
 
   // --- Stage 4: k4 = M^{-1} R(Un - dt*k3) ---
+  // Build the stage-4 state independently for each element.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Utmp[e][i] = Un_dg[e][i] - k3[e][i] * dt_global;
 
   ResidualResult res4 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k4(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Mass-matrix application is element-local and writes only into k4[e].
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
     double area_scale = mesh.areas[e] / 0.5;
     applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, area_scale, k4[e].data());
@@ -1561,6 +1773,8 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // --- Update: Un+1 = Un - dt/6 * (k1 + 2*k2 + 2*k3 + k4) ---
   std::vector<std::vector<Vec4>> Unp1(Ne, std::vector<Vec4>(ndof_per_elem));
+  // Final RK update is element-local.
+#pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
       Unp1[e][i] = Un_dg[e][i] - (k1[e][i] + k2[e][i]*2.0 + k3[e][i]*2.0 + k4[e][i]) * (dt_global / 6.0);

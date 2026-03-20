@@ -11,11 +11,14 @@ Example:
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 from matplotlib.collections import PolyCollection
 import struct
 import sys
 import glob
 import os
+
+from dg_utils import build_dg_triangulation, infer_dg_filename, maybe_read_dg_results, primitive_from_state, read_gri_mesh, element_polygon
 
 TARGET_TIMES = [100.0, 200.0, 300.0]
 TIME_TOL     = 5.0   # pick the snapshot whose time is closest, within this window
@@ -32,7 +35,12 @@ def read_mesh(filename):
         v = np.array([[float(s) for s in f.readline().split()] for _ in range(nn)])
         return v
 
-def get_elements_from_gri(filename):
+def get_plot_polygons_from_gri(filename, vertices):
+    """Read element connectivity and return polygon vertices for plotting.
+
+    Supports mixed-order TriLagrange blocks. Quadratic triangles are drawn with
+    midside nodes so the wall-adjacent curved cells appear in the plot.
+    """
     with open(filename, 'r') as f:
         nn, ne, dim = map(int, f.readline().split())
         for _ in range(nn):
@@ -43,17 +51,27 @@ def get_elements_from_gri(filename):
             nb_in = int(line[0])
             for _ in range(nb_in):
                 f.readline()
-        elements = []
+        polygons = []
         ne_total = 0
         while ne_total < ne:
             line = f.readline().split()
             if not line:
                 break
             nei = int(line[0])
+            deg = int(line[1])
             for _ in range(nei):
-                elements.append([int(s)-1 for s in f.readline().split()])
+                row = [int(s)-1 for s in f.readline().split()]
+                if len(row) < 3:
+                    raise ValueError(f"Invalid element row in {filename}: {row}")
+                if deg == 1:
+                    polygons.append(vertices[row[:3]])
+                elif deg == 2 and len(row) >= 6:
+                    poly_ids = [row[0], row[1], row[2], row[4], row[5], row[3]]
+                    polygons.append(vertices[poly_ids])
+                else:
+                    polygons.append(vertices[row[:3]])
             ne_total += nei
-        return np.array(elements)
+        return polygons
 
 def extract_time_from_filename(filename):
     basename = os.path.basename(filename)
@@ -67,12 +85,14 @@ def plot_entropy_snapshots(meshfile, results_dir, output_dir='unsteady_plots'):
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Reading mesh: {meshfile}")
-    v = read_mesh(meshfile)
-    e = get_elements_from_gri(meshfile)
-    verts = v[e]
+    mesh = read_gri_mesh(meshfile)
+    verts = [element_polygon(elem, mesh["nodes"]) for elem in mesh["elements"]]
 
     pattern = os.path.join(results_dir, "results_*.bin")
-    result_files = sorted(glob.glob(pattern), key=extract_time_from_filename)
+    result_files = sorted(
+        [f for f in glob.glob(pattern) if not f.endswith("_dg.bin")],
+        key=extract_time_from_filename,
+    )
 
     if not result_files:
         print(f"Error: No files found matching {pattern}")
@@ -98,14 +118,14 @@ def plot_entropy_snapshots(meshfile, results_dir, output_dir='unsteady_plots'):
         return
 
     # Compute entropy range across only the selected snapshots for a consistent colorbar
-    gamma = 1.4
     entropy_min, entropy_max = np.inf, -np.inf
     for target, (t, f) in selected.items():
-        u = read_results(f)
-        rho = u[:, 0]; rhou = u[:, 1]; rhov = u[:, 2]; rhoe = u[:, 3]
-        vel_u = rhou / rho; vel_v = rhov / rho
-        p = (gamma - 1) * (rhoe - 0.5 * rho * (vel_u**2 + vel_v**2))
-        entropy = p / rho**gamma        # isentropic function p/ρ^γ  (~0.7 in freestream)
+        dg_filename, U_dg, p_order, _ = maybe_read_dg_results(f)
+        if U_dg is not None:
+            _, _, _, entropy = build_dg_triangulation(mesh, U_dg, p_order, "entropy")
+        else:
+            u = read_results(f)
+            entropy = np.exp(primitive_from_state(u)["entropy"])
         entropy_min = min(entropy_min, entropy.min())
         entropy_max = max(entropy_max, entropy.max())
     print(f"p/rho^gamma range (selected snapshots): [{entropy_min:.4f}, {entropy_max:.4f}]")
@@ -118,20 +138,24 @@ def plot_entropy_snapshots(meshfile, results_dir, output_dir='unsteady_plots'):
 
     for ax, target in zip(axes, sorted(selected)):
         actual_t, filepath = selected[target]
-        u = read_results(filepath)
-        rho = u[:, 0]; rhou = u[:, 1]; rhov = u[:, 2]; rhoe = u[:, 3]
-        vel_u = rhou / rho; vel_v = rhov / rho
-        vel_mag = np.sqrt(vel_u**2 + vel_v**2)
-        p = (gamma - 1) * (rhoe - 0.5 * rho * vel_mag**2)
-        entropy = p / rho**gamma        # isentropic function p/ρ^γ
+        dg_filename, U_dg, p_order, _ = maybe_read_dg_results(filepath)
+        if U_dg is not None:
+            x, y, tris, entropy = build_dg_triangulation(mesh, U_dg, p_order, "entropy")
+            triang = mtri.Triangulation(x, y, tris)
+            pc = ax.tripcolor(triang, np.exp(entropy), shading='gouraud', cmap='viridis')
+            pc.set_clim(entropy_min, entropy_max)
+            fig.colorbar(pc, ax=ax, label=r'$e^s = p/\rho^\gamma$')
+        else:
+            u = read_results(filepath)
+            entropy = np.exp(primitive_from_state(u)["entropy"])
+            pc = PolyCollection(verts, cmap='viridis', edgecolors='none')
+            pc.set_array(entropy)
+            pc.set_clim(entropy_min, entropy_max)
+            ax.add_collection(pc)
+            ax.autoscale()
+            fig.colorbar(pc, ax=ax, label=r'$e^s = p/\rho^\gamma$')
 
-        pc = PolyCollection(verts, cmap='viridis', edgecolors='none')
-        pc.set_array(entropy)
-        pc.set_clim(entropy_min, entropy_max)
-        ax.add_collection(pc)
-        ax.autoscale()
         ax.set_aspect('equal')
-        fig.colorbar(pc, ax=ax, label=r'$e^s = p/\rho^\gamma$')
         ax.set_title(f't = {actual_t:.1f}')
         ax.set_xlabel('X [mm]')
         ax.set_ylabel('Y [mm]')

@@ -22,6 +22,7 @@ int main(int argc, char **argv) {
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
               << "\n  - Output files tagged by order: steady_<mesh>_p<order>_results.bin"
+              << "\n  - Full DG coefficients are also written to *_results_dg.bin"
               << std::endl;
     return 1;
   }
@@ -185,6 +186,22 @@ int main(int argc, char **argv) {
     }
     out.close();
     std::cout << "Results saved to " << results_file << std::endl;
+
+    std::string dg_results_file = output_dir + "/" + file_prefix + "results_dg.bin";
+    std::ofstream dg_out(dg_results_file, std::ios::binary);
+    int Ne_dg = solver.U_dg.size();
+    int p_out = solver.p_order;
+    int ndof = solver.ndof_per_elem;
+    dg_out.write((char *)&Ne_dg, sizeof(int));
+    dg_out.write((char *)&p_out, sizeof(int));
+    dg_out.write((char *)&ndof, sizeof(int));
+    for (const auto &elem_dofs : solver.U_dg) {
+      for (const auto &u : elem_dofs) {
+        dg_out.write((char *)u.v, sizeof(double) * 4);
+      }
+    }
+    dg_out.close();
+    std::cout << "DG coefficients saved to " << dg_results_file << std::endl;
 
     std::string residual_file = output_dir + "/" + file_prefix + "residual.bin";
     std::ofstream res_out(residual_file, std::ios::binary);

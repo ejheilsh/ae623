@@ -8,6 +8,14 @@ import matplotlib.pyplot as plt
 import struct
 import sys
 
+from dg_utils import (
+    infer_dg_filename,
+    integrate_wall_forces,
+    maybe_read_dg_results,
+    read_gri_mesh,
+    wall_edge_samples,
+)
+
 def read_results(filename):
     """Read solution data from binary file."""
     with open(filename, 'rb') as f:
@@ -23,7 +31,12 @@ def read_mesh(filename):
         return v
 
 def get_elements_from_gri(filename):
-    """Read element connectivity."""
+    """Read element connectivity using triangle corner nodes only.
+
+    Supports mixed-order TriLagrange blocks by keeping the first three corner
+    nodes from each element line. That is sufficient for the current edge map
+    and wall integration logic.
+    """
     with open(filename, 'r') as f:
         nn, ne, dim = map(int, f.readline().split())
         for _ in range(nn): 
@@ -43,7 +56,10 @@ def get_elements_from_gri(filename):
                 break
             nei = int(line[0])
             for _ in range(nei):
-                elements.append([int(s)-1 for s in f.readline().split()])
+                row = [int(s)-1 for s in f.readline().split()]
+                if len(row) < 3:
+                    raise ValueError(f"Invalid element row in {filename}: {row}")
+                elements.append(row[:3])
             ne_total += nei
         return np.array(elements)
 
@@ -217,6 +233,9 @@ def compute_force_coefficients(v, elements, boundary_groups, u, gamma=1.4):
     p = (gamma - 1) * (rhoe - 0.5 * rho * qsq)
     
     # Reference conditions
+    rho0 = 1.0
+    a0 = 1.0
+    p0 = a0**2 * rho0 / gamma
     p_out = 0.7 * p0
     q_out, M_out, p0 = compute_reference_conditions(p_out, gamma)
     
@@ -257,27 +276,32 @@ def compute_force_coefficients(v, elements, boundary_groups, u, gamma=1.4):
     
     return c_x, c_y
 
-def plot_cp_distribution(meshfile, resultsfile, output_file='cp_distribution.png'):
+def plot_cp_distribution(meshfile, resultsfile, output_file='cp_distribution.png', show_plot=True):
     """Main function to plot pressure coefficient distribution."""
-    # Read data
     print(f"Reading mesh: {meshfile}")
-    v = read_mesh(meshfile)
-    e = get_elements_from_gri(meshfile)
-    boundary_groups = get_boundary_edges_from_gri(meshfile)
-    
+    mesh = read_gri_mesh(meshfile)
+
     print(f"Reading results: {resultsfile}")
-    u = read_results(resultsfile)
-    
-    # Compute pressure coefficients
-    print("Computing pressure coefficients...")
-    x, cp = compute_pressure_coefficients(v, e, boundary_groups, u)
+    dg_filename, U_dg, p_order, _ = maybe_read_dg_results(resultsfile)
+    if U_dg is not None:
+        print(f"Using DG coefficients from {dg_filename}")
+        print("Computing pressure coefficients from DG wall reconstruction...")
+        x, cp = wall_edge_samples(mesh, U_dg, p_order)
+        c_x, c_y = integrate_wall_forces(mesh, U_dg, p_order)
+    else:
+        print(f"No DG coefficient file found; using cell averages. Expected {infer_dg_filename(resultsfile)}")
+        v = read_mesh(meshfile)
+        e = get_elements_from_gri(meshfile)
+        boundary_groups = get_boundary_edges_from_gri(meshfile)
+        u = read_results(resultsfile)
+        print("Computing pressure coefficients...")
+        x, cp = compute_pressure_coefficients(v, e, boundary_groups, u)
+        c_x, c_y = compute_force_coefficients(v, e, boundary_groups, u)
     
     if len(x) == 0:
         print("Error: No wall boundary data found!")
         return
     
-    # Compute force coefficients
-    c_x, c_y = compute_force_coefficients(v, e, boundary_groups, u)
     print(f"\nForce coefficients:")
     print(f"  c_x = {c_x:.6f}")
     print(f"  c_y = {c_y:.6f}")
@@ -298,16 +322,22 @@ def plot_cp_distribution(meshfile, resultsfile, output_file='cp_distribution.png
     plt.tight_layout()
     plt.savefig(output_file, dpi=150)
     print(f"\nSaved: {output_file}")
-    plt.show()
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python plot_cp.py <meshfile> <results.bin> [output.png]")
+    args = [arg for arg in sys.argv[1:] if arg != "--no-show"]
+    show_plot = "--no-show" not in sys.argv[1:]
+
+    if len(args) < 2:
+        print("Usage: python plot_cp.py <meshfile> <results.bin> [output.png] [--no-show]")
         print("Example: python plot_cp.py grids/2k.gri results.bin cp_distribution.png")
         sys.exit(1)
     
-    meshfile = sys.argv[1]
-    resultsfile = sys.argv[2]
-    output_file = sys.argv[3] if len(sys.argv) > 3 else 'cp_distribution.png'
+    meshfile = args[0]
+    resultsfile = args[1]
+    output_file = args[2] if len(args) > 2 else 'cp_distribution.png'
     
-    plot_cp_distribution(meshfile, resultsfile, output_file)
+    plot_cp_distribution(meshfile, resultsfile, output_file, show_plot=show_plot)

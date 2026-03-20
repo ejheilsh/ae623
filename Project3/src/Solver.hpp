@@ -43,6 +43,7 @@ public:
   void solveSteady(int itercap = 1000000);
   void solveUnsteady(int itercap = 1000000, double t_end = -1.0);
   void saveSnapshot(const std::string &filename);
+  void saveDGSnapshot(const std::string &filename);
 
 private:
   struct ResidualResult {
