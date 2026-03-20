@@ -8,6 +8,10 @@
 #include <limits>
 #include <unordered_map>
 
+static bool edgeRefParam(const int ev[3], int va, int vb,
+                         double &xi0, double &eta0,
+                         double &xi1, double &eta1);
+
 namespace {
 uint64_t spatialKey(int ix, int iy) {
   return (static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 32) |
@@ -52,6 +56,181 @@ FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
   // For backward compatibility with p=0 (FV mode), allocate U
   U.resize(mesh.E.size());
   U0.resize(mesh.E.size());
+}
+
+// Matt Additions
+void FiniteVolumeSolver::syncCellAveragesFromDG() {
+  int Ne = mesh.E.size();
+  U.resize(Ne);
+  for (int e = 0; e < Ne; ++e) {
+    U[e] = cellAverage(U_dg[e]);
+  }
+}
+
+void FiniteVolumeSolver::writeDGStateBinary(const std::string &filename) const {
+  std::ofstream out(filename, std::ios::binary);
+
+  int Ne = static_cast<int>(U_dg.size());
+  int p  = p_order;
+  int nd = ndof_per_elem;
+
+  out.write(reinterpret_cast<const char*>(&Ne), sizeof(int));
+  out.write(reinterpret_cast<const char*>(&p),  sizeof(int));
+  out.write(reinterpret_cast<const char*>(&nd), sizeof(int));
+
+  for (int e = 0; e < Ne; ++e) {
+    for (int j = 0; j < nd; ++j) {
+      out.write(reinterpret_cast<const char*>(U_dg[e][j].v), sizeof(double) * 4);
+    }
+  }
+}
+
+void FiniteVolumeSolver::writeAverageStateBinary(const std::string &filename) const {
+  std::ofstream out(filename, std::ios::binary);
+  int Ne = static_cast<int>(U.size());
+  out.write(reinterpret_cast<const char*>(&Ne), sizeof(int));
+  for (const auto &u : U) {
+    out.write(reinterpret_cast<const char*>(u.v), sizeof(double) * 4);
+  }
+}
+
+void FiniteVolumeSolver::writeResidualBinary(const std::string &filename) const {
+  std::ofstream out(filename, std::ios::binary);
+  int Nit = static_cast<int>(res_history.size());
+  out.write(reinterpret_cast<const char*>(&Nit), sizeof(int));
+  out.write(reinterpret_cast<const char*>(res_history.data()), sizeof(double) * Nit);
+}
+
+void FiniteVolumeSolver::writeCellResidualBinary(const std::string &filename) const {
+  std::ofstream out(filename, std::ios::binary);
+  int Ne = static_cast<int>(cell_residuals.size());
+  out.write(reinterpret_cast<const char*>(&Ne), sizeof(int));
+  out.write(reinterpret_cast<const char*>(cell_residuals.data()), sizeof(double) * Ne);
+}
+
+void FiniteVolumeSolver::collectWallSurfaceData() {
+  wall_samples.clear();
+  Fx_raw = 0.0;
+  Fy_raw = 0.0;
+
+  // reference values for cp
+  const double Vref = Minf * a0;
+  const double qref = 0.5 * rho0 * Vref * Vref;
+  const double pref = p0;  // this is the natural static-pressure reference in your current code
+
+  // use at least one order higher quadrature for output if possible
+  int quad_order = std::min(3, std::max(1, p_order + 1));
+  QuadRule qr = getQuadratureRule(quad_order);
+
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    int va = mesh.BE[i].v[0];
+    int vb = mesh.BE[i].v[1];
+    std::string bName = mesh.Bname[mesh.BE[i].bIndex];
+
+    if (bName != "wall") continue;
+
+    Vec2 n   = mesh.bnormals[i];
+    double len = mesh.blengths[i];
+
+    double xi0, eta0, xi1, eta1;
+    edgeRefParam(mesh.E[eL].v, va, vb, xi0, eta0, xi1, eta1);
+
+    for (int q = 0; q < qr.n; ++q) {
+      double t     = qr.points[q];
+      double xi_q  = xi0  + t * (xi1  - xi0);
+      double eta_q = eta0 + t * (eta1 - eta0);
+
+      std::vector<double> phi = evaluateBasis(xi_q, eta_q, p_order);
+
+      Vec4 u_int = {0,0,0,0};
+      for (int j = 0; j < ndof_per_elem; ++j) {
+        u_int += U_dg[eL][j] * phi[j];
+      }
+
+      State s(u_int, gamma);
+      double p = s.p();
+
+      Vec2 edge_pos = mesh.V[va] * (1.0 - t) + mesh.V[vb] * t;
+      double ds = qr.weights[q] * len;
+
+      double cp = (p - pref) / qref;
+
+      // force ON the blade from the fluid
+      double dFx = -p * n.x * ds;
+      double dFy = -p * n.y * ds;
+
+      Fx_raw += dFx;
+      Fy_raw += dFy;
+
+      wall_samples.push_back({
+        i, eL, q,
+        edge_pos.x, edge_pos.y,
+        n.x, n.y,
+        ds,
+        p,
+        cp,
+        dFx,
+        dFy
+      });
+    }
+  }
+}
+
+void FiniteVolumeSolver::writeWallSurfaceCSV(const std::string &filename) const {
+  std::ofstream out(filename);
+  out << "be_index,elem,qpt,x,y,nx,ny,ds,p,cp,dFx,dFy\n";
+  for (const auto &w : wall_samples) {
+    out << w.be_index << ","
+        << w.elem << ","
+        << w.qpt << ","
+        << w.x << ","
+        << w.y << ","
+        << w.nx << ","
+        << w.ny << ","
+        << w.ds << ","
+        << w.p << ","
+        << w.cp << ","
+        << w.dFx << ","
+        << w.dFy << "\n";
+  }
+}
+
+void FiniteVolumeSolver::writeSummaryText(const std::string &filename) const {
+  std::ofstream out(filename);
+
+  double alpha_rad = alpha;
+  double Drag_raw  =  Fx_raw * std::cos(alpha_rad) + Fy_raw * std::sin(alpha_rad);
+  double Lift_raw  = -Fx_raw * std::sin(alpha_rad) + Fy_raw * std::cos(alpha_rad);
+
+  out << "p_order " << p_order << "\n";
+  out << "ndof_per_elem " << ndof_per_elem << "\n";
+  out << "gamma " << gamma << "\n";
+  out << "rho0 " << rho0 << "\n";
+  out << "a0 " << a0 << "\n";
+  out << "Minf " << Minf << "\n";
+  out << "alpha_rad " << alpha << "\n";
+  out << "baseline_residual " << baseline_residual << "\n";
+  out << "final_residual " << (res_history.empty() ? -1.0 : res_history.back()) << "\n";
+  out << "Fx_raw " << Fx_raw << "\n";
+  out << "Fy_raw " << Fy_raw << "\n";
+  out << "Lift_raw " << Lift_raw << "\n";
+  out << "Drag_raw " << Drag_raw << "\n";
+}
+
+void FiniteVolumeSolver::writeSteadyOutputs(const std::string &outdir) {
+  std::string cmd = "mkdir -p " + outdir;
+  system(cmd.c_str());
+
+  syncCellAveragesFromDG();
+  collectWallSurfaceData();
+
+  writeAverageStateBinary(outdir + "/state_avg.bin");
+  writeDGStateBinary(outdir + "/state_dg.bin");
+  writeResidualBinary(outdir + "/residual.bin");
+  writeCellResidualBinary(outdir + "/cell_res.bin");
+  writeWallSurfaceCSV(outdir + "/wall_surface.csv");
+  writeSummaryText(outdir + "/summary.txt");
 }
 
 void FiniteVolumeSolver::initializeDG() {

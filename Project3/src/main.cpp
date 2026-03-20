@@ -203,6 +203,13 @@ int main(int argc, char **argv) {
     cell_res_out.close();
     std::cout << "Spatial residuals saved to " << cell_res_file << std::endl;
 
+    // Matt Addition
+    if (!unsteady) {
+      std::string run_dir = "results/steady_" + grid_name + "_" + order_tag;
+      solver.writeSteadyOutputs(run_dir);
+      std::cout << "Extended steady outputs saved to " << run_dir << std::endl;
+    }
+
   } catch (const std::exception &e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;

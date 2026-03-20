@@ -35,6 +35,41 @@ public:
 
   FiniteVolumeSolver(const std::string &meshfile);
 
+  std::string run_output_dir = "";
+  double baseline_residual = -1.0;
+
+  // raw integrated forces on the blade
+  double Fx_raw = 0.0;
+  double Fy_raw = 0.0;
+
+  struct WallSample {
+    int be_index;
+    int elem;
+    int qpt;
+    double x;
+    double y;
+    double nx;
+    double ny;
+    double ds;
+    double p;
+    double cp;
+    double dFx;
+    double dFy;
+  };
+
+  std::vector<WallSample> wall_samples;
+
+  // helper methods
+  void syncCellAveragesFromDG();
+  void collectWallSurfaceData();
+  void writeAverageStateBinary(const std::string &filename) const;
+  void writeDGStateBinary(const std::string &filename) const;
+  void writeResidualBinary(const std::string &filename) const;
+  void writeCellResidualBinary(const std::string &filename) const;
+  void writeWallSurfaceCSV(const std::string &filename) const;
+  void writeSummaryText(const std::string &filename) const;
+  void writeSteadyOutputs(const std::string &outdir);
+
   void initializeDG();
   void setInitialCondition();
   void loadInitialCondition(const std::string &filename);
