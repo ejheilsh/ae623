@@ -1134,7 +1134,10 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
   int Ne = mesh.E.size();
   std::cout << "Beginning DG solver loop for " << itercap << " iterations (p=" 
             << p_order << ")..." << std::endl;
-  
+
+  double baseline_residual = -1.0;
+  double target_residual = -1.0;
+
   for (int niter = 0; niter < itercap; ++niter) {
     // STEP 4: Compute R(U) once — used for both convergence monitoring and
     //         time advancement (Step 5).  This is Stage 1 of SSP-RK2.
@@ -1145,9 +1148,18 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     for (const auto &r : res.R) {
       Rnorm += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
     }
+
+    if (baseline_residual < 0.0) {
+      baseline_residual = Rnorm;
+      target_residual = baseline_residual * 1.0e-5;
+      std::cout << "Baseline residual: " << std::scientific << std::setprecision(6)
+                << baseline_residual
+                << " | Target residual (1e-5 * baseline): " << target_residual
+                << std::endl;
+    }
     res_history.push_back(Rnorm);
 
-    if (niter % 1000 == 0 || Rnorm < rtol) {
+    if (niter % 1000 == 0 || Rnorm < target_residual) {
       double minRho = 1e10, minP = 1e10;
       cell_residuals.resize(Ne);
       
@@ -1169,11 +1181,13 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
       
       std::cout << "Iter: " << std::setw(6) << niter
                 << " | Residual: " << std::scientific << std::setprecision(6)
-                << Rnorm << " | Min Rho: " << minRho << " | Min P: " << minP
+                << Rnorm
+                << " | RelRes: " << (baseline_residual > 0.0 ? Rnorm / baseline_residual : 0.0)
+                << " | Min Rho: " << minRho << " | Min P: " << minP
                 << std::endl;
     }
 
-    if (Rnorm < rtol) {
+    if (Rnorm < target_residual) {
       std::cout << "Converged in " << niter << " iterations." << std::endl;
       break;
     }
