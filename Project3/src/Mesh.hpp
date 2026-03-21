@@ -55,6 +55,8 @@ public:
   std::vector<double> ilengths; // interior edge lengths
   std::vector<Vec2> bnormals;   // boundary edge normals (normalized)
   std::vector<double> blengths; // boundary edge lengths
+  std::vector<int> ie_face_colors;
+  std::vector<std::vector<int>> ie_faces_by_color;
 
   bool readGRI(const std::string &filename);
   void computeGeometry();
@@ -68,6 +70,7 @@ public:
 private:
   void edgeHash(const std::vector<std::vector<std::vector<int>>> &B);
   void appendPeriodicToIE();
+  void buildInteriorFaceColors();
 };
 
 #endif

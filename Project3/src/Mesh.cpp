@@ -189,6 +189,7 @@ bool Mesh::readGRI(const std::string &filename) {
 
   edgeHash(B);
   appendPeriodicToIE();
+  buildInteriorFaceColors();
   computeGeometry();
   std::cout << "Mesh loaded: Ni=" << IE.size() << ", Nb=" << BE.size()
             << ", Ne=" << E.size() << std::endl;
@@ -393,6 +394,41 @@ void Mesh::edgeHash(const std::vector<std::vector<std::vector<int>>> &B) {
         BE.push_back({n2, n1, H[{n2, n1}] - 1, g});
       }
     }
+  }
+}
+
+void Mesh::buildInteriorFaceColors() {
+  ie_face_colors.assign(IE.size(), -1);
+  ie_faces_by_color.clear();
+  if (IE.empty() || E.empty())
+    return;
+
+  std::vector<std::vector<int>> elem_to_faces(E.size());
+  for (int i = 0; i < static_cast<int>(IE.size()); ++i) {
+    elem_to_faces[IE[i].elemL].push_back(i);
+    elem_to_faces[IE[i].elemR].push_back(i);
+  }
+
+  for (int i = 0; i < static_cast<int>(IE.size()); ++i) {
+    std::set<int> used_colors;
+    int eL = IE[i].elemL;
+    int eR = IE[i].elemR;
+    for (int fidx : elem_to_faces[eL]) {
+      if (fidx != i && ie_face_colors[fidx] >= 0)
+        used_colors.insert(ie_face_colors[fidx]);
+    }
+    for (int fidx : elem_to_faces[eR]) {
+      if (fidx != i && ie_face_colors[fidx] >= 0)
+        used_colors.insert(ie_face_colors[fidx]);
+    }
+
+    int color = 0;
+    while (used_colors.count(color))
+      ++color;
+    ie_face_colors[i] = color;
+    if (color >= static_cast<int>(ie_faces_by_color.size()))
+      ie_faces_by_color.resize(color + 1);
+    ie_faces_by_color[color].push_back(i);
   }
 }
 

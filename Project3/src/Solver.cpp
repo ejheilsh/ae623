@@ -986,28 +986,16 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
 #ifdef _OPENMP
   ie_threads = omp_get_max_threads();
 #endif
-  if (ie_threads > 1 && (int)mesh.IE.size() > 128) {
-    // Interior faces touch neighboring elements, so parallel accumulation uses
-    // thread-local residual/sdl buffers followed by a reduction.
-    std::vector<std::vector<Vec4>> Rpriv(
-        ie_threads, std::vector<Vec4>(Ne * ndof_per_elem, {0.0, 0.0, 0.0, 0.0}));
-    std::vector<std::vector<double>> sdlpriv(
-        ie_threads, std::vector<double>(Ne, 0.0));
-#pragma omp parallel
-    {
-#ifdef _OPENMP
-      int tid = omp_get_thread_num();
-#else
-      int tid = 0;
-#endif
-#pragma omp for
-      for (int i = 0; i < (int)mesh.IE.size(); ++i) {
-        accumulateInteriorFace(i, Rpriv[tid], sdlpriv[tid]);
+  if (ie_threads > 1 && (int)mesh.IE.size() > 128 &&
+      !mesh.ie_faces_by_color.empty()) {
+    // Interior faces are edge-colored so faces within one color never update
+    // the same element. That allows direct shared accumulation without large
+    // thread-local residual arrays or a global reduction.
+    for (const auto &faces : mesh.ie_faces_by_color) {
+#pragma omp parallel for if (faces.size() > 16)
+      for (int k = 0; k < (int)faces.size(); ++k) {
+        accumulateInteriorFace(faces[k], res.R, res.sdl);
       }
-    }
-    for (int t = 0; t < ie_threads; ++t) {
-      for (int k = 0; k < Ne * ndof_per_elem; ++k) res.R[k] += Rpriv[t][k];
-      for (int e = 0; e < Ne; ++e) res.sdl[e] += sdlpriv[t][e];
     }
   } else {
     for (int i = 0; i < (int)mesh.IE.size(); ++i) {
