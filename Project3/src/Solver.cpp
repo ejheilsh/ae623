@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <fstream>
@@ -568,7 +569,7 @@ FiniteVolumeSolver::evaluateBasisGrad(double xi, double eta, int p) {
       g[4]       = -9.0/2.0*eta + 27.0/2.0*eta*eta;
       g[ndof+4]  = -9.0/2.0*xi + 27.0*xi*eta;
       // φ_5 = -(9/2)η + (9/2)ξη + 18η² - (27/2)ξη² - (27/2)η³
-      g[5]       = 9.0/2.0*eta;
+      g[5]       = 9.0/2.0*eta - 27.0/2.0*eta*eta;
       g[ndof+5]  = -9.0/2.0 + 9.0/2.0*xi + 36.0*eta - 27.0*xi*eta - 81.0/2.0*eta*eta;
       // φ_6 = 9η - (45/2)ξη - (45/2)η² + (27/2)ξ²η + 27ξη² + (27/2)η³
       g[6]       = -45.0/2.0*eta + 27.0*xi*eta + 27.0*eta*eta;
@@ -1463,9 +1464,9 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
   // Snapshot saving parameters
   int snapshot_interval = 100;  // Save every N iterations
   int snapshot_count = 0;
-  
-  // Create data directory if it doesn't exist
-  system("mkdir -p data");
+
+  // Create snapshot directory if it doesn't exist
+  std::filesystem::create_directories(unsteady_output_dir);
   
   for (int niter = 0; niter < itercap; ++niter) {
     // STEP 4: Compute R(U) once — used for dt sizing and as Stage 1 of SSP-RK2.
@@ -1498,8 +1499,8 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     if (t_end > 0.0 && current_time >= t_end) {
       // Save a final snapshot at t_end
       char filename[256];
-      snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin",
-               current_time, snapshot_count);
+      snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
+               unsteady_output_dir.c_str(), current_time, snapshot_count);
       saveSnapshot(filename);
       std::string dg_filename(filename);
       dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
@@ -1529,8 +1530,8 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     // Save periodic snapshots
     if (niter % snapshot_interval == 0) {
       char filename[256];
-      snprintf(filename, sizeof(filename), "data/results_%.6f_%04d.bin",
-               current_time, snapshot_count);
+      snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
+               unsteady_output_dir.c_str(), current_time, snapshot_count);
       saveSnapshot(filename);
       std::string dg_filename(filename);
       dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");

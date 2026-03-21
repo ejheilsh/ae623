@@ -21,6 +21,7 @@ public:
   std::vector<double> res_history;
   std::vector<double> cell_residuals;
   std::string fluxname = "roe";
+  std::string unsteady_output_dir = "data";
 
   double gamma = 1.4;
   double CFL   = 1.0;

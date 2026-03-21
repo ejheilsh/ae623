@@ -1,4 +1,5 @@
 #include "Solver.hpp"
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 
@@ -8,6 +9,7 @@ int main(int argc, char **argv) {
     std::cerr << "Usage: " << argv[0]
               << " <meshfile> [order] [CFL] [fluxname] [itercap] "
               << "[steady/unsteady] [ic_file] [t_end] "
+              << "[--p0-itercap <iters>] "
               << "[--map-ic <coarse_meshfile> <coarse_statefile>]"
               << "\n\nArguments:"
               << "\n  meshfile      : Grid file (e.g., grids/2k.gri)"
@@ -18,6 +20,7 @@ int main(int argc, char **argv) {
               << "\n  steady/unsteady : Solution mode [default: steady]"
               << "\n  ic_file       : Initial condition file (optional)"
               << "\n  t_end         : End time for unsteady (optional, requires ic_file)"
+              << "\n  --p0-itercap  : Separate iteration cap for auto-chained p=0 seed solve"
               << "\n  --map-ic      : Load IC from coarser mesh (optional)"
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
@@ -36,6 +39,7 @@ int main(int argc, char **argv) {
   std::string ic_file = "";
   double t_end = -1.0;  // negative means run until itercap
   bool use_mapped_ic = false;
+  int p0_itercap = -1;
   std::string coarse_meshfile = "";
   std::string coarse_statefile = "";
 
@@ -81,6 +85,13 @@ int main(int argc, char **argv) {
       coarse_meshfile = argv[i + 1];
       coarse_statefile = argv[i + 2];
       i += 2;
+    } else if (arg == "--p0-itercap") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --p0-itercap requires <iters>" << std::endl;
+        return 1;
+      }
+      p0_itercap = std::stoi(argv[i + 1]);
+      i += 1;
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
       return 1;
@@ -105,6 +116,14 @@ int main(int argc, char **argv) {
     solver.initializeDG();     // Initialize DG structures based on p_order
     solver.CFL = cfl;
     solver.fluxname = fluxname;
+
+    std::string order_tag = "p" + std::to_string(p_order);
+    std::string output_dir =
+        unsteady ? ("unsteady_data/" + grid_name + "_" + order_tag) : "data_steady";
+    std::filesystem::create_directories(output_dir);
+    if (unsteady) {
+      solver.unsteady_output_dir = output_dir;
+    }
     
     if (use_mapped_ic) {
       if (!ic_file.empty()) {
@@ -117,15 +136,18 @@ int main(int argc, char **argv) {
       solver.loadInitialCondition(ic_file);
     } else if (p_order > 0 && !unsteady) {
       // Automatically converge p=0 first, then use as IC for p>0
+      int p0_seed_itercap = (p0_itercap > 0) ? p0_itercap : itercap;
       std::cerr << "Auto-chaining: converging p=0 first to seed p=" 
-                << p_order << " IC..." << std::endl;
+                << p_order << " IC"
+                << " (p0 itercap=" << p0_seed_itercap << ")..."
+                << std::endl;
       
       // Save current DG order and initialize as p=0
       int saved_order = solver.p_order;
       solver.p_order = 0;
       solver.initializeDG();
       solver.CFL = 1.0;  // p=0 can use larger CFL
-      solver.solveSteady(itercap);
+      solver.solveSteady(p0_seed_itercap);
       
       // Save p=0 result to temporary file
       system("mkdir -p data_steady");
@@ -166,15 +188,8 @@ int main(int argc, char **argv) {
       solver.solveSteady(itercap);
     }
 
-    // Determine output directory and filename prefix (include DG order)
-    std::string output_dir = unsteady ? "." : "data_steady";
-    std::string order_tag = "p" + std::to_string(p_order);
+    // Determine filename prefix (include DG order)
     std::string file_prefix = unsteady ? "" : "steady_" + grid_name + "_" + order_tag + "_";
-    
-    // Create data_steady directory for steady results
-    if (!unsteady) {
-      system("mkdir -p data_steady");
-    }
 
     // Save results to a simple binary or text format for Python to read
     std::string results_file = output_dir + "/" + file_prefix + "results.bin";
