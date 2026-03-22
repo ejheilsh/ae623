@@ -8,7 +8,7 @@ GAMMA = 1.4
 
 _GRI_TO_SHAPE = {
     1: [0, 1, 2],
-    2: [0, 2, 5, 4, 3, 1],
+    2: [0, 2, 5, 1, 4, 3],
     3: [0, 3, 9, 6, 8, 7, 4, 1, 2, 5],
 }
 
@@ -190,7 +190,7 @@ def evaluate_basis_grad(xi, eta, p):
             0.0,
             -9.0 / 2.0 * eta + 27.0 * xi * eta,
             -9.0 / 2.0 * eta + 27.0 / 2.0 * eta * eta,
-            9.0 / 2.0 * eta,
+            9.0 / 2.0 * eta - 27.0 / 2.0 * eta * eta,
             -45.0 / 2.0 * eta + 27.0 * xi * eta + 27.0 * eta * eta,
             9.0 - 45.0 * xi - 45.0 / 2.0 * eta + 81.0 / 2.0 * xi * xi + 54.0 * xi * eta + 27.0 / 2.0 * eta * eta,
             -9.0 / 2.0 + 36.0 * xi + 9.0 / 2.0 * eta - 81.0 / 2.0 * xi * xi - 27.0 * xi * eta,
@@ -349,14 +349,14 @@ def local_edge_reference_data(element, edge):
     return None
 
 
-def wall_edge_samples(mesh, U_dg, p_order, num_samples=5):
+def wall_edge_samples_with_y(mesh, U_dg, p_order, num_samples=5):
     wall_edges = None
     for name, edges in mesh["boundary_groups"].items():
         if name.lower() == "wall":
             wall_edges = edges
             break
     if wall_edges is None:
-        return np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([])
 
     edge_to_elem = {}
     for elem_idx, element in enumerate(mesh["elements"]):
@@ -375,6 +375,7 @@ def wall_edge_samples(mesh, U_dg, p_order, num_samples=5):
     q_out = 0.5 * GAMMA * p_out * M_out_sq
 
     sample_t = np.linspace(0.0, 1.0, num_samples)
+    y_vals = []
     for edge in wall_edges:
         elem_idx = edge_to_elem.get(tuple(sorted(edge)))
         if elem_idx is None:
@@ -392,10 +393,16 @@ def wall_edge_samples(mesh, U_dg, p_order, num_samples=5):
             p = primitive_from_state(state)["p"]
             cp = (p - p_out) / q_out
             x_vals.append(xy[0])
+            y_vals.append(xy[1])
             cp_vals.append(cp)
 
     order = np.argsort(x_vals)
-    return np.array(x_vals)[order], np.array(cp_vals)[order]
+    return np.array(x_vals)[order], np.array(y_vals)[order], np.array(cp_vals)[order]
+
+
+def wall_edge_samples(mesh, U_dg, p_order, num_samples=5):
+    x_vals, _, cp_vals = wall_edge_samples_with_y(mesh, U_dg, p_order, num_samples=num_samples)
+    return x_vals, cp_vals
 
 
 def integrate_wall_forces(mesh, U_dg, p_order):

@@ -35,7 +35,8 @@ def read_cell_residual(filename):
         return None
 
 
-def plot_results(meshfile, resultsfile, residualfile, cellresfile, show_plot=True):
+def plot_results(meshfile, resultsfile, residualfile, cellresfile, show_plot=True,
+                 output_file="solution_summary.png"):
     mesh = read_gri_mesh(meshfile)
     res_hist = read_residual(residualfile)
     cell_res = read_cell_residual(cellresfile)
@@ -93,8 +94,8 @@ def plot_results(meshfile, resultsfile, residualfile, cellresfile, show_plot=Tru
         ax3.text(0.5, 0.5, "Residual history not found", ha="center", va="center")
 
     plt.tight_layout()
-    plt.savefig("solution_summary.png")
-    print("Saved solution_summary.png")
+    plt.savefig(output_file)
+    print(f"Saved {output_file}")
     if show_plot:
         plt.show()
     else:

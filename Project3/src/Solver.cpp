@@ -40,6 +40,38 @@ std::vector<Vec4> readStateBinary(const std::string &filename) {
   }
   return data;
 }
+
+std::string residualHistoryFilenameForRestart(const std::string &filename) {
+  const std::string dg_tag = "_results_dg.bin";
+  const std::string avg_tag = "_results.bin";
+  if (filename.size() >= dg_tag.size() &&
+      filename.compare(filename.size() - dg_tag.size(), dg_tag.size(), dg_tag) == 0) {
+    return filename.substr(0, filename.size() - dg_tag.size()) + "_residual.bin";
+  }
+  if (filename.size() >= avg_tag.size() &&
+      filename.compare(filename.size() - avg_tag.size(), avg_tag.size(), avg_tag) == 0) {
+    return filename.substr(0, filename.size() - avg_tag.size()) + "_residual.bin";
+  }
+  return "";
+}
+
+double readBaselineResidualFromHistory(const std::string &filename) {
+  const std::string residual_file = residualHistoryFilenameForRestart(filename);
+  if (residual_file.empty()) return -1.0;
+
+  std::ifstream in(residual_file, std::ios::binary);
+  if (!in) return -1.0;
+
+  int n = 0;
+  in.read(reinterpret_cast<char *>(&n), sizeof(int));
+  if (!in || n <= 0) return -1.0;
+
+  double baseline = -1.0;
+  in.read(reinterpret_cast<char *>(&baseline), sizeof(double));
+  if (!in || !std::isfinite(baseline) || baseline <= 0.0) return -1.0;
+
+  return baseline;
+}
 } // namespace
 
 FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
@@ -110,6 +142,7 @@ void FiniteVolumeSolver::initializeDG() {
 }
 
 void FiniteVolumeSolver::setInitialCondition() {
+  steady_baseline_residual_override = -1.0;
   int Ne = mesh.E.size();
   U_dg.resize(Ne);
   for (int e = 0; e < Ne; ++e) {
@@ -169,6 +202,7 @@ void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
   }
   in.close();
   U0 = U;
+  steady_baseline_residual_override = readBaselineResidualFromHistory(filename);
 
   // Also seed the DG representation: cell-average DOF (index 0) gets the loaded
   // value; higher DOFs are set to the same value so the nodal reconstruction
@@ -182,6 +216,11 @@ void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
   }
 
   std::cout << "Successfully loaded initial condition from " << filename << std::endl;
+  if (steady_baseline_residual_override > 0.0) {
+    std::cout << "Reusing original steady baseline residual from matching history: "
+              << std::scientific << std::setprecision(6)
+              << steady_baseline_residual_override << std::endl;
+  }
 }
 
 void FiniteVolumeSolver::loadDGInitialCondition(const std::string &filename) {
@@ -220,6 +259,7 @@ void FiniteVolumeSolver::loadDGInitialCondition(const std::string &filename) {
   }
   in.close();
   U0_dg = U_dg;
+  steady_baseline_residual_override = readBaselineResidualFromHistory(filename);
 
   U.resize(Ne);
   for (int e = 0; e < Ne; ++e) {
@@ -229,10 +269,16 @@ void FiniteVolumeSolver::loadDGInitialCondition(const std::string &filename) {
 
   std::cout << "Successfully loaded DG initial condition from " << filename
             << std::endl;
+  if (steady_baseline_residual_override > 0.0) {
+    std::cout << "Reusing original steady baseline residual from matching history: "
+              << std::scientific << std::setprecision(6)
+              << steady_baseline_residual_override << std::endl;
+  }
 }
 
 void FiniteVolumeSolver::loadMappedInitialCondition(
     const std::string &coarse_meshfile, const std::string &coarse_statefile) {
+  steady_baseline_residual_override = -1.0;
   Mesh coarse_mesh;
   if (!coarse_mesh.readGRI(coarse_meshfile)) {
     throw std::runtime_error("Failed to read coarse mesh file: " + coarse_meshfile);
@@ -1256,8 +1302,11 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
   last_steady_failed_nonphysical = false;
   last_steady_hit_itercap = false;
 
-  double baseline_residual = -1.0;
-  double target_residual = -1.0;
+  double baseline_residual = steady_baseline_residual_override;
+  double target_residual = (baseline_residual > 0.0)
+                               ? baseline_residual * 1.0e-5
+                               : -1.0;
+  bool printed_baseline = false;
 
   for (int niter = 0; niter < itercap; ++niter) {
     // STEP 4: Compute R(U) once — used for both convergence monitoring and
@@ -1273,10 +1322,17 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     if (baseline_residual < 0.0) {
       baseline_residual = Rnorm;
       target_residual = baseline_residual * 1.0e-5;
+    }
+    if (!printed_baseline) {
       std::cout << "Baseline residual: " << std::scientific << std::setprecision(6)
                 << baseline_residual
-                << " | Target residual (1e-5 * baseline): " << target_residual
+                << " | Target residual (1e-5 * baseline): " << target_residual;
+      if (steady_baseline_residual_override > 0.0) {
+        std::cout << " | Restart initial residual: " << Rnorm;
+      }
+      std::cout
                 << std::endl;
+      printed_baseline = true;
     }
     res_history.push_back(Rnorm);
 
