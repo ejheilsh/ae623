@@ -17,6 +17,9 @@ import io
 import os
 import struct
 import glob
+import subprocess
+import tempfile
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -56,6 +59,40 @@ def frame_durations_ms(times, playback_scale, fallback_duration):
 
     durations.append(durations[-1] if durations else fallback_duration)
     return durations
+
+
+def save_mp4(frames, durations_ms, output):
+    output = str(Path(output).resolve())
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        concat_path = tmp / "frames.ffconcat"
+        with open(concat_path, "w") as f:
+            f.write("ffconcat version 1.0\n")
+            for i, (frame, duration_ms) in enumerate(zip(frames, durations_ms)):
+                frame_path = tmp / f"frame_{i:05d}.png"
+                frame.save(frame_path, format="PNG")
+                f.write(f"file '{frame_path.name}'\n")
+                f.write(f"duration {max(duration_ms / 1000.0, 1e-3):.6f}\n")
+            # Repeat last frame once; concat demuxer uses the last duration on the prior line.
+            last_frame_path = tmp / f"frame_{len(frames)-1:05d}.png"
+            f.write(f"file '{last_frame_path.name}'\n")
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-safe",
+            "0",
+            "-f",
+            "concat",
+            "-i",
+            str(concat_path),
+            "-vsync",
+            "vfr",
+            "-pix_fmt",
+            "yuv420p",
+            output,
+        ]
+        subprocess.run(cmd, cwd=tmpdir, check=True)
 
 
 def load_entropy_field(mesh, snapshot_file):
@@ -108,11 +145,13 @@ def render_frame(mesh, snapshot_file, entropy_min, entropy_max, figscale, dpi):
     fig.savefig(buf, format="png", dpi=dpi)
     plt.close(fig)
     buf.seek(0)
-    return Image.open(buf).convert("P", palette=Image.ADAPTIVE)
+    # Keep frames in RGB and let Pillow quantize once during GIF save.
+    # Pre-quantizing each frame independently exaggerates banding.
+    return Image.open(buf).convert("RGB")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create an entropy GIF from unsteady snapshots.")
+    parser = argparse.ArgumentParser(description="Create an entropy animation (GIF or MP4) from unsteady snapshots.")
     parser.add_argument("meshfile")
     parser.add_argument("results_dir")
     parser.add_argument("output", nargs="?", default="entropy_animation.gif")
@@ -183,13 +222,17 @@ def main():
     if len(durations) != len(frames):
         raise SystemExit("Internal error: frame/duration count mismatch.")
 
-    frames[0].save(
-        args.output,
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=0,
-    )
+    suffix = Path(args.output).suffix.lower()
+    if suffix == ".mp4":
+        save_mp4(frames, durations, args.output)
+    else:
+        frames[0].save(
+            args.output,
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=0,
+        )
     print(f"Saved {args.output}")
 
 
