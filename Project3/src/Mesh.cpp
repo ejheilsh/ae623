@@ -482,7 +482,6 @@ void Mesh::appendPeriodicToIE() {
       IE.push_back({n1b, n2b, n1t, n2t, elemL, elemR});
       ieSet.insert(keyBottom);
       addedCount += 1;
-      std::cout << "Periodic IE added count: " << addedCount << std::endl;
 
       auto itB = beKeyToIdx.find(keyBottom);
       if (itB != beKeyToIdx.end()) {

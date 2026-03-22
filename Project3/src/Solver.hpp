@@ -43,6 +43,7 @@ public:
   void initializeDG();
   void setInitialCondition();
   void loadInitialCondition(const std::string &filename);
+  void loadDGInitialCondition(const std::string &filename);
   void loadMappedInitialCondition(const std::string &coarse_meshfile,
                                   const std::string &coarse_statefile);
   void solveSteady(int itercap = 1000000);

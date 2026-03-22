@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
 
 int main(int argc, char **argv) {
   std::cout << std::unitbuf; // Enable unbuffered output for immediate feedback
@@ -143,8 +144,14 @@ int main(int argc, char **argv) {
       }
       solver.loadMappedInitialCondition(coarse_meshfile, coarse_statefile);
     } else if (!ic_file.empty()) {
-      // Load same-mesh initial condition if provided
-      solver.loadInitialCondition(ic_file);
+      // Load same-mesh initial condition if provided. Full DG restart files
+      // use the *_dg.bin suffix and restore every DG coefficient.
+      if (ic_file.size() >= 7 &&
+          ic_file.substr(ic_file.size() - 7) == "_dg.bin") {
+        solver.loadDGInitialCondition(ic_file);
+      } else {
+        solver.loadInitialCondition(ic_file);
+      }
     } else if (p_order > 0 && !unsteady) {
       // Automatically converge p=0 first, then use as IC for p>0
       int p0_seed_itercap = (p0_itercap > 0) ? p0_itercap : itercap;

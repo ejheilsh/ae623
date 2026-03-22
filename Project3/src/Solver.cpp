@@ -184,6 +184,53 @@ void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
   std::cout << "Successfully loaded initial condition from " << filename << std::endl;
 }
 
+void FiniteVolumeSolver::loadDGInitialCondition(const std::string &filename) {
+  std::ifstream in(filename, std::ios::binary);
+  if (!in) {
+    std::cerr << "Warning: Could not open DG initial condition file " << filename
+              << ", using default IC instead" << std::endl;
+    setInitialCondition();
+    return;
+  }
+
+  int Ne_file = 0;
+  int p_file = -1;
+  int ndof_file = -1;
+  in.read((char *)&Ne_file, sizeof(int));
+  in.read((char *)&p_file, sizeof(int));
+  in.read((char *)&ndof_file, sizeof(int));
+
+  int Ne = mesh.E.size();
+  if (Ne_file != Ne || p_file != p_order || ndof_file != ndof_per_elem) {
+    std::cerr << "Warning: DG initial condition file mismatch: file has (Ne="
+              << Ne_file << ", p=" << p_file << ", ndof=" << ndof_file
+              << ") but solver expects (Ne=" << Ne << ", p=" << p_order
+              << ", ndof=" << ndof_per_elem << "). Using default IC instead."
+              << std::endl;
+    in.close();
+    setInitialCondition();
+    return;
+  }
+
+  U_dg.assign(Ne, std::vector<Vec4>(ndof_per_elem));
+  for (int e = 0; e < Ne; ++e) {
+    for (int j = 0; j < ndof_per_elem; ++j) {
+      in.read((char *)U_dg[e][j].v, sizeof(double) * 4);
+    }
+  }
+  in.close();
+  U0_dg = U_dg;
+
+  U.resize(Ne);
+  for (int e = 0; e < Ne; ++e) {
+    U[e] = cellAverage(U_dg[e]);
+  }
+  U0 = U;
+
+  std::cout << "Successfully loaded DG initial condition from " << filename
+            << std::endl;
+}
+
 void FiniteVolumeSolver::loadMappedInitialCondition(
     const std::string &coarse_meshfile, const std::string &coarse_statefile) {
   Mesh coarse_mesh;
