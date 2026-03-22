@@ -22,6 +22,10 @@ public:
   std::vector<double> cell_residuals;
   std::string fluxname = "roe";
   std::string unsteady_output_dir = "data";
+  double unsteady_save_after = 0.0;
+  bool last_steady_converged = false;
+  bool last_steady_failed_nonphysical = false;
+  bool last_steady_hit_itercap = false;
 
   double gamma = 1.4;
   double CFL   = 1.0;

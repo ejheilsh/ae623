@@ -37,6 +37,22 @@ struct PeriodicGroup {
   std::vector<std::pair<int, int>> pairs;
 };
 
+struct ElementGeomEval {
+  Vec2 x;
+  double dx_dxi;
+  double dx_deta;
+  double dy_dxi;
+  double dy_deta;
+  double detJ;
+};
+
+struct EdgeGeomEval {
+  Vec2 x;
+  Vec2 tangent;
+  Vec2 normal;
+  double ds_dt;
+};
+
 class Mesh {
 public:
   std::vector<Vec2> V;
@@ -66,6 +82,8 @@ public:
   // Returns true on convergence.  Works for both straight (q=1) and curved (q>1) elements.
   bool globalToReference(int e, const Vec2 &xglob, double &xi, double &eta,
                          double tol = 1e-10, int maxIter = 100) const;
+  ElementGeomEval evaluateElementGeometry(int e, double xi, double eta) const;
+  EdgeGeomEval evaluateEdgeGeometry(int e, int va, int vb, double t) const;
 
 private:
   void edgeHash(const std::vector<std::vector<std::vector<int>>> &B);

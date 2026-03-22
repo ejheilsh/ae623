@@ -10,6 +10,7 @@ int main(int argc, char **argv) {
               << " <meshfile> [order] [CFL] [fluxname] [itercap] "
               << "[steady/unsteady] [ic_file] [t_end] "
               << "[--p0-itercap <iters>] "
+              << "[--save-after <time>] "
               << "[--map-ic <coarse_meshfile> <coarse_statefile>]"
               << "\n\nArguments:"
               << "\n  meshfile      : Grid file (e.g., grids/2k.gri)"
@@ -21,6 +22,7 @@ int main(int argc, char **argv) {
               << "\n  ic_file       : Initial condition file (optional)"
               << "\n  t_end         : End time for unsteady (optional, requires ic_file)"
               << "\n  --p0-itercap  : Separate iteration cap for auto-chained p=0 seed solve"
+              << "\n  --save-after  : For unsteady runs, only save snapshots once time >= this value"
               << "\n  --map-ic      : Load IC from coarser mesh (optional)"
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
@@ -40,6 +42,7 @@ int main(int argc, char **argv) {
   double t_end = -1.0;  // negative means run until itercap
   bool use_mapped_ic = false;
   int p0_itercap = -1;
+  double save_after = 0.0;
   std::string coarse_meshfile = "";
   std::string coarse_statefile = "";
 
@@ -92,6 +95,13 @@ int main(int argc, char **argv) {
       }
       p0_itercap = std::stoi(argv[i + 1]);
       i += 1;
+    } else if (arg == "--save-after") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --save-after requires <time>" << std::endl;
+        return 1;
+      }
+      save_after = std::stod(argv[i + 1]);
+      i += 1;
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
       return 1;
@@ -123,6 +133,7 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories(output_dir);
     if (unsteady) {
       solver.unsteady_output_dir = output_dir;
+      solver.unsteady_save_after = save_after;
     }
     
     if (use_mapped_ic) {
@@ -148,6 +159,17 @@ int main(int argc, char **argv) {
       solver.initializeDG();
       solver.CFL = 1.0;  // p=0 can use larger CFL
       solver.solveSteady(p0_seed_itercap);
+
+      if (!solver.last_steady_converged) {
+        std::cerr << "Error: auto-chained p=0 seed solve did not converge";
+        if (solver.last_steady_failed_nonphysical) {
+          std::cerr << " (non-physical state encountered)";
+        } else if (solver.last_steady_hit_itercap) {
+          std::cerr << " (hit iteration cap before convergence)";
+        }
+        std::cerr << ". Aborting auto-chain." << std::endl;
+        return 1;
+      }
       
       // Save p=0 result to temporary file
       system("mkdir -p data_steady");
@@ -177,6 +199,7 @@ int main(int argc, char **argv) {
               << ", IterCap: " << itercap 
               << ", Mode: " << (unsteady ? "Unsteady" : "Steady")
               << (t_end > 0.0 ? ", t_end: " + std::to_string(t_end) : "")
+              << (unsteady && save_after > 0.0 ? ", save_after: " + std::to_string(save_after) : "")
               << (use_mapped_ic ? ", Mapped IC: " + coarse_meshfile + " + " +
                                       coarse_statefile
                                 : "")

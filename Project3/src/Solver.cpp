@@ -828,14 +828,17 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
     // Volume contributions are element-local, so each thread can safely own one element.
 #pragma omp parallel for if (Ne > 64)
     for (int e = 0; e < Ne; ++e) {
-      Vec2 v0 = mesh.V[mesh.E[e].v[0]];
-      Vec2 v1 = mesh.V[mesh.E[e].v[1]];
-      Vec2 v2 = mesh.V[mesh.E[e].v[2]];
-      double dx1 = v1.x - v0.x, dx2 = v2.x - v0.x;
-      double dy1 = v1.y - v0.y, dy2 = v2.y - v0.y;
-      // J^{-T} maps ref gradient to physical gradient (detJ factors cancel):
-      //   (∂φ/∂x)*|J| =  ∂φ/∂ξ * dy2 - ∂φ/∂η * dy1
-      //   (∂φ/∂y)*|J| = -∂φ/∂ξ * dx2 + ∂φ/∂η * dx1
+      bool affine_geom = (mesh.E[e].q_order == 1);
+      double dx1 = 0.0, dx2 = 0.0, dy1 = 0.0, dy2 = 0.0;
+      if (affine_geom) {
+        Vec2 v0 = mesh.V[mesh.E[e].v[0]];
+        Vec2 v1 = mesh.V[mesh.E[e].v[1]];
+        Vec2 v2 = mesh.V[mesh.E[e].v[2]];
+        dx1 = v1.x - v0.x;
+        dx2 = v2.x - v0.x;
+        dy1 = v1.y - v0.y;
+        dy2 = v2.y - v0.y;
+      }
 
       for (size_t q = 0; q < vol_cache->qpts.size(); ++q) {
         const auto &qp = vol_cache->qpts[q];
@@ -852,12 +855,27 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
         Vec4 Fx = {rho*vel_u, rho*vel_u*vel_u + p_pres, rho*vel_u*vel_v, (e_rhoE + p_pres)*vel_u};
         Vec4 Fy = {rho*vel_v, rho*vel_u*vel_v, rho*vel_v*vel_v + p_pres, (e_rhoE + p_pres)*vel_v};
 
+        double wvol = qp.w;
+        double J00 = 0.0, J01 = 0.0, J10 = 0.0, J11 = 0.0, detJ = 0.0;
+        if (affine_geom) {
+          J00 = dx1; J01 = dx2;
+          J10 = dy1; J11 = dy2;
+          detJ = dx1 * dy2 - dx2 * dy1;
+          wvol *= detJ;
+        } else {
+          ElementGeomEval geom = mesh.evaluateElementGeometry(e, qp.xi, qp.eta);
+          J00 = geom.dx_dxi;  J01 = geom.dx_deta;
+          J10 = geom.dy_dxi;  J11 = geom.dy_deta;
+          detJ = geom.detJ;
+          wvol *= detJ;
+        }
+
         for (int j = 0; j < ndof_per_elem; ++j) {
           double dphidxi  = gphi[j];
           double dphideta = gphi[ndof_per_elem + j];
-          double dphidx =  dphidxi * dy2 - dphideta * dy1;  // = (∂φ/∂x) * detJ
-          double dphidy = -dphidxi * dx2 + dphideta * dx1;  // = (∂φ/∂y) * detJ
-          res.R[e * ndof_per_elem + j] -= (Fx * dphidx + Fy * dphidy) * qp.w;
+          double dphidx =  ( J11 * dphidxi - J10 * dphideta) / detJ;
+          double dphidy =  (-J01 * dphidxi + J00 * dphideta) / detJ;
+          res.R[e * ndof_per_elem + j] -= (Fx * dphidx + Fy * dphidy) * wvol;
         }
       }
     }
@@ -1015,52 +1033,18 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
     std::string bName = mesh.Bname[mesh.BE[i].bIndex];
     Vec2 n   = mesh.bnormals[i];
     double len = mesh.blengths[i];
+    QuadRule bqr = (mesh.E[eL].q_order > p_order)
+                       ? getQuadratureRule(mesh.E[eL].q_order)
+                       : qr;
 
     if (p_order == 0) {
       Vec4 u_int = Un_dg[eL][0];
-      Vec2 edge_midpoint = (mesh.V[va] + mesh.V[vb]) * 0.5;
-      FluxResult fr;
-      if (bName == "inflow") {
-        Vec4 Ub = subsonicInflow(u_int, n, rho0, a0, alpha, gamma,
-                                 edge_midpoint.y, time, use_unsteady_wake);
-        if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n, gamma);
-        else                     fr = fluxRoe (u_int, Ub, n, gamma);
-      } else if (bName == "outflow") {
-        Vec4 Ub = subsonicOutflow(u_int, n, pout, gamma);
-        if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n, gamma);
-        else                     fr = fluxRoe (u_int, Ub, n, gamma);
-      } else {
-        fr = inviscidWallFlux(u_int, n, gamma);
-      }
-      Racc[eL * ndof_per_elem] += fr.F * len;
-      sdlacc[eL] += fr.smax * len;
-    } else {
-      double xi0, eta0, xi1, eta1;
-      edgeRefParam(mesh.E[eL].v, va, vb, xi0, eta0, xi1, eta1);
-      int ia = -1, ib = -1;
-      for (int k = 0; k < 3; ++k) {
-        if (mesh.E[eL].v[k] == va) ia = k;
-        if (mesh.E[eL].v[k] == vb) ib = k;
-      }
-
-      for (int q = 0; q < qr.n; ++q) {
-        double t    = qr.points[q];
-        const auto &phi =
-            (ia >= 0 && ib >= 0) ? face_cache->phi[ia][ib][q]
-                                 : evaluateBasis(xi0 + t * (xi1 - xi0),
-                                                 eta0 + t * (eta1 - eta0), p_order);
-
-        Vec4 u_int = {0,0,0,0};
-        for (int j = 0; j < ndof_per_elem; ++j)
-          u_int += Un_dg[eL][j] * phi[j];
-
-        // Physical position of this quadrature point on the edge
-        Vec2 edge_pos = mesh.V[va] * (1.0 - t) + mesh.V[vb] * t;
-
+      if (mesh.E[eL].q_order == 1) {
+        Vec2 edge_midpoint = (mesh.V[va] + mesh.V[vb]) * 0.5;
         FluxResult fr;
         if (bName == "inflow") {
           Vec4 Ub = subsonicInflow(u_int, n, rho0, a0, alpha, gamma,
-                                   edge_pos.y, time, use_unsteady_wake);
+                                   edge_midpoint.y, time, use_unsteady_wake);
           if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n, gamma);
           else                     fr = fluxRoe (u_int, Ub, n, gamma);
         } else if (bName == "outflow") {
@@ -1070,14 +1054,99 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
         } else {
           fr = inviscidWallFlux(u_int, n, gamma);
         }
+        Racc[eL * ndof_per_elem] += fr.F * len;
+        sdlacc[eL] += fr.smax * len;
+      } else {
+        static bool printed_curved_wall_debug = false;
+        for (int q = 0; q < bqr.n; ++q) {
+          double t = bqr.points[q];
+          EdgeGeomEval edge_geom = mesh.evaluateEdgeGeometry(eL, va, vb, t);
+          Vec2 n_q = edge_geom.normal;
+          if (!printed_curved_wall_debug && bName == "wall") {
+            std::cout << "Curved wall edge debug:"
+                      << " elem=" << eL
+                      << " edge=(" << va << "," << vb << ")"
+                      << " qpt=" << q
+                      << " t=" << t
+                      << " x=(" << edge_geom.x.x << "," << edge_geom.x.y << ")"
+                      << " tan=(" << edge_geom.tangent.x << "," << edge_geom.tangent.y << ")"
+                      << " n=(" << n_q.x << "," << n_q.y << ")"
+                      << " ds_dt=" << edge_geom.ds_dt
+                      << std::endl;
+            if (q == qr.n - 1) {
+              printed_curved_wall_debug = true;
+            }
+          }
+          FluxResult fr;
+          if (bName == "inflow") {
+            Vec4 Ub = subsonicInflow(u_int, n_q, rho0, a0, alpha, gamma,
+                                     edge_geom.x.y, time, use_unsteady_wake);
+            if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n_q, gamma);
+            else                     fr = fluxRoe (u_int, Ub, n_q, gamma);
+          } else if (bName == "outflow") {
+            Vec4 Ub = subsonicOutflow(u_int, n_q, pout, gamma);
+            if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n_q, gamma);
+            else                     fr = fluxRoe (u_int, Ub, n_q, gamma);
+          } else {
+            fr = inviscidWallFlux(u_int, n_q, gamma);
+          }
+          double w = bqr.weights[q] * edge_geom.ds_dt;
+          Racc[eL * ndof_per_elem] += fr.F * w;
+          sdlacc[eL] += fr.smax * w;
+        }
+      }
+    } else {
+      double xi0, eta0, xi1, eta1;
+      edgeRefParam(mesh.E[eL].v, va, vb, xi0, eta0, xi1, eta1);
+      int ia = -1, ib = -1;
+      for (int k = 0; k < 3; ++k) {
+        if (mesh.E[eL].v[k] == va) ia = k;
+        if (mesh.E[eL].v[k] == vb) ib = k;
+      }
 
-        double w = qr.weights[q] * len;
+      bool use_cached_face_basis =
+          (bqr.n == qr.n && ia >= 0 && ib >= 0);
+      for (int q = 0; q < bqr.n; ++q) {
+        double t    = bqr.points[q];
+        std::vector<double> phi_eval;
+        const std::vector<double> *phi_ptr = nullptr;
+        if (use_cached_face_basis) {
+          phi_ptr = &face_cache->phi[ia][ib][q];
+        } else {
+          phi_eval = evaluateBasis(xi0 + t * (xi1 - xi0),
+                                   eta0 + t * (eta1 - eta0), p_order);
+          phi_ptr = &phi_eval;
+        }
+        const auto &phi = *phi_ptr;
+        EdgeGeomEval edge_geom = mesh.evaluateEdgeGeometry(eL, va, vb, t);
+        Vec2 n_q = edge_geom.normal;
+
+        Vec4 u_int = {0,0,0,0};
+        for (int j = 0; j < ndof_per_elem; ++j)
+          u_int += Un_dg[eL][j] * phi[j];
+
+        FluxResult fr;
+        if (bName == "inflow") {
+          Vec4 Ub = subsonicInflow(u_int, n_q, rho0, a0, alpha, gamma,
+                                   edge_geom.x.y, time, use_unsteady_wake);
+          if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n_q, gamma);
+          else                     fr = fluxRoe (u_int, Ub, n_q, gamma);
+        } else if (bName == "outflow") {
+          Vec4 Ub = subsonicOutflow(u_int, n_q, pout, gamma);
+          if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n_q, gamma);
+          else                     fr = fluxRoe (u_int, Ub, n_q, gamma);
+        } else {
+          fr = inviscidWallFlux(u_int, n_q, gamma);
+        }
+
+        double w = bqr.weights[q] * edge_geom.ds_dt;
         for (int j = 0; j < ndof_per_elem; ++j)
           Racc[eL * ndof_per_elem + j] += fr.F * (w * phi[j]);
+        sdlacc[eL] += fr.smax * w;
       }
       // Use the true cell-average state for sdl computation.
       // For p>=1 DOF 0 is the vertex value at (0,0), not the integral mean.
-      {
+      if (mesh.E[eL].q_order == 1) {
         const Vec4 &u_int0 = Uavg[eL];
         FluxResult fr0;
         if (bName == "inflow") {
@@ -1136,6 +1205,10 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
   std::cout << "Beginning DG solver loop for " << itercap << " iterations (p=" 
             << p_order << ")..." << std::endl;
 
+  last_steady_converged = false;
+  last_steady_failed_nonphysical = false;
+  last_steady_hit_itercap = false;
+
   double baseline_residual = -1.0;
   double target_residual = -1.0;
 
@@ -1189,6 +1262,7 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     }
 
     if (Rnorm < target_residual) {
+      last_steady_converged = true;
       std::cout << "Converged in " << niter << " iterations." << std::endl;
       break;
     }
@@ -1199,10 +1273,15 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
 
     // Check for non-physical states
     if (!isPhysicalDG(U_dg)) {
+      last_steady_failed_nonphysical = true;
       std::cerr << "Non-physical state detected at iteration " << niter
                 << std::endl;
       break;
     }
+  }
+
+  if (!last_steady_converged && !last_steady_failed_nonphysical) {
+    last_steady_hit_itercap = true;
   }
   
   // After solving, update U (for output compatibility) with true cell averages
@@ -1495,18 +1574,21 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
       U[e] = cellAverage(U_dg[e]);
     }
     
+    bool save_allowed = (current_time >= unsteady_save_after);
+
     // Stop if t_end reached
     if (t_end > 0.0 && current_time >= t_end) {
-      // Save a final snapshot at t_end
-      char filename[256];
-      snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
-               unsteady_output_dir.c_str(), current_time, snapshot_count);
-      saveSnapshot(filename);
-      std::string dg_filename(filename);
-      dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
-      saveDGSnapshot(dg_filename);
-      std::cout << "Saved snapshot: " << filename << std::endl;
-      std::cout << "Saved DG snapshot: " << dg_filename << std::endl;
+      if (save_allowed) {
+        char filename[256];
+        snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
+                 unsteady_output_dir.c_str(), current_time, snapshot_count);
+        saveSnapshot(filename);
+        std::string dg_filename(filename);
+        dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
+        saveDGSnapshot(dg_filename);
+        std::cout << "Saved snapshot: " << filename << std::endl;
+        std::cout << "Saved DG snapshot: " << dg_filename << std::endl;
+      }
       std::cout << "Reached t_end = " << t_end << " at iteration " << niter << std::endl;
       break;
     }
@@ -1528,7 +1610,7 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     }
 
     // Save periodic snapshots
-    if (niter % snapshot_interval == 0) {
+    if (save_allowed && niter % snapshot_interval == 0) {
       char filename[256];
       snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
                unsteady_output_dir.c_str(), current_time, snapshot_count);

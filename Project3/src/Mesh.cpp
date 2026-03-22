@@ -10,6 +10,173 @@
 #include <utility>
 #include <vector>
 
+namespace {
+void getElementGeometryNodes(const Mesh &mesh, const Element &el,
+                             std::vector<Vec2> &xnode) {
+  static const int perm_q2[] = {0, 2, 5, 1, 4, 3};
+  static const int perm_q3[] = {0, 3, 9, 6, 8, 7, 4, 1, 2, 5};
+
+  if (el.q_order == 1) {
+    xnode = {mesh.V[el.v[0]], mesh.V[el.v[1]], mesh.V[el.v[2]]};
+  } else if (el.q_order == 2) {
+    xnode.resize(6);
+    for (int k = 0; k < 6; ++k)
+      xnode[k] = mesh.V[el.ho_nodes[perm_q2[k]]];
+  } else {
+    xnode.resize(10);
+    for (int k = 0; k < 10; ++k)
+      xnode[k] = mesh.V[el.ho_nodes[perm_q3[k]]];
+  }
+}
+
+void evalGeomBasisTri(int q, double xi_q, double eta_q,
+                      std::vector<double> &N,
+                      std::vector<double> &dNdxi,
+                      std::vector<double> &dNdeta) {
+  int nnode = (q + 1) * (q + 2) / 2;
+  N.assign(nnode, 0.0);
+  dNdxi.assign(nnode, 0.0);
+  dNdeta.assign(nnode, 0.0);
+
+  if (q == 1) {
+    N[0] = 1.0 - xi_q - eta_q;
+    N[1] = xi_q;
+    N[2] = eta_q;
+    dNdxi[0] = -1.0; dNdxi[1] = 1.0; dNdxi[2] = 0.0;
+    dNdeta[0] = -1.0; dNdeta[1] = 0.0; dNdeta[2] = 1.0;
+  } else if (q == 2) {
+    double l1 = 1.0 - xi_q - eta_q, l2 = xi_q, l3 = eta_q;
+    N[0] = l1 * (2 * l1 - 1);
+    N[1] = l2 * (2 * l2 - 1);
+    N[2] = l3 * (2 * l3 - 1);
+    N[3] = 4 * l1 * l2;
+    N[4] = 4 * l2 * l3;
+    N[5] = 4 * l3 * l1;
+
+    dNdxi[0] = -3.0 + 4.0 * xi_q + 4.0 * eta_q;
+    dNdxi[1] = -1.0 + 4.0 * xi_q;
+    dNdxi[2] = 0.0;
+    dNdxi[3] = 4.0 - 8.0 * xi_q - 4.0 * eta_q;
+    dNdxi[4] = 4.0 * eta_q;
+    dNdxi[5] = -4.0 * eta_q;
+
+    dNdeta[0] = -3.0 + 4.0 * xi_q + 4.0 * eta_q;
+    dNdeta[1] = 0.0;
+    dNdeta[2] = -1.0 + 4.0 * eta_q;
+    dNdeta[3] = -4.0 * xi_q;
+    dNdeta[4] = 4.0 * xi_q;
+    dNdeta[5] = 4.0 - 4.0 * xi_q - 8.0 * eta_q;
+  } else {
+    double xi2 = xi_q * xi_q, xi3 = xi_q * xi2;
+    double et2 = eta_q * eta_q, et3 = eta_q * et2;
+    N[0] = 1.0 - 11.0 / 2 * xi_q - 11.0 / 2 * eta_q + 9 * xi2 + 18 * xi_q * eta_q +
+           9 * et2 - 9.0 / 2 * xi3 - 27.0 / 2 * xi2 * eta_q -
+           27.0 / 2 * xi_q * et2 - 9.0 / 2 * et3;
+    N[1] = xi_q - 9.0 / 2 * xi2 + 9.0 / 2 * xi3;
+    N[2] = eta_q - 9.0 / 2 * et2 + 9.0 / 2 * et3;
+    N[3] = -9.0 / 2 * xi_q * eta_q + 27.0 / 2 * xi2 * eta_q;
+    N[4] = -9.0 / 2 * xi_q * eta_q + 27.0 / 2 * xi_q * et2;
+    N[5] = -9.0 / 2 * eta_q + 9.0 / 2 * xi_q * eta_q + 18 * et2 -
+           27.0 / 2 * xi_q * et2 - 27.0 / 2 * et3;
+    N[6] = 9 * eta_q - 45.0 / 2 * xi_q * eta_q - 45.0 / 2 * et2 +
+           27.0 / 2 * xi2 * eta_q + 27 * xi_q * et2 + 27.0 / 2 * et3;
+    N[7] = 9 * xi_q - 45.0 / 2 * xi2 - 45.0 / 2 * xi_q * eta_q +
+           27.0 / 2 * xi3 + 27 * xi2 * eta_q + 27.0 / 2 * xi_q * et2;
+    N[8] = -9.0 / 2 * xi_q + 18 * xi2 + 9.0 / 2 * xi_q * eta_q -
+           27.0 / 2 * xi3 - 27.0 / 2 * xi2 * eta_q;
+    N[9] = 27 * xi_q * eta_q - 27 * xi2 * eta_q - 27 * xi_q * et2;
+
+    dNdxi[0] = -11.0 / 2 + 18 * xi_q + 18 * eta_q - 27.0 / 2 * xi2 -
+               27 * xi_q * eta_q - 27.0 / 2 * et2;
+    dNdxi[1] = 1 - 9 * xi_q + 27.0 / 2 * xi2;
+    dNdxi[2] = 0.0;
+    dNdxi[3] = -9.0 / 2 * eta_q + 27 * xi_q * eta_q;
+    dNdxi[4] = -9.0 / 2 * eta_q + 27.0 / 2 * et2;
+    dNdxi[5] = 9.0 / 2 * eta_q - 27.0 / 2 * et2;
+    dNdxi[6] = -45.0 / 2 * eta_q + 27 * xi_q * eta_q + 27 * et2;
+    dNdxi[7] = 9 - 45 * xi_q - 45.0 / 2 * eta_q + 81.0 / 2 * xi2 +
+               54 * xi_q * eta_q + 27.0 / 2 * et2;
+    dNdxi[8] = -9.0 / 2 + 36 * xi_q + 9.0 / 2 * eta_q - 81.0 / 2 * xi2 -
+               27 * xi_q * eta_q;
+    dNdxi[9] = 27 * eta_q - 54 * xi_q * eta_q - 27 * et2;
+
+    dNdeta[0] = -11.0 / 2 + 18 * xi_q + 18 * eta_q - 27.0 / 2 * xi2 -
+                27 * xi_q * eta_q - 27.0 / 2 * et2;
+    dNdeta[1] = 0.0;
+    dNdeta[2] = 1 - 9 * eta_q + 27.0 / 2 * et2;
+    dNdeta[3] = -9.0 / 2 * xi_q + 27.0 / 2 * xi2;
+    dNdeta[4] = -9.0 / 2 * xi_q + 27 * xi_q * eta_q;
+    dNdeta[5] = -9.0 / 2 + 9.0 / 2 * xi_q + 36 * eta_q - 27 * xi_q * eta_q -
+                81.0 / 2 * et2;
+    dNdeta[6] = 9 - 45.0 / 2 * xi_q - 45 * eta_q + 27.0 / 2 * xi2 +
+                54 * xi_q * eta_q + 81.0 / 2 * et2;
+    dNdeta[7] = -45.0 / 2 * xi_q + 27 * xi2 + 27 * xi_q * eta_q;
+    dNdeta[8] = 9.0 / 2 * xi_q - 27.0 / 2 * xi2;
+    dNdeta[9] = 27 * xi_q - 27 * xi2 - 54 * xi_q * eta_q;
+  }
+}
+
+bool edgeRefParamLocal(const int ev[3], int va, int vb,
+                       double &xi0, double &eta0,
+                       double &xi1, double &eta1) {
+  const double rx[3] = {0.0, 1.0, 0.0};
+  const double ry[3] = {0.0, 0.0, 1.0};
+
+  int ia = -1, ib = -1;
+  for (int k = 0; k < 3; ++k) {
+    if (ev[k] == va) ia = k;
+    if (ev[k] == vb) ib = k;
+  }
+  if (ia < 0 || ib < 0) return false;
+  xi0 = rx[ia]; eta0 = ry[ia];
+  xi1 = rx[ib]; eta1 = ry[ib];
+  return true;
+}
+
+struct TriQuadPoint {
+  double xi;
+  double eta;
+  double w;
+};
+
+const std::vector<TriQuadPoint> &geometryTriangleQuadrature() {
+  // 12-point rule, exact through degree 6 on the reference triangle.
+  // This is exact for q=2 geometry moments and sufficiently accurate for the
+  // q=3 metric reconstruction needed by computeGeometry().
+  static const std::vector<TriQuadPoint> qpts = {
+      {0.063089014491502, 0.063089014491502, 0.025422453185104},
+      {0.063089014491502, 0.873821971016996, 0.025422453185104},
+      {0.873821971016996, 0.063089014491502, 0.025422453185104},
+      {0.249286745170910, 0.249286745170910, 0.058393137863189},
+      {0.249286745170910, 0.501426509658179, 0.058393137863189},
+      {0.501426509658179, 0.249286745170910, 0.058393137863189},
+      {0.053145049844816, 0.310352451033785, 0.041425537809187},
+      {0.053145049844816, 0.636502499121399, 0.041425537809187},
+      {0.310352451033785, 0.053145049844816, 0.041425537809187},
+      {0.310352451033785, 0.636502499121399, 0.041425537809187},
+      {0.636502499121399, 0.053145049844816, 0.041425537809187},
+      {0.636502499121399, 0.310352451033785, 0.041425537809187},
+  };
+  return qpts;
+}
+
+struct EdgeQuadPoint {
+  double t;
+  double w;
+};
+
+const std::vector<EdgeQuadPoint> &geometryEdgeQuadrature() {
+  // 4-point Gauss-Legendre rule on [0,1].
+  static const std::vector<EdgeQuadPoint> qpts = {
+      {0.069431844202974, 0.173927422568727},
+      {0.330009478207572, 0.326072577431273},
+      {0.669990521792428, 0.326072577431273},
+      {0.930568155797026, 0.173927422568727},
+  };
+  return qpts;
+}
+} // namespace
+
 bool Mesh::readGRI(const std::string &filename) {
   std::ifstream f(filename);
   if (!f.is_open()) {
@@ -436,12 +603,40 @@ void Mesh::computeGeometry() {
   centroids.resize(E.size());
   areas.resize(E.size());
   for (int i = 0; i < (int)E.size(); ++i) {
-    Vec2 v1 = V[E[i].v[0]];
-    Vec2 v2 = V[E[i].v[1]];
-    Vec2 v3 = V[E[i].v[2]];
-    centroids[i] = (v1 + v2 + v3) / 3.0;
-    areas[i] = 0.5 * std::abs((v2.x - v1.x) * (v3.y - v1.y) -
-                              (v3.x - v1.x) * (v2.y - v1.y));
+    if (E[i].q_order == 1) {
+      Vec2 v1 = V[E[i].v[0]];
+      Vec2 v2 = V[E[i].v[1]];
+      Vec2 v3 = V[E[i].v[2]];
+      centroids[i] = (v1 + v2 + v3) / 3.0;
+      areas[i] = 0.5 * std::abs((v2.x - v1.x) * (v3.y - v1.y) -
+                                (v3.x - v1.x) * (v2.y - v1.y));
+      continue;
+    }
+
+    double signed_area = 0.0;
+    Vec2 first_moment = {0.0, 0.0};
+    for (const auto &qp : geometryTriangleQuadrature()) {
+      ElementGeomEval geom = evaluateElementGeometry(i, qp.xi, qp.eta);
+      double w = qp.w * geom.detJ;
+      signed_area += w;
+      first_moment += geom.x * w;
+    }
+
+    if (std::abs(signed_area) < 1e-14) {
+      Vec2 v1 = V[E[i].v[0]];
+      Vec2 v2 = V[E[i].v[1]];
+      Vec2 v3 = V[E[i].v[2]];
+      centroids[i] = (v1 + v2 + v3) / 3.0;
+      areas[i] = 0.5 * std::abs((v2.x - v1.x) * (v3.y - v1.y) -
+                                (v3.x - v1.x) * (v2.y - v1.y));
+      continue;
+    }
+
+    double area = std::abs(signed_area);
+    if (signed_area < 0.0)
+      first_moment = first_moment * -1.0;
+    areas[i] = area;
+    centroids[i] = first_moment / area;
   }
 
   inormals.resize(IE.size());
@@ -476,20 +671,91 @@ void Mesh::computeGeometry() {
   bnormals.resize(BE.size());
   blengths.resize(BE.size());
   for (int i = 0; i < (int)BE.size(); ++i) {
-    Vec2 v1 = V[BE[i].v[0]];
-    Vec2 v2 = V[BE[i].v[1]];
-    double dx = v2.x - v1.x;
-    double dy = v2.y - v1.y;
-    double len = std::sqrt(dx * dx + dy * dy);
-    blengths[i] = len;
-    bnormals[i] = {dy / len, -dx / len};
+    if (E[BE[i].elemL].q_order == 1) {
+      Vec2 v1 = V[BE[i].v[0]];
+      Vec2 v2 = V[BE[i].v[1]];
+      double dx = v2.x - v1.x;
+      double dy = v2.y - v1.y;
+      double len = std::sqrt(dx * dx + dy * dy);
+      blengths[i] = len;
+      bnormals[i] = {dy / len, -dx / len};
 
-    // Ensure normal points outward
-    Vec2 dCm = (0.5 * (v1 + v2)) - centroids[BE[i].elemL];
-    if (bnormals[i].dot(dCm) < 0) {
-      bnormals[i] = bnormals[i] * -1.0;
+      // Ensure normal points outward
+      Vec2 dCm = (0.5 * (v1 + v2)) - centroids[BE[i].elemL];
+      if (bnormals[i].dot(dCm) < 0) {
+        bnormals[i] = bnormals[i] * -1.0;
+      }
+      continue;
     }
+
+    double len = 0.0;
+    for (const auto &qp : geometryEdgeQuadrature()) {
+      EdgeGeomEval geom = evaluateEdgeGeometry(BE[i].elemL, BE[i].v[0], BE[i].v[1], qp.t);
+      len += qp.w * geom.ds_dt;
+    }
+    blengths[i] = len;
+
+    // Store a representative outward normal at the edge midpoint. The DG
+    // residual uses pointwise curved normals directly; this cached normal is
+    // for FV paths, diagnostics, and postprocessing that only need one normal.
+    EdgeGeomEval mid_geom = evaluateEdgeGeometry(BE[i].elemL, BE[i].v[0], BE[i].v[1], 0.5);
+    bnormals[i] = mid_geom.normal;
   }
+}
+
+ElementGeomEval Mesh::evaluateElementGeometry(int e, double xi, double eta) const {
+  const Element &el = E[e];
+  std::vector<Vec2> xnode;
+  std::vector<double> N, dNdxi, dNdeta;
+  getElementGeometryNodes(*this, el, xnode);
+  evalGeomBasisTri(el.q_order, xi, eta, N, dNdxi, dNdeta);
+
+  ElementGeomEval geom{};
+  geom.x = {0.0, 0.0};
+  geom.dx_dxi = geom.dx_deta = 0.0;
+  geom.dy_dxi = geom.dy_deta = 0.0;
+  for (int k = 0; k < static_cast<int>(xnode.size()); ++k) {
+    geom.x.x += N[k] * xnode[k].x;
+    geom.x.y += N[k] * xnode[k].y;
+    geom.dx_dxi += dNdxi[k] * xnode[k].x;
+    geom.dx_deta += dNdeta[k] * xnode[k].x;
+    geom.dy_dxi += dNdxi[k] * xnode[k].y;
+    geom.dy_deta += dNdeta[k] * xnode[k].y;
+  }
+  geom.detJ = geom.dx_dxi * geom.dy_deta - geom.dx_deta * geom.dy_dxi;
+  return geom;
+}
+
+EdgeGeomEval Mesh::evaluateEdgeGeometry(int e, int va, int vb, double t) const {
+  double xi0 = 0.0, eta0 = 0.0, xi1 = 0.0, eta1 = 0.0;
+  if (!edgeRefParamLocal(E[e].v, va, vb, xi0, eta0, xi1, eta1)) {
+    throw std::runtime_error("evaluateEdgeGeometry: edge vertices not found in element");
+  }
+
+  double xi = xi0 + t * (xi1 - xi0);
+  double eta = eta0 + t * (eta1 - eta0);
+  ElementGeomEval geom = evaluateElementGeometry(e, xi, eta);
+
+  double dxi_dt = xi1 - xi0;
+  double deta_dt = eta1 - eta0;
+  Vec2 tangent = {
+      geom.dx_dxi * dxi_dt + geom.dx_deta * deta_dt,
+      geom.dy_dxi * dxi_dt + geom.dy_deta * deta_dt,
+  };
+  double ds_dt = tangent.norm();
+  Vec2 normal = {tangent.y / ds_dt, -tangent.x / ds_dt};
+
+  Vec2 dCm = geom.x - centroids[e];
+  if (normal.dot(dCm) < 0.0) {
+    normal = normal * -1.0;
+  }
+
+  EdgeGeomEval edge_geom{};
+  edge_geom.x = geom.x;
+  edge_geom.tangent = tangent;
+  edge_geom.normal = normal;
+  edge_geom.ds_dt = ds_dt;
+  return edge_geom;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,165 +782,21 @@ void Mesh::computeGeometry() {
 bool Mesh::globalToReference(int e, const Vec2 &xglob,
                              double &xi, double &eta,
                              double tol, int maxIter) const {
-  const Element &el = E[e];
-  int q = el.q_order;
-
-  // Collect physical positions of all geometry nodes in shape.c order.
-  // The shape functions in evalGeomBasis below use the shape.c convention
-  // (corners first: v0, v1, v2, then edge/interior nodes).
-  //
-  // For q=1 the GRI order matches shape.c: [v0, v1, v2].
-  // For q>1 the GRI uses row-by-row ordering and ho_nodes stores ALL nodes
-  // in GRI order.  We apply a permutation to convert GRI → shape.c order.
-  //
-  //   shape.c p=2 ref coords:
-  //     0:(0,0)  1:(1,0)  2:(0,1)  3:(½,½)  4:(0,½)  5:(½,0)
-  //   GRI row-by-row p=2:
-  //     0:(0,0)  1:(½,0)  2:(1,0)  3:(0,½)  4:(½,½)  5:(0,1)
-  //   perm_q2[shape_k] = gri_index:  {0, 2, 5, 4, 3, 1}
-  //
-  //   shape.c p=3 ref coords:
-  //     0:(0,0) 1:(1,0) 2:(0,1) 3:(⅔,⅓) 4:(⅓,⅔) 5:(0,⅔) 6:(0,⅓)
-  //     7:(⅓,0) 8:(⅔,0) 9:(⅓,⅓)
-  //   GRI row-by-row p=3:
-  //     0:(0,0) 1:(⅓,0) 2:(⅔,0) 3:(1,0) 4:(0,⅓) 5:(⅓,⅓) 6:(⅔,⅓)
-  //     7:(0,⅔) 8:(⅓,⅔) 9:(0,1)
-  //   perm_q3[shape_k] = gri_index:  {0, 3, 9, 6, 8, 7, 4, 1, 2, 5}
-
-  static const int perm_q2[] = {0, 2, 5, 4, 3, 1};
-  static const int perm_q3[] = {0, 3, 9, 6, 8, 7, 4, 1, 2, 5};
-
-  std::vector<Vec2> xnode;
-  if (q == 1) {
-    xnode = {V[el.v[0]], V[el.v[1]], V[el.v[2]]};
-  } else if (q == 2) {
-    xnode.resize(6);
-    for (int k = 0; k < 6; ++k) xnode[k] = V[el.ho_nodes[perm_q2[k]]];
-  } else { // q == 3
-    xnode.resize(10);
-    for (int k = 0; k < 10; ++k) xnode[k] = V[el.ho_nodes[perm_q3[k]]];
-  }
-
-  int nnode = (int)xnode.size();
-
-  // Reference coordinates of the geometry nodes (same ordering as xnode)
-  // q=1: (0,0),(1,0),(0,1)
-  // q=2: adds (0.5,0),(0.5,0.5),(0,0.5)
-  // q=3: adds (1/3,0),(2/3,0),(2/3,1/3),(1/3,2/3),(0,2/3),(0,1/3),(1/3,1/3)
-  std::vector<double> xi_ref, eta_ref;
-  if (q == 1) {
-    xi_ref  = {0.0, 1.0, 0.0};
-    eta_ref = {0.0, 0.0, 1.0};
-  } else if (q == 2) {
-    xi_ref  = {0.0, 1.0, 0.0, 0.5, 0.5, 0.0};
-    eta_ref = {0.0, 0.0, 1.0, 0.0, 0.5, 0.5};
-  } else { // q == 3
-    xi_ref  = {0.0, 1.0, 0.0, 1.0/3, 2.0/3, 2.0/3, 1.0/3, 0.0,     0.0,     1.0/3};
-    eta_ref = {0.0, 0.0, 1.0, 0.0,   0.0,   1.0/3, 2.0/3, 2.0/3,   1.0/3,   1.0/3};
-  }
-
-  // Lagrange shape functions N_k(ξ,η) for the geometry nodes
-  // evaluated at a given reference point — and their gradients.
-  // We implement this inline for q=1,2,3.
-  auto evalGeomBasis = [&](double xi_q, double eta_q,
-                           std::vector<double> &N,
-                           std::vector<double> &dNdxi,
-                           std::vector<double> &dNdeta) {
-    N.assign(nnode, 0.0);
-    dNdxi.assign(nnode, 0.0);
-    dNdeta.assign(nnode, 0.0);
-    if (q == 1) {
-      // Standard linear triangle shape functions
-      N[0] = 1.0 - xi_q - eta_q;  N[1] = xi_q;  N[2] = eta_q;
-      dNdxi[0]  = -1.0; dNdxi[1]  = 1.0; dNdxi[2]  = 0.0;
-      dNdeta[0] = -1.0; dNdeta[1] = 0.0; dNdeta[2] = 1.0;
-    } else if (q == 2) {
-      // Serendipity / full quadratic 6-node triangle (barycentric λ1=1-ξ-η, λ2=ξ, λ3=η)
-      double l1 = 1.0 - xi_q - eta_q, l2 = xi_q, l3 = eta_q;
-      N[0] = l1*(2*l1-1);  N[1] = l2*(2*l2-1);  N[2] = l3*(2*l3-1);
-      N[3] = 4*l1*l2;      N[4] = 4*l2*l3;      N[5] = 4*l3*l1;
-      dNdxi[0]  = (2*l1-1)*(-1) + l1*(-2);   // d/dξ of l1*(2l1-1): dl1/dξ=-1
-      dNdxi[1]  = (2*l2-1)*(1)  + l2*(2);
-      dNdxi[2]  = 0.0;
-      dNdxi[3]  = 4*((-1)*l2 + l1*(1));
-      dNdxi[4]  = 4*(l3*(1));
-      dNdxi[5]  = 4*(l3*(-1));
-      dNdeta[0] = (2*l1-1)*(-1) + l1*(-2);   // dl1/dη=-1
-      dNdeta[1] = 0.0;
-      dNdeta[2] = (2*l3-1)*(1)  + l3*(2);
-      dNdeta[3] = 4*((-1)*l2);
-      dNdeta[4] = 4*(l2*(1));
-      dNdeta[5] = 4*((1)*l1 + l3*(-1));
-    } else { // q == 3: 10-node cubic triangle (same as evaluateBasis p=3 in Solver.cpp)
-      double xi2 = xi_q*xi_q, xi3 = xi_q*xi2;
-      double et2 = eta_q*eta_q, et3 = eta_q*et2;
-      N[0] = 1.0 - 11.0/2*xi_q - 11.0/2*eta_q + 9*xi2 + 18*xi_q*eta_q + 9*et2
-             - 9.0/2*xi3 - 27.0/2*xi2*eta_q - 27.0/2*xi_q*et2 - 9.0/2*et3;
-      N[1] = xi_q - 9.0/2*xi2 + 9.0/2*xi3;
-      N[2] = eta_q - 9.0/2*et2 + 9.0/2*et3;
-      N[3] = -9.0/2*xi_q*eta_q + 27.0/2*xi2*eta_q;
-      N[4] = -9.0/2*xi_q*eta_q + 27.0/2*xi_q*et2;
-      N[5] = -9.0/2*eta_q + 9.0/2*xi_q*eta_q + 18*et2 - 27.0/2*xi_q*et2 - 27.0/2*et3;
-      N[6] = 9*eta_q - 45.0/2*xi_q*eta_q - 45.0/2*et2 + 27.0/2*xi2*eta_q + 27*xi_q*et2 + 27.0/2*et3;
-      N[7] = 9*xi_q - 45.0/2*xi2 - 45.0/2*xi_q*eta_q + 27.0/2*xi3 + 27*xi2*eta_q + 27.0/2*xi_q*et2;
-      N[8] = -9.0/2*xi_q + 18*xi2 + 9.0/2*xi_q*eta_q - 27.0/2*xi3 - 27.0/2*xi2*eta_q;
-      N[9] = 27*xi_q*eta_q - 27*xi2*eta_q - 27*xi_q*et2;
-      // Gradients dN/dξ
-      dNdxi[0]  = -11.0/2 + 18*xi_q + 18*eta_q - 27.0/2*xi2 - 27*xi_q*eta_q - 27.0/2*et2;
-      dNdxi[1]  = 1 - 9*xi_q + 27.0/2*xi2;
-      dNdxi[2]  = 0.0;
-      dNdxi[3]  = -9.0/2*eta_q + 27*xi_q*eta_q;
-      dNdxi[4]  = -9.0/2*eta_q + 27.0/2*et2;
-      dNdxi[5]  = 9.0/2*eta_q - 27.0/2*et2;
-      dNdxi[6]  = -45.0/2*eta_q + 27*xi_q*eta_q + 27*et2;
-      dNdxi[7]  = 9 - 45*xi_q - 45.0/2*eta_q + 81.0/2*xi2 + 54*xi_q*eta_q + 27.0/2*et2;
-      dNdxi[8]  = -9.0/2 + 36*xi_q + 9.0/2*eta_q - 81.0/2*xi2 - 27*xi_q*eta_q;
-      dNdxi[9]  = 27*eta_q - 54*xi_q*eta_q - 27*et2;
-      // Gradients dN/dη
-      dNdeta[0] = -11.0/2 + 18*xi_q + 18*eta_q - 27.0/2*xi2 - 27*xi_q*eta_q - 27.0/2*et2;
-      dNdeta[1] = 0.0;
-      dNdeta[2] = 1 - 9*eta_q + 27.0/2*et2;
-      dNdeta[3] = -9.0/2*xi_q + 27.0/2*xi2;
-      dNdeta[4] = -9.0/2*xi_q + 27*xi_q*eta_q;
-      dNdeta[5] = -9.0/2 + 9.0/2*xi_q + 36*eta_q - 27*xi_q*eta_q - 81.0/2*et2;
-      dNdeta[6] = 9 - 45.0/2*xi_q - 45*eta_q + 27.0/2*xi2 + 54*xi_q*eta_q + 81.0/2*et2;
-      dNdeta[7] = -45.0/2*xi_q + 27*xi2 + 27*xi_q*eta_q;
-      dNdeta[8] = 9.0/2*xi_q - 27.0/2*xi2;
-      dNdeta[9] = 27*xi_q - 27*xi2 - 54*xi_q*eta_q;
-    }
-  };
-
   // Initialise Newton at the centroid of the reference triangle
   xi  = 1.0/3.0;
   eta = 1.0/3.0;
   const double dmax = 1.0;  // maximum update magnitude (per Listing 4.4.1 line 30)
-
-  std::vector<double> N, dNdxi_vec, dNdeta_vec;
   for (int iter = 0; iter < maxIter; ++iter) {
-    evalGeomBasis(xi, eta, N, dNdxi_vec, dNdeta_vec);
-
-    // Evaluate x(ξ,η) = Σ N_k * xnode_k
-    Vec2 x = {0.0, 0.0};
-    for (int k = 0; k < nnode; ++k) {
-      x.x += N[k] * xnode[k].x;
-      x.y += N[k] * xnode[k].y;
-    }
-
-    // Residual R = x(ξ,η) − xglob
-    Vec2 R = x - xglob;
+    ElementGeomEval geom = evaluateElementGeometry(e, xi, eta);
+    Vec2 R = geom.x - xglob;
     if (std::sqrt(R.x*R.x + R.y*R.y) < tol) return true;
 
-    // Jacobian J = ∂x/∂(ξ,η):  J[0]=∂x/∂ξ, J[1]=∂x/∂η, J[2]=∂y/∂ξ, J[3]=∂y/∂η
-    double J00 = 0, J01 = 0, J10 = 0, J11 = 0;
-    for (int k = 0; k < nnode; ++k) {
-      J00 += dNdxi_vec[k]  * xnode[k].x;
-      J01 += dNdeta_vec[k] * xnode[k].x;
-      J10 += dNdxi_vec[k]  * xnode[k].y;
-      J11 += dNdeta_vec[k] * xnode[k].y;
-    }
-
     // Analytical 2×2 inverse:  J^{-1} = 1/det * [[J11,-J01],[-J10,J00]]
-    double det = J00*J11 - J01*J10;
+    double J00 = geom.dx_dxi;
+    double J01 = geom.dx_deta;
+    double J10 = geom.dy_dxi;
+    double J11 = geom.dy_deta;
+    double det = geom.detJ;
     if (std::abs(det) < 1e-14) return false;  // singular — not inside this element
     double inv_det = 1.0 / det;
 
