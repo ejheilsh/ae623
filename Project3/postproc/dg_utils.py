@@ -156,6 +156,105 @@ def evaluate_basis(xi, eta, p):
     raise ValueError(f"Basis not implemented for p={p}")
 
 
+def evaluate_geometry_basis(xi, eta, q):
+    if q == 1:
+        return np.array([1.0 - xi - eta, xi, eta])
+    if q == 2:
+        l1 = 1.0 - xi - eta
+        l2 = xi
+        l3 = eta
+        return np.array(
+            [
+                l1 * (2.0 * l1 - 1.0),
+                l2 * (2.0 * l2 - 1.0),
+                l3 * (2.0 * l3 - 1.0),
+                4.0 * l1 * l2,
+                4.0 * l2 * l3,
+                4.0 * l3 * l1,
+            ]
+        )
+    if q == 3:
+        xi2 = xi * xi
+        xi3 = xi * xi2
+        et2 = eta * eta
+        et3 = eta * et2
+        return np.array(
+            [
+                1.0 - 11.0 / 2 * xi - 11.0 / 2 * eta + 9 * xi2 + 18 * xi * eta +
+                9 * et2 - 9.0 / 2 * xi3 - 27.0 / 2 * xi2 * eta -
+                27.0 / 2 * xi * et2 - 9.0 / 2 * et3,
+                xi - 9.0 / 2 * xi2 + 9.0 / 2 * xi3,
+                eta - 9.0 / 2 * et2 + 9.0 / 2 * et3,
+                -9.0 / 2 * xi * eta + 27.0 / 2 * xi2 * eta,
+                -9.0 / 2 * xi * eta + 27.0 / 2 * xi * et2,
+                -9.0 / 2 * eta + 9.0 / 2 * xi * eta + 18 * et2 -
+                27.0 / 2 * xi * et2 - 27.0 / 2 * et3,
+                9 * eta - 45.0 / 2 * xi * eta - 45.0 / 2 * et2 +
+                27.0 / 2 * xi2 * eta + 27 * xi * et2 + 27.0 / 2 * et3,
+                9 * xi - 45.0 / 2 * xi2 - 45.0 / 2 * xi * eta +
+                27.0 / 2 * xi3 + 27 * xi2 * eta + 27.0 / 2 * xi * et2,
+                -9.0 / 2 * xi + 18 * xi2 + 9.0 / 2 * xi * eta -
+                27.0 / 2 * xi3 - 27.0 / 2 * xi2 * eta,
+                27 * xi * eta - 27 * xi2 * eta - 27 * xi * et2,
+            ]
+        )
+    raise ValueError(f"Geometry basis not implemented for q={q}")
+
+
+def evaluate_geometry_basis_grad(xi, eta, q):
+    if q == 1:
+        dxi = np.array([-1.0, 1.0, 0.0])
+        deta = np.array([-1.0, 0.0, 1.0])
+        return np.vstack((dxi, deta))
+    if q == 2:
+        dxi = np.array([
+            -3.0 + 4.0 * xi + 4.0 * eta,
+            -1.0 + 4.0 * xi,
+            0.0,
+            4.0 - 8.0 * xi - 4.0 * eta,
+            4.0 * eta,
+            -4.0 * eta,
+        ])
+        deta = np.array([
+            -3.0 + 4.0 * xi + 4.0 * eta,
+            0.0,
+            -1.0 + 4.0 * eta,
+            -4.0 * xi,
+            4.0 * xi,
+            4.0 - 4.0 * xi - 8.0 * eta,
+        ])
+        return np.vstack((dxi, deta))
+    if q == 3:
+        xi2 = xi * xi
+        et2 = eta * eta
+        dxi = np.array([
+            -11.0 / 2 + 18 * xi + 18 * eta - 27.0 / 2 * xi2 - 27 * xi * eta - 27.0 / 2 * et2,
+            1 - 9 * xi + 27.0 / 2 * xi2,
+            0.0,
+            -9.0 / 2 * eta + 27 * xi * eta,
+            -9.0 / 2 * eta + 27.0 / 2 * et2,
+            9.0 / 2 * eta - 27.0 / 2 * et2,
+            -45.0 / 2 * eta + 27 * xi * eta + 27 * et2,
+            9 - 45 * xi - 45.0 / 2 * eta + 81.0 / 2 * xi2 + 54 * xi * eta + 27.0 / 2 * et2,
+            -9.0 / 2 + 36 * xi + 9.0 / 2 * eta - 81.0 / 2 * xi2 - 27 * xi * eta,
+            27 * eta - 54 * xi * eta - 27 * et2,
+        ])
+        deta = np.array([
+            -11.0 / 2 + 18 * xi + 18 * eta - 27.0 / 2 * xi2 - 27 * xi * eta - 27.0 / 2 * et2,
+            0.0,
+            1 - 9 * eta + 27.0 / 2 * et2,
+            -9.0 / 2 * xi + 27.0 / 2 * xi2,
+            -9.0 / 2 * xi + 27 * xi * eta,
+            -9.0 / 2 + 9.0 / 2 * xi + 36 * eta - 27 * xi * eta - 81.0 / 2 * et2,
+            9 - 45.0 / 2 * xi - 45 * eta + 27.0 / 2 * xi2 + 54 * xi * eta + 81.0 / 2 * et2,
+            -45.0 / 2 * xi + 27 * xi2 + 27 * xi * eta,
+            9.0 / 2 * xi - 27.0 / 2 * xi2,
+            27 * xi - 27 * xi2 - 54 * xi * eta,
+        ])
+        return np.vstack((dxi, deta))
+    raise ValueError(f"Geometry basis gradient not implemented for q={q}")
+
+
 def evaluate_basis_grad(xi, eta, p):
     ndof = (p + 1) * (p + 2) // 2
     g = np.zeros((2, ndof))
@@ -223,14 +322,14 @@ def geometry_nodes(element, nodes):
 
 def map_to_physical(element, nodes, xi, eta):
     xnode = geometry_nodes(element, nodes)
-    phi = evaluate_basis(xi, eta, element["q"])
+    phi = evaluate_geometry_basis(xi, eta, element["q"])
     xy = phi @ xnode
     return xy
 
 
 def map_jacobian(element, nodes, xi, eta):
     xnode = geometry_nodes(element, nodes)
-    gphi = evaluate_basis_grad(xi, eta, element["q"])
+    gphi = evaluate_geometry_basis_grad(xi, eta, element["q"])
     dx_dxi = np.dot(gphi[0], xnode[:, 0])
     dx_deta = np.dot(gphi[1], xnode[:, 0])
     dy_dxi = np.dot(gphi[0], xnode[:, 1])
@@ -318,7 +417,7 @@ def build_dg_triangulation(mesh, U_dg, p_order, field_name, refine_level=None):
         elem_xy = []
         elem_field = []
         for xi, eta in ref_xy:
-            phi_geom = evaluate_basis(xi, eta, element["q"])
+            phi_geom = evaluate_geometry_basis(xi, eta, element["q"])
             xy = phi_geom @ xnode
             state = reconstruct_state(U_elem, p_order, xi, eta)
             prim = primitive_from_state(state)

@@ -12,6 +12,8 @@ int main(int argc, char **argv) {
               << "[steady/unsteady] [ic_file] [t_end] "
               << "[--p0-itercap <iters>] "
               << "[--save-after <time>] "
+              << "[--save-interval-time <dt_save>] "
+              << "[--checkpoint-interval-time <dt_chk>] "
               << "[--map-ic <coarse_meshfile> <coarse_statefile>]"
               << "\n\nArguments:"
               << "\n  meshfile      : Grid file (e.g., grids/2k.gri)"
@@ -24,6 +26,8 @@ int main(int argc, char **argv) {
               << "\n  t_end         : End time for unsteady (optional, requires ic_file)"
               << "\n  --p0-itercap  : Separate iteration cap for auto-chained p=0 seed solve"
               << "\n  --save-after  : For unsteady runs, only save snapshots once time >= this value"
+              << "\n  --save-interval-time : For unsteady runs, save checkpoints every dt in physical time"
+              << "\n  --checkpoint-interval-time : For unsteady runs, overwrite one rolling checkpoint every dt in physical time"
               << "\n  --map-ic      : Load IC from coarser mesh (optional)"
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
@@ -44,6 +48,8 @@ int main(int argc, char **argv) {
   bool use_mapped_ic = false;
   int p0_itercap = -1;
   double save_after = 0.0;
+  double save_interval_time = -1.0;
+  double checkpoint_interval_time = -1.0;
   std::string coarse_meshfile = "";
   std::string coarse_statefile = "";
 
@@ -103,6 +109,20 @@ int main(int argc, char **argv) {
       }
       save_after = std::stod(argv[i + 1]);
       i += 1;
+    } else if (arg == "--save-interval-time") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --save-interval-time requires <dt_save>" << std::endl;
+        return 1;
+      }
+      save_interval_time = std::stod(argv[i + 1]);
+      i += 1;
+    } else if (arg == "--checkpoint-interval-time") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --checkpoint-interval-time requires <dt_chk>" << std::endl;
+        return 1;
+      }
+      checkpoint_interval_time = std::stod(argv[i + 1]);
+      i += 1;
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
       return 1;
@@ -135,6 +155,8 @@ int main(int argc, char **argv) {
     if (unsteady) {
       solver.unsteady_output_dir = output_dir;
       solver.unsteady_save_after = save_after;
+      solver.unsteady_save_interval_time = save_interval_time;
+      solver.unsteady_checkpoint_interval_time = checkpoint_interval_time;
     }
     
     if (use_mapped_ic) {
@@ -207,6 +229,8 @@ int main(int argc, char **argv) {
               << ", Mode: " << (unsteady ? "Unsteady" : "Steady")
               << (t_end > 0.0 ? ", t_end: " + std::to_string(t_end) : "")
               << (unsteady && save_after > 0.0 ? ", save_after: " + std::to_string(save_after) : "")
+              << (unsteady && save_interval_time > 0.0 ? ", save_interval_time: " + std::to_string(save_interval_time) : "")
+              << (unsteady && checkpoint_interval_time > 0.0 ? ", checkpoint_interval_time: " + std::to_string(checkpoint_interval_time) : "")
               << (use_mapped_ic ? ", Mapped IC: " + coarse_meshfile + " + " +
                                       coarse_statefile
                                 : "")

@@ -23,6 +23,8 @@ public:
   std::string fluxname = "roe";
   std::string unsteady_output_dir = "data";
   double unsteady_save_after = 0.0;
+  double unsteady_save_interval_time = -1.0;
+  double unsteady_checkpoint_interval_time = -1.0;
   double steady_baseline_residual_override = -1.0;
   bool last_steady_converged = false;
   bool last_steady_failed_nonphysical = false;

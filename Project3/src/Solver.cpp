@@ -72,6 +72,23 @@ double readBaselineResidualFromHistory(const std::string &filename) {
 
   return baseline;
 }
+
+std::vector<double> readResidualHistoryForRestart(const std::string &filename) {
+  const std::string residual_file = residualHistoryFilenameForRestart(filename);
+  if (residual_file.empty()) return {};
+
+  std::ifstream in(residual_file, std::ios::binary);
+  if (!in) return {};
+
+  int n = 0;
+  in.read(reinterpret_cast<char *>(&n), sizeof(int));
+  if (!in || n <= 0) return {};
+
+  std::vector<double> history(n);
+  in.read(reinterpret_cast<char *>(history.data()), sizeof(double) * n);
+  if (!in) return {};
+  return history;
+}
 } // namespace
 
 FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
@@ -143,6 +160,7 @@ void FiniteVolumeSolver::initializeDG() {
 
 void FiniteVolumeSolver::setInitialCondition() {
   steady_baseline_residual_override = -1.0;
+  res_history.clear();
   int Ne = mesh.E.size();
   U_dg.resize(Ne);
   for (int e = 0; e < Ne; ++e) {
@@ -203,6 +221,7 @@ void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
   in.close();
   U0 = U;
   steady_baseline_residual_override = readBaselineResidualFromHistory(filename);
+  res_history = readResidualHistoryForRestart(filename);
 
   // Also seed the DG representation: cell-average DOF (index 0) gets the loaded
   // value; higher DOFs are set to the same value so the nodal reconstruction
@@ -220,6 +239,10 @@ void FiniteVolumeSolver::loadInitialCondition(const std::string &filename) {
     std::cout << "Reusing original steady baseline residual from matching history: "
               << std::scientific << std::setprecision(6)
               << steady_baseline_residual_override << std::endl;
+  }
+  if (!res_history.empty()) {
+    std::cout << "Loaded prior residual history with " << res_history.size()
+              << " entries for continuation." << std::endl;
   }
 }
 
@@ -260,6 +283,7 @@ void FiniteVolumeSolver::loadDGInitialCondition(const std::string &filename) {
   in.close();
   U0_dg = U_dg;
   steady_baseline_residual_override = readBaselineResidualFromHistory(filename);
+  res_history = readResidualHistoryForRestart(filename);
 
   U.resize(Ne);
   for (int e = 0; e < Ne; ++e) {
@@ -274,11 +298,16 @@ void FiniteVolumeSolver::loadDGInitialCondition(const std::string &filename) {
               << std::scientific << std::setprecision(6)
               << steady_baseline_residual_override << std::endl;
   }
+  if (!res_history.empty()) {
+    std::cout << "Loaded prior residual history with " << res_history.size()
+              << " entries for continuation." << std::endl;
+  }
 }
 
 void FiniteVolumeSolver::loadMappedInitialCondition(
     const std::string &coarse_meshfile, const std::string &coarse_statefile) {
   steady_baseline_residual_override = -1.0;
+  res_history.clear();
   Mesh coarse_mesh;
   if (!coarse_mesh.readGRI(coarse_meshfile)) {
     throw std::runtime_error("Failed to read coarse mesh file: " + coarse_meshfile);
@@ -1646,6 +1675,44 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
   // Snapshot saving parameters
   int snapshot_interval = 100;  // Save every N iterations
   int snapshot_count = 0;
+  double next_save_time =
+      (unsteady_save_interval_time > 0.0)
+          ? std::max(unsteady_save_after, unsteady_save_interval_time)
+          : std::numeric_limits<double>::infinity();
+  double next_checkpoint_time =
+      (unsteady_checkpoint_interval_time > 0.0)
+          ? unsteady_checkpoint_interval_time
+          : std::numeric_limits<double>::infinity();
+
+  auto save_unsteady_snapshot = [&](const char *reason, int niter) {
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
+             unsteady_output_dir.c_str(), current_time, snapshot_count);
+    saveSnapshot(filename);
+    std::string dg_filename(filename);
+    dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
+    saveDGSnapshot(dg_filename);
+    snapshot_count++;
+
+    std::cout << "Iter: " << std::setw(6) << niter
+              << " | Time: " << std::fixed << std::setprecision(6) << current_time
+              << " | Saved snapshot (" << reason << "): " << filename
+              << " | Saved DG snapshot: " << dg_filename
+              << std::endl;
+  };
+
+  auto save_unsteady_checkpoint = [&](int niter) {
+    std::string filename = unsteady_output_dir + "/checkpoint_latest.bin";
+    saveSnapshot(filename);
+    std::string dg_filename = unsteady_output_dir + "/checkpoint_latest_dg.bin";
+    saveDGSnapshot(dg_filename);
+
+    std::cout << "Iter: " << std::setw(6) << niter
+              << " | Time: " << std::fixed << std::setprecision(6) << current_time
+              << " | Saved rolling checkpoint: " << filename
+              << " | Saved rolling DG checkpoint: " << dg_filename
+              << std::endl;
+  };
 
   // Create snapshot directory if it doesn't exist
   std::filesystem::create_directories(unsteady_output_dir);
@@ -1678,19 +1745,21 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     }
     
     bool save_allowed = (current_time >= unsteady_save_after);
+    bool hit_time_checkpoint =
+        save_allowed &&
+        unsteady_save_interval_time > 0.0 &&
+        current_time + 1e-12 >= next_save_time;
+    bool hit_rolling_checkpoint =
+        unsteady_checkpoint_interval_time > 0.0 &&
+        current_time + 1e-12 >= next_checkpoint_time;
 
     // Stop if t_end reached
     if (t_end > 0.0 && current_time >= t_end) {
+      if (hit_rolling_checkpoint) {
+        save_unsteady_checkpoint(niter);
+      }
       if (save_allowed) {
-        char filename[256];
-        snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
-                 unsteady_output_dir.c_str(), current_time, snapshot_count);
-        saveSnapshot(filename);
-        std::string dg_filename(filename);
-        dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
-        saveDGSnapshot(dg_filename);
-        std::cout << "Saved snapshot: " << filename << std::endl;
-        std::cout << "Saved DG snapshot: " << dg_filename << std::endl;
+        save_unsteady_snapshot("t_end", niter);
       }
       std::cout << "Reached t_end = " << t_end << " at iteration " << niter << std::endl;
       break;
@@ -1713,7 +1782,19 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     }
 
     // Save periodic snapshots
-    if (save_allowed && niter % snapshot_interval == 0) {
+    if (hit_rolling_checkpoint) {
+      save_unsteady_checkpoint(niter);
+      while (current_time + 1e-12 >= next_checkpoint_time) {
+        next_checkpoint_time += unsteady_checkpoint_interval_time;
+      }
+    }
+
+    if (hit_time_checkpoint) {
+      save_unsteady_snapshot("time-checkpoint", niter);
+      while (current_time + 1e-12 >= next_save_time) {
+        next_save_time += unsteady_save_interval_time;
+      }
+    } else if (save_allowed && niter % snapshot_interval == 0) {
       char filename[256];
       snprintf(filename, sizeof(filename), "%s/results_%.6f_%04d.bin",
                unsteady_output_dir.c_str(), current_time, snapshot_count);
@@ -1722,13 +1803,13 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
       dg_filename.replace(dg_filename.size() - 4, 4, "_dg.bin");
       saveDGSnapshot(dg_filename);
       snapshot_count++;
-      
+
       std::cout << "Iter: " << std::setw(6) << niter
                 << " | Time: " << std::fixed << std::setprecision(6) << current_time
                 << " | dt: " << std::scientific << dt_global
                 << " | Residual: " << Rnorm
                 << " | dU: " << dU_norm
-                << " | Saved snapshot: " << filename
+                << " | Saved snapshot (iter-interval): " << filename
                 << " | Saved DG snapshot: " << dg_filename
                 << std::endl;
     }
