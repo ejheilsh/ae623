@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
     std::string order_tag = "p" + std::to_string(p_order);
     std::string output_dir =
         unsteady ? ("unsteady_data/" + grid_name + "_" + order_tag) : "data_steady";
+    std::string file_prefix = unsteady ? "" : "steady_" + grid_name + "_" + order_tag + "_";
     std::filesystem::create_directories(output_dir);
     if (unsteady) {
       solver.unsteady_output_dir = output_dir;
@@ -159,6 +160,7 @@ int main(int argc, char **argv) {
       solver.unsteady_checkpoint_interval_time = checkpoint_interval_time;
     } else {
       solver.steady_output_dir = output_dir;
+      solver.steady_output_prefix = file_prefix;
     }
     
     if (use_mapped_ic) {
@@ -243,9 +245,6 @@ int main(int argc, char **argv) {
     } else {
       solver.solveSteady(itercap);
     }
-
-    // Determine filename prefix (include DG order)
-    std::string file_prefix = unsteady ? "" : "steady_" + grid_name + "_" + order_tag + "_";
 
     // Save results to a simple binary or text format for Python to read
     std::string results_file = output_dir + "/" + file_prefix + "results.bin";

@@ -1340,12 +1340,15 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
 
   auto save_steady_temp_iter = [&](int niter) {
     std::filesystem::create_directories(steady_output_dir);
-    std::string avg_filename = steady_output_dir + "/temp_iter_latest.bin";
+    std::string avg_filename =
+        steady_output_dir + "/" + steady_output_prefix + "temp_iter_latest.bin";
     saveSnapshot(avg_filename);
-    std::string dg_filename = steady_output_dir + "/temp_iter_latest_dg.bin";
+    std::string dg_filename =
+        steady_output_dir + "/" + steady_output_prefix + "temp_iter_latest_dg.bin";
     saveDGSnapshot(dg_filename);
 
-    std::string residual_filename = steady_output_dir + "/temp_iter_residual.bin";
+    std::string residual_filename =
+        steady_output_dir + "/" + steady_output_prefix + "temp_iter_residual.bin";
     {
       std::ofstream res_out(residual_filename, std::ios::binary);
       int Nit = (int)res_history.size();
@@ -1355,7 +1358,8 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
       }
     }
 
-    std::string cell_res_filename = steady_output_dir + "/temp_iter_cell_res.bin";
+    std::string cell_res_filename =
+        steady_output_dir + "/" + steady_output_prefix + "temp_iter_cell_res.bin";
     {
       std::ofstream cell_res_out(cell_res_filename, std::ios::binary);
       int Ne_res = (int)cell_residuals.size();
