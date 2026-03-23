@@ -214,4 +214,4 @@ __marimo__/
 # ADDED THESE (WILL)
 *.jpg
 *.jpeg
-*.bin
+*.bin.DS_Store
