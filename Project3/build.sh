@@ -1,44 +1,77 @@
 #!/bin/bash
+set -e
 
-# Build script for Euler Solver
-# Default:
-#   ./build.sh
-# OpenMP build on macOS/Homebrew libomp:
-#   OPENMP=1 ./build.sh
-
-COMPILER=clang++
-FLAGS="-O3 -std=c++17 -Wall"
 OUTPUT="euler_solver"
-SRC="src/"
+SRC="src"
+CXXFLAGS="-O3 -std=c++17 -Wall"
+LDFLAGS=""
 
-# OpenMP is opt-in so the default build stays identical to the original solver build.
+SOURCES=(
+    "$SRC/main.cpp"
+    "$SRC/State.cpp"
+    "$SRC/Mesh.cpp"
+    "$SRC/Fluxes.cpp"
+    "$SRC/Solver.cpp"
+)
+
+if [ -n "${CXX:-}" ]; then
+    COMPILER="$CXX"
+elif command -v g++ >/dev/null 2>&1; then
+    COMPILER="g++"
+elif command -v clang++ >/dev/null 2>&1; then
+    COMPILER="clang++"
+else
+    echo "Error: no suitable C++ compiler found."
+    exit 1
+fi
+
+echo "Using compiler: $COMPILER"
+
+COMPILER_VERSION="$($COMPILER --version 2>/dev/null || true)"
+
+IS_CLANG=0
+IS_GCC=0
+
+if echo "$COMPILER_VERSION" | grep -qi "clang"; then
+    IS_CLANG=1
+fi
+
+if echo "$COMPILER_VERSION" | grep -qiE "gcc|g\+\+"; then
+    IS_GCC=1
+fi
+
 if [ "${OPENMP:-0}" = "1" ]; then
     echo "Building with OpenMP support..."
-    if command -v brew >/dev/null 2>&1; then
-        LIBOMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
-    else
-        LIBOMP_PREFIX=""
-    fi
 
-    if [ -n "$LIBOMP_PREFIX" ]; then
-        # Apple clang needs explicit include/library paths for Homebrew's libomp.
-        FLAGS="$FLAGS -Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include"
-        LDFLAGS="-L${LIBOMP_PREFIX}/lib -lomp"
+    if [ "$IS_GCC" -eq 1 ]; then
+        CXXFLAGS="$CXXFLAGS -fopenmp"
+    elif [ "$IS_CLANG" -eq 1 ]; then
+        if command -v brew >/dev/null 2>&1; then
+            LIBOMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+        else
+            LIBOMP_PREFIX=""
+        fi
+
+        if [ -n "$LIBOMP_PREFIX" ]; then
+            CXXFLAGS="$CXXFLAGS -Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include"
+            LDFLAGS="$LDFLAGS -L${LIBOMP_PREFIX}/lib -lomp"
+        else
+            echo "Warning: clang detected but Homebrew libomp was not found."
+            CXXFLAGS="$CXXFLAGS -Xpreprocessor -fopenmp"
+            LDFLAGS="$LDFLAGS -lomp"
+        fi
     else
-        echo "Warning: libomp not found via brew; trying default OpenMP flags."
-        FLAGS="$FLAGS -Xpreprocessor -fopenmp"
-        LDFLAGS="-lomp"
+        CXXFLAGS="$CXXFLAGS -fopenmp"
     fi
-else
-    LDFLAGS=""
+fi
+
+if [ "$IS_GCC" -eq 1 ]; then
+    LDFLAGS="$LDFLAGS -lstdc++fs"
 fi
 
 echo "Compiling..."
-$COMPILER $FLAGS $SRC/main.cpp $SRC/State.cpp $SRC/Mesh.cpp $SRC/Fluxes.cpp $SRC/Solver.cpp -o $OUTPUT $LDFLAGS
+echo "$COMPILER $CXXFLAGS ${SOURCES[*]} -o $OUTPUT $LDFLAGS"
 
-if [ $? -eq 0 ]; then
-    echo "Successfully built $OUTPUT"
-else
-    echo "Build failed"
-    exit 1
-fi
+"$COMPILER" $CXXFLAGS "${SOURCES[@]}" -o "$OUTPUT" $LDFLAGS
+
+echo "Successfully built $OUTPUT"
