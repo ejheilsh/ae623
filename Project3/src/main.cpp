@@ -157,6 +157,8 @@ int main(int argc, char **argv) {
       solver.unsteady_save_after = save_after;
       solver.unsteady_save_interval_time = save_interval_time;
       solver.unsteady_checkpoint_interval_time = checkpoint_interval_time;
+    } else {
+      solver.steady_output_dir = output_dir;
     }
     
     if (use_mapped_ic) {

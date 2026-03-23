@@ -1326,6 +1326,7 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
   int Ne = mesh.E.size();
   std::cout << "Beginning DG solver loop for " << itercap << " iterations (p=" 
             << p_order << ")..." << std::endl;
+  int temp_snapshot_interval = 10000;
 
   last_steady_converged = false;
   last_steady_failed_nonphysical = false;
@@ -1336,6 +1337,41 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
                                ? baseline_residual * 1.0e-5
                                : -1.0;
   bool printed_baseline = false;
+
+  auto save_steady_temp_iter = [&](int niter) {
+    std::filesystem::create_directories(steady_output_dir);
+    std::string avg_filename = steady_output_dir + "/temp_iter_latest.bin";
+    saveSnapshot(avg_filename);
+    std::string dg_filename = steady_output_dir + "/temp_iter_latest_dg.bin";
+    saveDGSnapshot(dg_filename);
+
+    std::string residual_filename = steady_output_dir + "/temp_iter_residual.bin";
+    {
+      std::ofstream res_out(residual_filename, std::ios::binary);
+      int Nit = (int)res_history.size();
+      res_out.write((char *)&Nit, sizeof(int));
+      if (Nit > 0) {
+        res_out.write((char *)res_history.data(), sizeof(double) * Nit);
+      }
+    }
+
+    std::string cell_res_filename = steady_output_dir + "/temp_iter_cell_res.bin";
+    {
+      std::ofstream cell_res_out(cell_res_filename, std::ios::binary);
+      int Ne_res = (int)cell_residuals.size();
+      cell_res_out.write((char *)&Ne_res, sizeof(int));
+      if (Ne_res > 0) {
+        cell_res_out.write((char *)cell_residuals.data(), sizeof(double) * Ne_res);
+      }
+    }
+
+    std::cout << "Iter: " << std::setw(6) << niter
+              << " | Saved steady temp checkpoint: " << avg_filename
+              << " | Saved steady temp DG checkpoint: " << dg_filename
+              << " | Saved steady temp residual history: " << residual_filename
+              << " | Saved steady temp cell residuals: " << cell_res_filename
+              << std::endl;
+  };
 
   for (int niter = 0; niter < itercap; ++niter) {
     // STEP 4: Compute R(U) once — used for both convergence monitoring and
@@ -1391,6 +1427,10 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
                 << " | RelRes: " << (baseline_residual > 0.0 ? Rnorm / baseline_residual : 0.0)
                 << " | Min Rho: " << minRho << " | Min P: " << minP
                 << std::endl;
+    }
+
+    if ((niter + 1) % temp_snapshot_interval == 0) {
+      save_steady_temp_iter(niter);
     }
 
     if (Rnorm < target_residual) {

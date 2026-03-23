@@ -21,6 +21,7 @@ public:
   std::vector<double> res_history;
   std::vector<double> cell_residuals;
   std::string fluxname = "roe";
+  std::string steady_output_dir = "data_steady";
   std::string unsteady_output_dir = "data";
   double unsteady_save_after = 0.0;
   double unsteady_save_interval_time = -1.0;
