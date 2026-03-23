@@ -15,12 +15,24 @@ Binary format:
 import argparse
 import glob
 import os
+from pathlib import Path
 import re
 import struct
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+plt.rcParams.update(
+    {
+        "font.size": 15,
+        "axes.labelsize": 18,
+        "axes.titlesize": 18,
+        "xtick.labelsize": 15,
+        "ytick.labelsize": 15,
+        "legend.fontsize": 16,
+    }
+)
 
 
 def read_residual(path: str) -> np.ndarray:
@@ -41,6 +53,12 @@ def read_residual(path: str) -> np.ndarray:
 def parse_label_from_name(path: str) -> str:
     name = os.path.basename(path)
     stem = name[:-4] if name.endswith(".bin") else name
+
+    # steady_2k_q3_p2_residual.bin
+    m = re.match(r"^steady_(.+)_p(\d+)_residual$", stem)
+    if m:
+        _grid, p_order = m.groups()
+        return rf"$p={p_order}$"
 
     # conv_2k_1_hlle_1.bin
     m = re.match(r"^conv_([^_]+)_([^_]+)_([^_]+)_([^_]+)$", stem)
@@ -88,6 +106,20 @@ def resolve_inputs(inputs):
     return unique
 
 
+def trim_shared_prefix(series_list, rtol=1e-12, atol=1e-15):
+    if not series_list:
+        return series_list
+    baseline = series_list[0]
+    out = [baseline]
+    for y in series_list[1:]:
+        ncommon = 0
+        nmax = min(len(baseline), len(y))
+        while ncommon < nmax and np.isclose(y[ncommon], baseline[ncommon], rtol=rtol, atol=atol):
+            ncommon += 1
+        out.append(y[ncommon:] if ncommon < len(y) else y[-1:])
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Overlay convergence histories from residual .bin files."
@@ -105,8 +137,8 @@ def main():
     )
     parser.add_argument(
         "--title",
-        default="Convergence History Overlay",
-        help="Plot title",
+        default=None,
+        help="Optional plot title",
     )
     parser.add_argument(
         "--xmax",
@@ -119,6 +151,16 @@ def main():
         action="store_true",
         help="Show interactive plot window",
     )
+    parser.add_argument(
+        "--xlog",
+        action="store_true",
+        help="Use log scale on the iteration axis.",
+    )
+    parser.add_argument(
+        "--trim-shared-prefix",
+        action="store_true",
+        help="Trim any identical leading segment shared with the first input history.",
+    )
     args = parser.parse_args()
 
     files = resolve_inputs(args.inputs)
@@ -126,8 +168,8 @@ def main():
         print("No files provided.")
         sys.exit(1)
 
-    plt.figure(figsize=(10, 6))
-    plotted = 0
+    histories = []
+    labels = []
 
     for path in files:
         if not os.path.isfile(path):
@@ -143,32 +185,47 @@ def main():
             print(f"Skipping (empty history): {path}")
             continue
 
+        histories.append(y)
+        labels.append(parse_label_from_name(path))
+
+    if not histories:
+        print("No valid residual files were plotted.")
+        sys.exit(1)
+
+    if args.trim_shared_prefix:
+        histories = trim_shared_prefix(histories)
+
+    plt.figure(figsize=(10, 6))
+    plotted = 0
+    for y, label in zip(histories, labels):
         x = np.arange(y.size)
         if args.xmax is not None:
             mask = x <= args.xmax
             x = x[mask]
             y = y[mask]
             if y.size == 0:
-                print(f"Skipping (outside xmax): {path}")
+                print(f"Skipping (outside xmax): {label}")
                 continue
-
-        label = parse_label_from_name(path)
+        if args.xlog:
+            x = x + 1
         plt.plot(x, y, linewidth=1.7, label=label)
         plotted += 1
 
-    if plotted == 0:
-        print("No valid residual files were plotted.")
-        sys.exit(1)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     plt.yscale("log")
+    if args.xlog:
+        plt.xscale("log")
     plt.xlabel("Iteration")
     plt.ylabel("Residual")
-    plt.title(args.title)
+    if args.title is not None:
+        plt.title(args.title)
     plt.grid(True, which="both", alpha=0.35)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(args.output, dpi=150)
-    print(f"Saved: {args.output}")
+    plt.savefig(output_path, dpi=150)
+    print(f"Saved: {output_path}")
 
     if args.show:
         plt.show()

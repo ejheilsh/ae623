@@ -1674,6 +1674,7 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
   
   // Snapshot saving parameters
   int snapshot_interval = 100;  // Save every N iterations
+  int temp_snapshot_interval = 10000;  // Overwrite-only temp save every N iterations
   int snapshot_count = 0;
   double next_save_time =
       (unsteady_save_interval_time > 0.0)
@@ -1711,6 +1712,39 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
               << " | Time: " << std::fixed << std::setprecision(6) << current_time
               << " | Saved rolling checkpoint: " << filename
               << " | Saved rolling DG checkpoint: " << dg_filename
+              << std::endl;
+  };
+
+  auto save_unsteady_temp_iter = [&](int niter) {
+    std::string filename = unsteady_output_dir + "/temp_iter_latest.bin";
+    saveSnapshot(filename);
+    std::string dg_filename = unsteady_output_dir + "/temp_iter_latest_dg.bin";
+    saveDGSnapshot(dg_filename);
+    std::string residual_filename = unsteady_output_dir + "/temp_iter_residual.bin";
+    {
+      std::ofstream res_out(residual_filename, std::ios::binary);
+      int Nit = (int)res_history.size();
+      res_out.write((char *)&Nit, sizeof(int));
+      if (Nit > 0) {
+        res_out.write((char *)res_history.data(), sizeof(double) * Nit);
+      }
+    }
+    std::string cell_res_filename = unsteady_output_dir + "/temp_iter_cell_res.bin";
+    {
+      std::ofstream cell_res_out(cell_res_filename, std::ios::binary);
+      int Ne_res = (int)cell_residuals.size();
+      cell_res_out.write((char *)&Ne_res, sizeof(int));
+      if (Ne_res > 0) {
+        cell_res_out.write((char *)cell_residuals.data(), sizeof(double) * Ne_res);
+      }
+    }
+
+    std::cout << "Iter: " << std::setw(6) << niter
+              << " | Time: " << std::fixed << std::setprecision(6) << current_time
+              << " | Saved temp iteration checkpoint: " << filename
+              << " | Saved temp DG iteration checkpoint: " << dg_filename
+              << " | Saved temp residual history: " << residual_filename
+              << " | Saved temp cell residuals: " << cell_res_filename
               << std::endl;
   };
 
@@ -1767,8 +1801,17 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     
     // Calculate residual norm (time derivative magnitude)
     double Rnorm = 0;
+    cell_residuals.resize(Ne);
     for (const auto &r : res_sdl.R) {
       Rnorm += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+    }
+    for (int i = 0; i < Ne; ++i) {
+      double cell_res = 0.0;
+      for (int j = 0; j < ndof_per_elem; ++j) {
+        const Vec4 &rj = res_sdl.R[i * ndof_per_elem + j];
+        cell_res += std::abs(rj[0]) + std::abs(rj[1]) + std::abs(rj[2]) + std::abs(rj[3]);
+      }
+      cell_residuals[i] = cell_res;
     }
     res_history.push_back(Rnorm);
     
@@ -1787,6 +1830,10 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
       while (current_time + 1e-12 >= next_checkpoint_time) {
         next_checkpoint_time += unsteady_checkpoint_interval_time;
       }
+    }
+
+    if ((niter + 1) % temp_snapshot_interval == 0) {
+      save_unsteady_temp_iter(niter);
     }
 
     if (hit_time_checkpoint) {
