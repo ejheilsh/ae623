@@ -1716,6 +1716,8 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
   int snapshot_interval = 100;  // Save every N iterations
   int temp_snapshot_interval = 10000;  // Overwrite-only temp save every N iterations
   int snapshot_count = 0;
+  const std::vector<double> hardcoded_save_times = {100.0, 200.0, 300.0};
+  std::size_t next_hardcoded_save_idx = 0;
   double next_save_time =
       (unsteady_save_interval_time > 0.0)
           ? std::max(unsteady_save_after, unsteady_save_interval_time)
@@ -1788,6 +1790,17 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
               << std::endl;
   };
 
+  auto save_hardcoded_time_snapshots = [&](int niter) {
+    while (next_hardcoded_save_idx < hardcoded_save_times.size() &&
+           current_time + 1e-12 >= hardcoded_save_times[next_hardcoded_save_idx]) {
+      char reason[64];
+      snprintf(reason, sizeof(reason), "milestone-%.0f",
+               hardcoded_save_times[next_hardcoded_save_idx]);
+      save_unsteady_snapshot(reason, niter);
+      next_hardcoded_save_idx++;
+    }
+  };
+
   // Create snapshot directory if it doesn't exist
   std::filesystem::create_directories(unsteady_output_dir);
   
@@ -1832,6 +1845,7 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
       if (hit_rolling_checkpoint) {
         save_unsteady_checkpoint(niter);
       }
+      save_hardcoded_time_snapshots(niter);
       if (save_allowed) {
         save_unsteady_snapshot("t_end", niter);
       }
@@ -1875,6 +1889,8 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
     if ((niter + 1) % temp_snapshot_interval == 0) {
       save_unsteady_temp_iter(niter);
     }
+
+    save_hardcoded_time_snapshots(niter);
 
     if (hit_time_checkpoint) {
       save_unsteady_snapshot("time-checkpoint", niter);
