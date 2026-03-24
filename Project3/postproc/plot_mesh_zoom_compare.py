@@ -105,9 +105,8 @@ def infer_zoom_boxes(mesh):
     }
 
 
-def style_axes(ax, title, box=None):
+def style_axes(ax, label, box=None):
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title(title)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_xlabel("")
@@ -118,6 +117,22 @@ def style_axes(ax, title, box=None):
         xmin, xmax, ymin, ymax = box
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
+        x_text = 0.5 * (xmin + xmax)
+        y_text = 17.5 if ymin <= 17.5 <= ymax else ymin + 0.78 * (ymax - ymin)
+    else:
+        xmin, xmax = ax.get_xlim()
+        ymin, ymax = ax.get_ylim()
+        x_text = 0.5 * (xmin + xmax)
+        y_text = ymin + 0.78 * (ymax - ymin)
+    ax.text(
+        x_text,
+        y_text,
+        label,
+        ha="center",
+        va="center",
+        fontsize=18,
+        family="serif",
+    )
 
 
 def plot_single_mesh(ax, segments, title, box=None, lw=0.8):
@@ -184,8 +199,15 @@ def main():
 
     for view in args.views:
         for mesh_path, label in zip(mesh_paths, labels):
-            safe_label = label.replace(" ", "_").replace("=", "")
-            outpath = outdir / f"mesh_{safe_label}_{view}.png"
+            safe_label = (
+                label.replace("$", "")
+                .replace("\\", "")
+                .replace(" ", "_")
+                .replace("=", "")
+            )
+            stem_parts = mesh_path.stem.split("_")
+            mesh_base = stem_parts[0]
+            outpath = outdir / f"mesh_{mesh_base}_{safe_label}_{view}.png"
             save_single_mesh_figure(
                 mesh_path,
                 label,

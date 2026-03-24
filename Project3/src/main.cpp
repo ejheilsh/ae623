@@ -1,4 +1,5 @@
 #include "Solver.hpp"
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -55,6 +56,26 @@ int main(int argc, char **argv) {
 
   auto is_flag_token = [](const char *s) {
     return std::string(s).rfind("--", 0) == 0;
+  };
+
+  auto infer_unsteady_restart_time = [](const std::string &filename) -> double {
+    std::string basename = std::filesystem::path(filename).filename().string();
+    const std::string prefix = "results_";
+    if (basename.rfind(prefix, 0) != 0) {
+      return -1.0;
+    }
+    std::size_t start = prefix.size();
+    std::size_t end = basename.find('_', start);
+    if (end == std::string::npos) {
+      return -1.0;
+    }
+    std::string time_token = basename.substr(start, end - start);
+    char *parse_end = nullptr;
+    double t = std::strtod(time_token.c_str(), &parse_end);
+    if (parse_end == time_token.c_str() || *parse_end != '\0') {
+      return -1.0;
+    }
+    return t;
   };
 
   if (argc >= 3 && !is_flag_token(argv[2])) {
@@ -158,6 +179,9 @@ int main(int argc, char **argv) {
       solver.unsteady_save_after = save_after;
       solver.unsteady_save_interval_time = save_interval_time;
       solver.unsteady_checkpoint_interval_time = checkpoint_interval_time;
+      if (!ic_file.empty()) {
+        solver.unsteady_restart_time_override = infer_unsteady_restart_time(ic_file);
+      }
     } else {
       solver.steady_output_dir = output_dir;
       solver.steady_output_prefix = file_prefix;

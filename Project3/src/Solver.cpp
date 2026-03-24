@@ -1713,23 +1713,39 @@ void FiniteVolumeSolver::solveUnsteady(int itercap, double t_end) {
             << " iterations (p=" << p_order << ")..." << std::endl;
   
   // For unsteady, use a global time step (smallest over all cells)
-  current_time = 0.0;
+  current_time = (unsteady_restart_time_override >= 0.0)
+                     ? unsteady_restart_time_override
+                     : 0.0;
   std::vector<std::vector<Vec4>> U_prev_dg = U_dg;  // Store previous solution
   
   // Snapshot saving parameters
   int snapshot_interval = 100;  // Save every N iterations
   int temp_snapshot_interval = 10000;  // Overwrite-only temp save every N iterations
   int snapshot_count = 0;
-  const std::vector<double> hardcoded_save_times = {100.0, 200.0, 300.0};
+  const std::vector<double> hardcoded_save_times = {60.0, 120.0, 150.0, 240.0};
   std::size_t next_hardcoded_save_idx = 0;
-  double next_save_time =
-      (unsteady_save_interval_time > 0.0)
-          ? std::max(unsteady_save_after, unsteady_save_interval_time)
-          : std::numeric_limits<double>::infinity();
-  double next_checkpoint_time =
-      (unsteady_checkpoint_interval_time > 0.0)
-          ? unsteady_checkpoint_interval_time
-          : std::numeric_limits<double>::infinity();
+  while (next_hardcoded_save_idx < hardcoded_save_times.size() &&
+         hardcoded_save_times[next_hardcoded_save_idx] <= current_time + 1e-12) {
+    next_hardcoded_save_idx++;
+  }
+  double next_save_time = std::numeric_limits<double>::infinity();
+  if (unsteady_save_interval_time > 0.0) {
+    double next_time =
+        (std::floor(current_time / unsteady_save_interval_time) + 1.0) *
+        unsteady_save_interval_time;
+    next_save_time = std::max(unsteady_save_after, next_time);
+  }
+  double next_checkpoint_time = std::numeric_limits<double>::infinity();
+  if (unsteady_checkpoint_interval_time > 0.0) {
+    next_checkpoint_time =
+        (std::floor(current_time / unsteady_checkpoint_interval_time) + 1.0) *
+        unsteady_checkpoint_interval_time;
+  }
+
+  if (unsteady_restart_time_override >= 0.0) {
+    std::cout << "Continuing unsteady run from restart time t="
+              << std::fixed << std::setprecision(6) << current_time << std::endl;
+  }
 
   auto save_unsteady_snapshot = [&](const char *reason, int niter) {
     char filename[256];
