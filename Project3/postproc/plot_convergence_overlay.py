@@ -35,6 +35,14 @@ plt.rcParams.update(
 )
 
 
+P_COLORS = {
+    0: "#1f77b4",
+    1: "#d62728",
+    2: "#2ca02c",
+    3: "#000000",
+}
+
+
 def read_residual(path: str) -> np.ndarray:
     with open(path, "rb") as f:
         raw_n = f.read(4)
@@ -86,6 +94,13 @@ def parse_label_from_name(path: str) -> str:
 
     # Generic fallback
     return stem
+
+
+def infer_p_order(label: str):
+    m = re.match(r"^\$p=(\d+)\$$", label)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def resolve_inputs(inputs):
@@ -208,7 +223,9 @@ def main():
                 continue
         if args.xlog:
             x = x + 1
-        plt.plot(x, y, linewidth=1.7, label=label)
+        p_order = infer_p_order(label)
+        color = P_COLORS.get(p_order)
+        plt.plot(x, y, linewidth=1.7, label=label, color=color)
         plotted += 1
 
     output_path = Path(args.output)
