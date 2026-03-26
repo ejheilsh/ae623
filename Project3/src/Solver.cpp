@@ -796,7 +796,12 @@ FiniteVolumeSolver::calcResidual(const std::vector<Vec4> &Un, double time,
     double len = mesh.blengths[i];
 
     FluxResult fr;
-    if (bName == "inflow") {
+    if (freestream_test_mode) {
+      if (fluxname == "hlle")
+        fr = fluxHLLE(Un[eL], Un[eL], n, gamma);
+      else
+        fr = fluxRoe(Un[eL], Un[eL], n, gamma);
+    } else if (bName == "inflow") {
       Vec2 edge_midpoint = (mesh.V[mesh.BE[i].v[0]] + mesh.V[mesh.BE[i].v[1]]) * 0.5;
       double y_pos = edge_midpoint.y;
       Vec4 Ub = subsonicInflow(Un[eL], n, rho0, a0, alpha, gamma, y_pos, time, use_unsteady_wake);
@@ -1164,7 +1169,10 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       if (mesh.E[eL].q_order == 1) {
         Vec2 edge_midpoint = (mesh.V[va] + mesh.V[vb]) * 0.5;
         FluxResult fr;
-        if (bName == "inflow") {
+        if (freestream_test_mode) {
+          if (fluxname == "hlle") fr = fluxHLLE(u_int, u_int, n, gamma);
+          else                     fr = fluxRoe (u_int, u_int, n, gamma);
+        } else if (bName == "inflow") {
           Vec4 Ub = subsonicInflow(u_int, n, rho0, a0, alpha, gamma,
                                    edge_midpoint.y, time, use_unsteady_wake);
           if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n, gamma);
@@ -1200,7 +1208,10 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
             }
           }
           FluxResult fr;
-          if (bName == "inflow") {
+          if (freestream_test_mode) {
+            if (fluxname == "hlle") fr = fluxHLLE(u_int, u_int, n_q, gamma);
+            else                     fr = fluxRoe (u_int, u_int, n_q, gamma);
+          } else if (bName == "inflow") {
             Vec4 Ub = subsonicInflow(u_int, n_q, rho0, a0, alpha, gamma,
                                      edge_geom.x.y, time, use_unsteady_wake);
             if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n_q, gamma);
@@ -1248,7 +1259,10 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
           u_int += Un_dg[eL][j] * phi[j];
 
         FluxResult fr;
-        if (bName == "inflow") {
+        if (freestream_test_mode) {
+          if (fluxname == "hlle") fr = fluxHLLE(u_int, u_int, n_q, gamma);
+          else                     fr = fluxRoe (u_int, u_int, n_q, gamma);
+        } else if (bName == "inflow") {
           Vec4 Ub = subsonicInflow(u_int, n_q, rho0, a0, alpha, gamma,
                                    edge_geom.x.y, time, use_unsteady_wake);
           if (fluxname == "hlle") fr = fluxHLLE(u_int, Ub, n_q, gamma);
@@ -1271,7 +1285,10 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
       if (mesh.E[eL].q_order == 1) {
         const Vec4 &u_int0 = Uavg[eL];
         FluxResult fr0;
-        if (bName == "inflow") {
+        if (freestream_test_mode) {
+          fr0 = (fluxname == "hlle") ? fluxHLLE(u_int0, u_int0, n, gamma)
+                                     : fluxRoe(u_int0, u_int0, n, gamma);
+        } else if (bName == "inflow") {
           Vec2 edge_mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
           Vec4 Ub0 = subsonicInflow(u_int0, n, rho0, a0, alpha, gamma, edge_mid.y, time, use_unsteady_wake);
           fr0 = (fluxname == "hlle") ? fluxHLLE(u_int0, Ub0, n, gamma) : fluxRoe(u_int0, Ub0, n, gamma);

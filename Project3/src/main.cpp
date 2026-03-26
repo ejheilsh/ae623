@@ -10,7 +10,7 @@ int main(int argc, char **argv) {
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <meshfile> [order] [CFL] [fluxname] [itercap] "
-              << "[steady/unsteady] [ic_file] [t_end] "
+              << "[steady/unsteady/freestream] [ic_file] [t_end] "
               << "[--p0-itercap <iters>] "
               << "[--save-after <time>] "
               << "[--save-interval-time <dt_save>] "
@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
               << "\n  CFL           : CFL number [default: 1.0]"
               << "\n  fluxname      : Flux scheme (roe or hlle) [default: roe]"
               << "\n  itercap       : Maximum iterations [default: 1e6]"
-              << "\n  steady/unsteady : Solution mode [default: steady]"
+              << "\n  steady/unsteady/freestream : Solution mode [default: steady]"
               << "\n  ic_file       : Initial condition file (optional)"
               << "\n  t_end         : End time for unsteady (optional, requires ic_file)"
               << "\n  --p0-itercap  : Separate iteration cap for auto-chained p=0 seed solve"
@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
               << "\n  - Output files tagged by order: steady_<mesh>_p<order>_results.bin"
               << "\n  - Full DG coefficients are also written to *_results_dg.bin"
+              << "\n  - freestream mode bypasses physical BCs for preservation testing"
               << std::endl;
     return 1;
   }
@@ -44,6 +45,7 @@ int main(int argc, char **argv) {
   std::string fluxname = "roe";
   int itercap = 1e6;
   bool unsteady = false;
+  bool freestream_mode = false;
   std::string ic_file = "";
   double t_end = -1.0;  // negative means run until itercap
   bool use_mapped_ic = false;
@@ -95,7 +97,9 @@ int main(int argc, char **argv) {
     itercap = std::stoi(argv[5]);
   }
   if (argc >= 7 && !is_flag_token(argv[6])) {
-    unsteady = (std::string(argv[6]) == "unsteady");
+    std::string mode = argv[6];
+    unsteady = (mode == "unsteady");
+    freestream_mode = (mode == "freestream");
   }
   if (argc >= 8 && !is_flag_token(argv[7])) {
     ic_file = argv[7];
@@ -168,6 +172,7 @@ int main(int argc, char **argv) {
     solver.initializeDG();     // Initialize DG structures based on p_order
     solver.CFL = cfl;
     solver.fluxname = fluxname;
+    solver.freestream_test_mode = freestream_mode;
 
     std::string order_tag = "p" + std::to_string(p_order);
     std::string output_dir =
@@ -202,7 +207,7 @@ int main(int argc, char **argv) {
       } else {
         solver.loadInitialCondition(ic_file);
       }
-    } else if (p_order > 0 && !unsteady) {
+    } else if (p_order > 0 && !unsteady && !freestream_mode) {
       // Automatically converge p=0 first, then use as IC for p>0
       int p0_seed_itercap = (p0_itercap > 0) ? p0_itercap : itercap;
       std::cerr << "Auto-chaining: converging p=0 first to seed p=" 
@@ -254,7 +259,8 @@ int main(int argc, char **argv) {
               << " (DG Order p=" << p_order
               << ", CFL: " << cfl << ", Flux: " << fluxname
               << ", IterCap: " << itercap 
-              << ", Mode: " << (unsteady ? "Unsteady" : "Steady")
+              << ", Mode: "
+              << (unsteady ? "Unsteady" : (freestream_mode ? "Freestream" : "Steady"))
               << (t_end > 0.0 ? ", t_end: " + std::to_string(t_end) : "")
               << (unsteady && save_after > 0.0 ? ", save_after: " + std::to_string(save_after) : "")
               << (unsteady && save_interval_time > 0.0 ? ", save_interval_time: " + std::to_string(save_interval_time) : "")

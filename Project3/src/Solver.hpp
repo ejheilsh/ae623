@@ -43,6 +43,7 @@ public:
   double p0;
   double pout;
   double current_time = 0.0;
+  bool freestream_test_mode = false;
 
   FiniteVolumeSolver(const std::string &meshfile);
 
