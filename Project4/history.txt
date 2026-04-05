@@ -1,0 +1,118 @@
+  111  ls
+  112  ls -a
+  113  ls .ssh
+  114  cat ~/.ssh/id_ed25519.pub
+  115  ssh -T git@github.com
+  116  ls -a .ssh/
+  117  ls -a
+  118  ls -a .ssh/
+  119  exit
+  120  ls
+  121  mkdir -p repos
+  122  cd repos/
+  123  ls
+  124  git clone git@github.com:ejheilsh/ae623.git ae623
+  125  cd ae623/
+  126  ls
+  127  git switch Eric-parallel
+  128  ls
+  129  cd Project3/
+  130  ls
+  131  OPENMP=1 ./build.sh
+  132  cat build.sh 
+  133  which g++
+  134  vi build.sh 
+  135  ./build.sh 
+  136  OPENMP=1 ./build.sh
+  137  g++ -O3 -std=c++17 -Wall -fopenmp     src/main.cpp src/State.cpp src/Mesh.cpp src/Fluxes.cpp src/Solver.cpp \
+  138  g++ -O3 -std=c++17 -Wall -fopenmp     src/main.cpp src/State.cpp src/Mesh.cpp src/Fluxes.cpp src/Solver.cpp     -o euler_solver -lstdc++fs
+  139  ls
+  140  vi build.sh 
+  141  OPENMP=1 ./build.sh
+  142  vi Run-script.slurm
+  143  sbatch Run-script.slurm
+  144  squeue -u $USER
+  145  vi Run-script.slurm 
+  146  scancel 45841847
+  147  squeue -u $USER
+  148  sbatch Run-script.slurm
+  149  ls
+  150  cat Run-script.slurm 
+  151  vi Run-script.slurm 
+  152  ls
+  153  squeue -u $USER
+  154  srun Run-script.slurm
+  155  car Run-script.slurm 
+  156  cat Run-script.slurm 
+  157  sbatch Run-script.slurm
+  158  squeue -u $USER
+  159  tail -f log.run 
+  160  sreport -T billing cluster AccountUtilizationByUser Account=aerosp623w26_class Start=2026-03-01 End=now
+  183  git status
+  184  git add build.sh 
+  185  git commit -m "build.sh working on great lakes now"
+  186  git commit
+  187  git push
+  188  git pull
+  189  OPENMP=1 ./build.sh
+  190  vi Run-script.slurm 
+  191  git pull; OPENMP=1 ./build.sh
+  192  vi Run-script.slurm 
+  193  sbatch Run-script.slurm
+  194  tail -f log0.run 
+  195  ls
+  196  tail -f log1.run 
+  197  cat log1.run 
+  198  squeue -u $USER
+  199  tail -f log1.run 
+  200  squeue -u $USER
+  201  tail -f log1.run 
+  202  cat log1.run 
+  203  ls data_steady/
+  204  ls -l data_steady/
+  205  ~sq
+  206  squeue -u $USER
+  207  scancel 45843473
+  208  squeue -u $USER
+  209  vi Run-script.slurm 
+  210  squeue -u $USER
+  211  rm log*.run
+  212  ls
+  213  sbatch --test-only Run-script.slurm
+  214  squeue -u $USER
+  215  sbatch Run-script.slurm
+  216  squeue -u $USER
+  217  scancel 45844260
+  218  squeue -u $USER
+  219  git pull
+  220  OPENMP=1 ./build.sh
+  221  sbatch Run-script.slurm
+  222  squeue -u $USER
+  223  cat Run-script.slurm 
+  224  tail -f ae623_p3-45844315.out 
+  225  cat ae623_p3-45844315.out
+  226  ls
+  227  squeue -u $USER
+  228  cat log0.run
+  229  vi Run-script.slurm 
+  230  cp Run-script.slurm Run-script.slurm-other
+  231  vi Run-script.slurm-other 
+  232  sbatch Run-script.slurm-other
+  233  squeue -u $USER
+  234  tial -f log3.run 
+  235  tail -f log3.run 
+  236  tail -f log0.run 
+  237  exit
+  238  ls
+  239  cd repos/
+  240  ks
+  241  ls
+  242  cd ae623/
+  243  ls
+  244  cd Project3/
+  245  ls
+  246  git add Run-script.slurm-other 
+  247  git commit -m "Run-script for the cluster"
+  248  git push
+  249  history | history.txt
+  250  history > history.txt
