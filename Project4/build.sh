@@ -12,6 +12,8 @@ SOURCES=(
     "$SRC/Mesh.cpp"
     "$SRC/Fluxes.cpp"
     "$SRC/Solver.cpp"
+    "$SRC/Adjoint.cpp"
+    "$SRC/MeshRefinement.cpp"
 )
 
 if [ -n "${CXX:-}" ]; then

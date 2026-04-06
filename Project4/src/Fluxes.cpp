@@ -188,3 +188,104 @@ FluxResult inviscidWallFlux(const Vec4 &Uplus, const Vec2 &n, double gamma) {
   double smax = std::abs(vvecint.dot(n)) + cb;
   return {Fb, smax};
 }
+
+// =====================================================================
+// PROJECT 4 — Flux Jacobians for adjoint solver
+// =====================================================================
+
+FluxJacobianResult fluxRoeJacobian(const Vec4 &UL, const Vec4 &UR,
+                                   const Vec2 &n, double gamma) {
+  FluxJacobianResult J{};
+
+  // FD approach: perturb each component of UL and UR, call fluxRoe, difference.
+  // This is O(8 * cost_of_fluxRoe) — trivial cost.
+  const double eps = 1e-7;
+  FluxResult F0 = fluxRoe(UL, UR, n, gamma);
+
+  // dF/dUL
+  for (int j = 0; j < 4; ++j) {
+    Vec4 ULp = UL;
+    ULp[j] += eps;
+    FluxResult Fp = fluxRoe(ULp, UR, n, gamma);
+    for (int i = 0; i < 4; ++i)
+      J.dFdUL[i][j] = (Fp.F[i] - F0.F[i]) / eps;
+  }
+
+  // dF/dUR
+  for (int j = 0; j < 4; ++j) {
+    Vec4 URp = UR;
+    URp[j] += eps;
+    FluxResult Fp = fluxRoe(UL, URp, n, gamma);
+    for (int i = 0; i < 4; ++i)
+      J.dFdUR[i][j] = (Fp.F[i] - F0.F[i]) / eps;
+  }
+
+  return J;
+}
+
+void wallStateJacobian(const Vec4 &Uplus, const Vec2 &n, double gamma,
+                       double dUbdUi[4][4]) {
+  // Wall state: Ub = [rho, rho*vb_x, rho*vb_y, rhoE]
+  // where vb = v - (v.n)*n  (tangential velocity only)
+  //
+  // In conservative variables:
+  //   Ub[0] = Ui[0]                               (rho)
+  //   Ub[1] = Ui[1] - (Ui[1]*nx + Ui[2]*ny)*nx    (rho*vb_x = rhou - rho*un*nx)
+  //   Ub[2] = Ui[2] - (Ui[1]*nx + Ui[2]*ny)*ny    (rho*vb_y = rhov - rho*un*ny)
+  //   Ub[3] = Ui[3]                               (rhoE)
+  //
+  // Note: rho*un = rhou*nx + rhov*ny, which is linear in conservative vars.
+  // So Ub is LINEAR in Ui, and the Jacobian is constant (no state dependence).
+
+  double nx = n.x, ny = n.y;
+
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j)
+      dUbdUi[i][j] = 0.0;
+
+  // dUb[0]/dUi = [1, 0, 0, 0]
+  dUbdUi[0][0] = 1.0;
+
+  // dUb[1]/dUi[1] = 1 - nx*nx,  dUb[1]/dUi[2] = -nx*ny
+  dUbdUi[1][1] = 1.0 - nx * nx;
+  dUbdUi[1][2] = -nx * ny;
+
+  // dUb[2]/dUi[1] = -ny*nx,  dUb[2]/dUi[2] = 1 - ny*ny
+  dUbdUi[2][1] = -ny * nx;
+  dUbdUi[2][2] = 1.0 - ny * ny;
+
+  // dUb[3]/dUi = [0, 0, 0, 1]
+  dUbdUi[3][3] = 1.0;
+}
+
+void inflowStateJacobian(const Vec4 &Uplus, const Vec2 &n,
+                          double rho0, double a0, double alpha, double gamma,
+                          double dUbdUi[4][4]) {
+  // FD shortcut: perturb each conservative variable, call subsonicInflow, difference.
+  const double eps = 1e-7;
+  Vec4 Ub0 = subsonicInflow(Uplus, n, rho0, a0, alpha, gamma, 0.0, 0.0, false);
+
+  for (int j = 0; j < 4; ++j) {
+    Vec4 Up = Uplus;
+    Up[j] += eps;
+    Vec4 Ubp = subsonicInflow(Up, n, rho0, a0, alpha, gamma, 0.0, 0.0, false);
+    for (int i = 0; i < 4; ++i)
+      dUbdUi[i][j] = (Ubp[i] - Ub0[i]) / eps;
+  }
+}
+
+void outflowStateJacobian(const Vec4 &Uplus, const Vec2 &n,
+                           double pb, double gamma,
+                           double dUbdUi[4][4]) {
+  // FD shortcut: perturb each conservative variable, call subsonicOutflow, difference.
+  const double eps = 1e-7;
+  Vec4 Ub0 = subsonicOutflow(Uplus, n, pb, gamma);
+
+  for (int j = 0; j < 4; ++j) {
+    Vec4 Up = Uplus;
+    Up[j] += eps;
+    Vec4 Ubp = subsonicOutflow(Up, n, pb, gamma);
+    for (int i = 0; i < 4; ++i)
+      dUbdUi[i][j] = (Ubp[i] - Ub0[i]) / eps;
+  }
+}

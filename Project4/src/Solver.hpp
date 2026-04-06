@@ -46,6 +46,7 @@ public:
   bool freestream_test_mode = false;
 
   FiniteVolumeSolver(const std::string &meshfile);
+  FiniteVolumeSolver(const Mesh &m);  // construct from in-memory mesh
 
   void initializeDG();
   void setInitialCondition();
@@ -58,12 +59,52 @@ public:
   void saveSnapshot(const std::string &filename);
   void saveDGSnapshot(const std::string &filename);
 
-private:
+  // ── Project 4: adjoint infrastructure ──────────────────────────────
+
+  // A single 4×4 block in the sparse residual Jacobian dR/dU.
+  // (row, col) are element indices; B is the 4×4 dense block.
+  struct JacobianBlock {
+    int row;   // element whose residual is affected
+    int col;   // element whose state is perturbed
+    double B[4][4];
+  };
+
+  // Assemble the full block-sparse residual Jacobian at the current state.
+  // Works for any p_order.  At p=0 this produces one 4×4 block per
+  // face-neighbor pair plus diagonal blocks.
+  std::vector<JacobianBlock> calcJacobian();
+
+  // Gradient of lift coefficient w.r.t. conservative DOFs: dCl/dU.
+  // Returns one Vec4 per DOF, laid out [nelem][ndof_per_elem].
+  std::vector<std::vector<Vec4>> dCl_dU() const;
+
+  // Inject a p=1 DG solution into the p=2 space on the same mesh.
+  // Used to compute the fine-space residual R_h(U_H^h).
+  std::vector<std::vector<Vec4>> prolongP1toP2(
+      const std::vector<std::vector<Vec4>> &U_p1) const;
+
   struct ResidualResult {
     std::vector<Vec4>   R;
     std::vector<double> sdl;
   };
 
+  // Residuals (public for adjoint FD testing)
+  ResidualResult calcResidual  (const std::vector<Vec4> &Un,
+                                double time = 0.0, bool use_unsteady_wake = false);
+  ResidualResult calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
+                                double time = 0.0, bool use_unsteady_wake = false);
+
+  // Cell average (public for adjoint)
+  Vec4 cellAverage(const std::vector<Vec4> &dofs) const;
+
+  struct QuadRule {
+    int n;
+    std::vector<double> points;
+    std::vector<double> weights;
+  };
+  QuadRule getQuadratureRule(int p_order) const;
+
+private:
   // Mass matrix (reference triangle, inverted once at init)
   std::vector<std::vector<double>> MassMatrixInv;
   double mass_spectral_radius = 2.0;
@@ -72,27 +113,12 @@ private:
   std::vector<double> cellAvgWeights;
 
   void computeMassMatrix();
-  std::vector<double> evaluateBasis    (double xi, double eta, int p);
+  std::vector<double> evaluateBasis    (double xi, double eta, int p) const;
   std::vector<double> evaluateBasisGrad(double xi, double eta, int p);
 
-  struct QuadRule {
-    int n;
-    std::vector<double> points;
-    std::vector<double> weights;
-  };
-  QuadRule getQuadratureRule(int p_order);
-
-  // Residuals
-  ResidualResult calcResidual  (const std::vector<Vec4> &Un,
-                                double time = 0.0, bool use_unsteady_wake = false);
   ResidualResult calcResidualSecondOrder(const std::vector<Vec4> &Un,
                                          bool limited, double time = 0.0,
                                          bool use_unsteady_wake = false);
-  ResidualResult calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
-                                double time = 0.0, bool use_unsteady_wake = false);
-
-  // Cell average
-  Vec4 cellAverage(const std::vector<Vec4> &dofs) const;
 
   // FV helpers (still defined in Solver.cpp)
   std::vector<Vec4> sspRK2(const std::vector<Vec4> &Un,

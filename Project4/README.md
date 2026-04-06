@@ -86,3 +86,36 @@ Then compare entropy plots and force histories across configurations.
 - Wake passing period ≈ 0.018 time units
 - CFL = 0.1-0.3 recommended for stability
 - Run to t ≈ 0.1-0.15 to see multiple wake cycles
+
+## Adjoint-Based Mesh Adaptation (Project 4)
+
+### Usage
+```bash
+./euler_solver <mesh> <order> <CFL> <flux> <maxiter> steady --adjoint-adapt [tol] [max_cycles] [fraction]
+```
+
+**Example:**
+```bash
+./euler_solver grids/base.gri 0 1.0 roe 50000 steady --adjoint-adapt 1e-3 5 0.25
+```
+
+- `tol`: stop when estimated |delta_Cl| < tol (default 1e-3)
+- `max_cycles`: maximum adaptation cycles (default 5)
+- `fraction`: fraction of elements to refine each cycle (default 0.25)
+
+### Tests
+```bash
+# Build and run all 3 tests (flux Jacobian, assembled Jacobian, adjoint sensitivity)
+g++ -O2 -std=c++17 test_results/test_jacobian.cpp src/State.cpp src/Mesh.cpp src/Fluxes.cpp src/Solver.cpp src/Adjoint.cpp src/MeshRefinement.cpp -o test_jacobian.exe -lstdc++fs
+./test_jacobian.exe grids/base.gri
+```
+
+### Implementation Status
+- **Working:** Jacobian assembly, adjoint solve, dCl/dU, sensitivity (psi^T * dR/dalpha), error indicators, prolongation (p→p+1), mesh bisection, solution interpolation
+- **Known issue:** Adaptation cycles after the first may diverge on curved meshes (q=2) because bisection creates straight (q=1) child elements. Use straight meshes (e.g. `coarse.gri`) or implement curved midpoint insertion in `bisectMarkedElements`.
+
+### Key Files
+- `src/Adjoint.cpp` — adjoint solve, sensitivity, error indicators
+- `src/MeshRefinement.cpp` — element marking, longest-edge bisection, solution interpolation
+- `src/Solver.cpp` — `prolongP1toP2` (nodal interpolation for p→p+1)
+- `src/main.cpp` — adaptation loop (search for `--adjoint-adapt`)

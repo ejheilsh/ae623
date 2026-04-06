@@ -1,4 +1,6 @@
 #include "Solver.hpp"
+#include "Adjoint.hpp"
+#include "MeshRefinement.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -55,6 +57,10 @@ int main(int argc, char **argv) {
   double checkpoint_interval_time = -1.0;
   std::string coarse_meshfile = "";
   std::string coarse_statefile = "";
+  bool adjoint_adapt = false;
+  double adjoint_tol = 1e-4;
+  int adapt_max_cycles = 10;
+  double adapt_fraction = 0.25;
 
   auto is_flag_token = [](const char *s) {
     return std::string(s).rfind("--", 0) == 0;
@@ -148,6 +154,18 @@ int main(int argc, char **argv) {
       }
       checkpoint_interval_time = std::stod(argv[i + 1]);
       i += 1;
+    } else if (arg == "--adjoint-adapt") {
+      adjoint_adapt = true;
+      // Optional: --adjoint-adapt <tol> <max_cycles> <fraction>
+      if (i + 1 < argc && !is_flag_token(argv[i + 1])) {
+        adjoint_tol = std::stod(argv[i + 1]); i += 1;
+      }
+      if (i + 1 < argc && !is_flag_token(argv[i + 1])) {
+        adapt_max_cycles = std::stoi(argv[i + 1]); i += 1;
+      }
+      if (i + 1 < argc && !is_flag_token(argv[i + 1])) {
+        adapt_fraction = std::stod(argv[i + 1]); i += 1;
+      }
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
       return 1;
@@ -272,6 +290,67 @@ int main(int argc, char **argv) {
 
     if (unsteady) {
       solver.solveUnsteady(itercap, t_end);
+    } else if (adjoint_adapt) {
+      // ── ADJOINT-BASED h-ADAPTATION LOOP ──────────────────────────
+      for (int cycle = 0; cycle < adapt_max_cycles; ++cycle) {
+        std::cerr << "=== Adaptation cycle " << cycle << " ===" << std::endl;
+        std::cerr << "  Mesh: " << solver.mesh.E.size() << " elements" << std::endl;
+
+        // Step 1: Converge the primal at current p_order
+        if (cycle == 0) {
+          solver.initializeDG();
+          solver.setInitialCondition();
+        } else {
+          // After refinement, U_dg already holds interpolated solution.
+          // Re-init DG internals (mass matrix, quad caches) for new mesh size,
+          // but preserve U_dg.
+          auto U_dg_save = solver.U_dg;
+          solver.initializeDG();
+          solver.U_dg = U_dg_save;
+          solver.U.resize(solver.mesh.E.size());
+          for (size_t e = 0; e < solver.mesh.E.size(); ++e)
+            solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+        }
+        solver.solveSteady(itercap);
+
+        if (!solver.last_steady_converged) {
+          std::cerr << "  Primal did not converge — stopping adaptation." << std::endl;
+          break;
+        }
+
+        // Step 2: Solve the adjoint
+        AdjointSolver adj(solver);
+        adj.solve();
+
+        // Step 3: Compute error indicators via fine-space residual
+        FiniteVolumeSolver fine_solver(solver.mesh);
+        fine_solver.fluxname = solver.fluxname;
+        fine_solver.CFL = solver.CFL;
+        auto indicators = adj.errorIndicators(fine_solver);
+
+        // Step 4: Check convergence
+        double total_error = 0.0;
+        for (double e : indicators) total_error += e;
+        std::cerr << "  Estimated |delta_Cl| = " << total_error << std::endl;
+        if (total_error < adjoint_tol) {
+          std::cerr << "  Converged! Error below tolerance " << adjoint_tol << std::endl;
+          break;
+        }
+
+        // Step 5: Mark and refine
+        auto marked = markByIndicator(indicators, adapt_fraction);
+        int n_marked = 0;
+        for (bool m : marked) if (m) n_marked++;
+        std::cerr << "  Marking " << n_marked << " elements for refinement" << std::endl;
+
+        auto rmap = bisectMarkedElements(solver.mesh, marked);
+
+        // Step 6: Transfer solution to refined mesh
+        solver.U_dg = interpolateSolution(solver.U_dg, rmap, solver.ndof_per_elem);
+        solver.U.resize(solver.mesh.E.size());
+        for (size_t e = 0; e < solver.mesh.E.size(); ++e)
+          solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+      }
     } else {
       solver.solveSteady(itercap);
     }

@@ -1,5 +1,7 @@
+#define _USE_MATH_DEFINES
 #include "Solver.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -104,6 +106,14 @@ FiniteVolumeSolver::FiniteVolumeSolver(const std::string &meshfile) {
   alpha = alpha * M_PI / 180.0;
   
   // For backward compatibility with p=0 (FV mode), allocate U
+  U.resize(mesh.E.size());
+  U0.resize(mesh.E.size());
+}
+
+FiniteVolumeSolver::FiniteVolumeSolver(const Mesh &m) : mesh(m) {
+  p0 = (rho0 * a0 * a0) / gamma;
+  pout = 0.7 * p0;
+  alpha = alpha * M_PI / 180.0;
   U.resize(mesh.E.size());
   U0.resize(mesh.E.size());
 }
@@ -432,7 +442,7 @@ void FiniteVolumeSolver::loadMappedInitialCondition(
 // DG BASIS FUNCTIONS (from shape.c)
 // ═══════════════════════════════════════════════════════════════
 std::vector<double> 
-FiniteVolumeSolver::evaluateBasis(double xi, double eta, int p) {
+FiniteVolumeSolver::evaluateBasis(double xi, double eta, int p) const {
   int ndof = (p+1)*(p+2)/2;
   std::vector<double> phi(ndof);
   
@@ -720,7 +730,7 @@ FiniteVolumeSolver::evaluateBasisGrad(double xi, double eta, int p) {
 // QUADRATURE HELPER FUNCTION
 // ═══════════════════════════════════════════════════════════════
 FiniteVolumeSolver::QuadRule 
-FiniteVolumeSolver::getQuadratureRule(int p_order) {
+FiniteVolumeSolver::getQuadratureRule(int p_order) const {
   QuadRule qr;
   
   // Choose number of points based on polynomial order
@@ -2199,4 +2209,350 @@ bool FiniteVolumeSolver::isPhysicalDG(const std::vector<std::vector<Vec4>> &Un_d
       return false;
   }
   return true;
+}
+
+// =====================================================================
+// PROJECT 4 — Residual Jacobian, output gradient, and prolongation
+// =====================================================================
+
+std::vector<FiniteVolumeSolver::JacobianBlock>
+FiniteVolumeSolver::calcJacobian() {
+  std::vector<JacobianBlock> blocks;
+  int Ne = mesh.E.size();
+
+  // PSEUDO-CODE:
+  //
+  // 1. Allocate diagonal blocks (self-coupling):  one per element.
+  //    Initialize all to zero.
+  //
+  std::vector<std::array<std::array<double,4>,4>> diag(Ne);
+  for (int e = 0; e < Ne; ++e)
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        diag[e][i][j] = 0.0;
+  //
+  // 2. Loop over interior edges (same loop structure as calcResidual / calcResidualDG):
+  //
+  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+    int eL = mesh.IE[i].elemL;
+    int eR = mesh.IE[i].elemR;
+    Vec2 n = mesh.inormals[i];
+    double len = mesh.ilengths[i];
+  
+    // Get left/right cell-average states (for p=0, this is just U[eL], U[eR])
+    Vec4 UL = cellAverage(U_dg[eL]);
+    Vec4 UR = cellAverage(U_dg[eR]);
+  
+    // Compute flux Jacobians
+    FluxJacobianResult fj = fluxRoeJacobian(UL, UR, n, gamma);
+  
+    // Residual convention:  R[eL] += F * len,  R[eR] -= F * len
+    // So:  dR[eL]/dU[eL] += dF/dUL * len     (diagonal)
+    //      dR[eL]/dU[eR] += dF/dUR * len     (off-diagonal)
+    //      dR[eR]/dU[eL] -= dF/dUL * len     (off-diagonal)
+    //      dR[eR]/dU[eR] -= dF/dUR * len     (diagonal)
+
+    // Accumulate diagonal
+    for (int ii = 0; ii < 4; ++ii)
+      for (int jj = 0; jj < 4; ++jj) {
+        diag[eL][ii][jj] += fj.dFdUL[ii][jj] * len;
+        diag[eR][ii][jj] -= fj.dFdUR[ii][jj] * len;
+      }
+  
+    // Push off-diagonal blocks
+    JacobianBlock bLR, bRL;
+    bLR.row = eL; bLR.col = eR;
+    bRL.row = eR; bRL.col = eL;
+    for (int ii = 0; ii < 4; ++ii)
+      for (int jj = 0; jj < 4; ++jj) {
+        bLR.B[ii][jj] = fj.dFdUR[ii][jj] * len;
+        bRL.B[ii][jj] = -fj.dFdUL[ii][jj] * len;
+      }
+    blocks.push_back(bLR);
+    blocks.push_back(bRL);
+  }
+  //
+  // 3. Loop over boundary edges:
+  //
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    int bIdx = mesh.BE[i].bIndex;
+    const std::string &bname = mesh.Bname[bIdx];
+    Vec4 Ui = cellAverage(U_dg[eL]);
+    double eps = 1e-7;
+
+    // For curved elements at p=0, use quadrature to match calcResidualDG
+    if (mesh.E[eL].q_order > 1) {
+      QuadRule bqr = getQuadratureRule(mesh.E[eL].q_order);
+      int va = mesh.BE[i].v[0], vb = mesh.BE[i].v[1];
+
+      if (bname == "wall") {
+        // FD of sum_q inviscidWallFlux(Ui, n_q) * w_q * ds_dt_q
+        // Baseline
+        std::array<double, 4> F0sum = {0,0,0,0};
+        struct QP { Vec2 n; double w; };
+        std::vector<QP> qps(bqr.n);
+        for (int q = 0; q < bqr.n; ++q) {
+          EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, bqr.points[q]);
+          qps[q] = {eg.normal, bqr.weights[q] * eg.ds_dt};
+          FluxResult fr = inviscidWallFlux(Ui, eg.normal, gamma);
+          for (int ii = 0; ii < 4; ++ii) F0sum[ii] += fr.F[ii] * qps[q].w;
+        }
+        for (int jj = 0; jj < 4; ++jj) {
+          Vec4 Uip = Ui; Uip[jj] += eps;
+          std::array<double, 4> Fpsum = {0,0,0,0};
+          for (int q = 0; q < bqr.n; ++q) {
+            FluxResult frp = inviscidWallFlux(Uip, qps[q].n, gamma);
+            for (int ii = 0; ii < 4; ++ii) Fpsum[ii] += frp.F[ii] * qps[q].w;
+          }
+          for (int ii = 0; ii < 4; ++ii)
+            diag[eL][ii][jj] += (Fpsum[ii] - F0sum[ii]) / eps;
+        }
+      } else if (bname == "inflow" || bname == "outflow") {
+        // FD of sum_q F(Ui, Ub(Ui, n_q), n_q) * w_q * ds_dt_q
+        std::array<double, 4> F0sum = {0,0,0,0};
+        struct QP { Vec2 n; double w; };
+        std::vector<QP> qps(bqr.n);
+        for (int q = 0; q < bqr.n; ++q) {
+          EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, bqr.points[q]);
+          qps[q] = {eg.normal, bqr.weights[q] * eg.ds_dt};
+          Vec4 Ub;
+          if (bname == "inflow")
+            Ub = subsonicInflow(Ui, eg.normal, rho0, a0, alpha, gamma, eg.x.y, 0.0, false);
+          else
+            Ub = subsonicOutflow(Ui, eg.normal, pout, gamma);
+          FluxResult fr = fluxRoe(Ui, Ub, eg.normal, gamma);
+          for (int ii = 0; ii < 4; ++ii) F0sum[ii] += fr.F[ii] * qps[q].w;
+        }
+        for (int jj = 0; jj < 4; ++jj) {
+          Vec4 Uip = Ui; Uip[jj] += eps;
+          std::array<double, 4> Fpsum = {0,0,0,0};
+          for (int q = 0; q < bqr.n; ++q) {
+            Vec4 Ub;
+            if (bname == "inflow")
+              Ub = subsonicInflow(Uip, qps[q].n, rho0, a0, alpha, gamma, 0.0, 0.0, false);
+            else
+              Ub = subsonicOutflow(Uip, qps[q].n, pout, gamma);
+            FluxResult frp = fluxRoe(Uip, Ub, qps[q].n, gamma);
+            for (int ii = 0; ii < 4; ++ii) Fpsum[ii] += frp.F[ii] * qps[q].w;
+          }
+          for (int ii = 0; ii < 4; ++ii)
+            diag[eL][ii][jj] += (Fpsum[ii] - F0sum[ii]) / eps;
+        }
+      }
+      continue;  // skip the straight-normal path below
+    }
+
+    // Straight elements: use stored bnormals/blengths
+    Vec2 n = mesh.bnormals[i];
+    double len = mesh.blengths[i];
+  
+    // Compute boundary ghost state and its Jacobian w.r.t. interior
+    if (bname == "wall") {
+      // Wall BC uses inviscidWallFlux directly — FD its Jacobian
+      FluxResult F0 = inviscidWallFlux(Ui, n, gamma);
+      for (int jj = 0; jj < 4; ++jj) {
+        Vec4 Uip = Ui; Uip[jj] += eps;
+        FluxResult Fp = inviscidWallFlux(Uip, n, gamma);
+        for (int ii = 0; ii < 4; ++ii)
+          diag[eL][ii][jj] += (Fp.F[ii] - F0.F[ii]) / eps * len;
+      }
+    } else {
+      double dUbdUi[4][4] = {};
+      Vec4 Ub;
+      if (bname == "inflow") {
+        Ub = subsonicInflow(Ui, n, rho0, a0, alpha, gamma, 0.0, 0.0, false);
+        inflowStateJacobian(Ui, n, rho0, a0, alpha, gamma, dUbdUi);
+      } else if (bname == "outflow") {
+        Ub = subsonicOutflow(Ui, n, pout, gamma);
+        outflowStateJacobian(Ui, n, pout, gamma, dUbdUi);
+      } else {
+        continue;  // skip unknown BC types
+      }
+  
+      // Flux Jacobian with ghost state
+      FluxJacobianResult fj = fluxRoeJacobian(Ui, Ub, n, gamma);
+  
+      // By chain rule:  dF/dUi_total = dF/dUL + dF/dUR * dUb/dUi
+      // Residual convention:  R[eL] += F * len
+      // So:  dR[eL]/dU[eL] += (dF/dUL + dF/dUR * dUb/dUi) * len
+      for (int ii = 0; ii < 4; ++ii)
+        for (int jj = 0; jj < 4; ++jj) {
+          double chain = 0.0;
+          for (int kk = 0; kk < 4; ++kk)
+            chain += fj.dFdUR[ii][kk] * dUbdUi[kk][jj];
+          diag[eL][ii][jj] += (fj.dFdUL[ii][jj] + chain) * len;
+        }
+    }
+  }
+  //
+  // 4. Convert diagonal blocks into JacobianBlock structs and push onto blocks[].
+  //
+  for (int e = 0; e < Ne; ++e) {
+    JacobianBlock b;
+    b.row = e; b.col = e;
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        b.B[i][j] = diag[e][i][j];
+
+    blocks.push_back(b);
+  }
+
+  return blocks;
+}
+
+std::vector<std::vector<Vec4>>
+FiniteVolumeSolver::dCl_dU() const {
+  int Ne = mesh.E.size();
+  std::vector<std::vector<Vec4>> dJ(Ne, std::vector<Vec4>(ndof_per_elem, Vec4{0,0,0,0}));
+
+  // PSEUDO-CODE:
+  //
+  // Cl = (1 / (0.5 * rho_inf * q_inf^2 * c_ref)) * integral_wall p * n_y dS
+  //
+  // where  p = (gamma-1)*(rhoE - 0.5*(rhou^2 + rhov^2)/rho)
+  // and the integral is over all boundary edges tagged "Blade" or "Wall".
+  //
+  // Only elements adjacent to lift-producing walls contribute.
+  //
+  // For p=0 (cell average only, ndof=1):
+  //   dCl/dU[eL][0] accumulates contribution from each wall boundary edge of element eL.
+  //
+  //   For each wall boundary edge with element eL, outward normal n, edge length len:
+  //     // Compute dp/dU (4-component vector):
+  //     //   dp/d(rho)  = 0.5*(gamma-1)*(u^2+v^2)
+  //     //   dp/d(rhou) = -(gamma-1)*u
+  //     //   dp/d(rhov) = -(gamma-1)*v
+  //     //   dp/d(rhoE) = (gamma-1)
+  //     //
+  //     // where u = rhou/rho, v = rhov/rho
+  //     //
+  //     // Contribution to dCl/dU[eL][0]:
+  //     //   dJ[eL][0][k] += (1/normalization) * dp/dU[k] * n.y * len
+  //     //     for k = 0..3
+  //
+  // For p>0 (DG with ndof_per_elem basis functions):
+  //   Each quadrature point along the wall edge evaluates:
+  //     U_h(x_q) = sum_j U_dg[eL][j] * phi_j(x_q)
+  //     dp/dU_j[k] = dp/dU[k] * phi_j(x_q)
+  //     dJ[eL][j][k] += weight_q * dp/dU_j[k] * n.y * ds_dt / normalization
+  //
+  // Normalization: 0.5 * rho_inf * q_inf^2 * chord
+  //   rho_inf and q_inf come from freestream (rho0, Minf, a0)
+  //   chord = 1.0 by convention for the NACA meshes
+
+  // p=0 implementation: loop over wall boundary edges, accumulate dp/dU * n.y * len
+  double qinf = Minf * a0;
+  double normalization = 0.5 * rho0 * qinf * qinf * 1.0;  // chord = 1
+
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL = mesh.BE[i].elemL;
+    int bIdx = mesh.BE[i].bIndex;
+    const std::string &bname = mesh.Bname[bIdx];
+
+    if (bname != "wall") continue;
+
+    Vec4 Uc = cellAverage(U_dg[eL]);
+    double rho = Uc[0], rhou = Uc[1], rhov = Uc[2];
+    double u = rhou / rho, v = rhov / rho;
+
+    double dpdU[4];
+    dpdU[0] =  0.5 * (gamma - 1.0) * (u * u + v * v);
+    dpdU[1] = -(gamma - 1.0) * u;
+    dpdU[2] = -(gamma - 1.0) * v;
+    dpdU[3] =  (gamma - 1.0);
+
+    // For curved elements, use quadrature with curved normals to match calcResidualDG
+    if (mesh.E[eL].q_order > 1) {
+      QuadRule bqr = getQuadratureRule(mesh.E[eL].q_order);
+      int va = mesh.BE[i].v[0], vb = mesh.BE[i].v[1];
+      for (int q = 0; q < bqr.n; ++q) {
+        EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, bqr.points[q]);
+        double coeff = eg.normal.y * bqr.weights[q] * eg.ds_dt / normalization;
+        for (int k = 0; k < 4; ++k)
+          dJ[eL][0][k] += dpdU[k] * coeff;
+      }
+    } else {
+      Vec2 n = mesh.bnormals[i];
+      double len = mesh.blengths[i];
+      double coeff = n.y * len / normalization;
+      for (int k = 0; k < 4; ++k)
+        dJ[eL][0][k] += dpdU[k] * coeff;
+    }
+  }
+
+  return dJ;
+}
+
+std::vector<std::vector<Vec4>>
+FiniteVolumeSolver::prolongP1toP2(
+    const std::vector<std::vector<Vec4>> &U_p1) const {
+  // p=1 has ndof = 3 basis functions per element.
+  // p=2 has ndof = 6 basis functions per element.
+  // General: prolong current p to p+1.
+  int p_fine = p_order + 1;
+  int ndof_fine = (p_fine + 1) * (p_fine + 2) / 2;
+  int Ne = mesh.E.size();
+  std::vector<std::vector<Vec4>> U_p2(Ne, std::vector<Vec4>(ndof_fine, Vec4{0,0,0,0}));
+
+  // PSEUDO-CODE:
+  //
+  // For each element e:
+  //   The p=1 solution within element e is:
+  //     U_h(xi, eta) = sum_{j=0}^{2} U_p1[e][j] * phi1_j(xi, eta)
+  //   where phi1_j are the p=1 basis functions on the reference triangle.
+  //
+  //   To inject into p=2, we need to find the p=2 coefficients such that
+  //   the p=2 representation matches the p=1 solution exactly at the p=2
+  //   interpolation nodes, OR equivalently do an L2 projection:
+  //
+  //   M2 * U_p2[e] = integral phi2_i(xi,eta) * U_h(xi,eta) dA
+  //                 = sum_j U_p1[e][j] * integral phi2_i * phi1_j dA
+  //
+  //   where M2 is the p=2 mass matrix and the right side is a rectangular
+  //   mass-like coupling matrix.
+  //
+  //   Simplification: Since p=1 ⊂ p=2 (the p=1 space is a subspace of p=2),
+  //   the first 3 p=2 basis functions are the same as the p=1 basis functions
+  //   (they share the same polynomial space on the reference triangle).
+  //   So for a nodal basis:
+  //     U_p2[e][j] = U_p1[e][j]   for j = 0, 1, 2
+  //     U_p2[e][j] = 0            for j = 3, 4, 5  (the higher modes)
+  //
+  //   For a modal/hierarchical basis, this is exact injection.
+  //   For a non-hierarchical (e.g. Lagrange) basis, you need the L2 projection.
+  //
+  //   Check which basis type your evaluateBasis() uses and choose accordingly.
+
+  // Nodal interpolation: evaluate coarse solution at the fine interpolation nodes.
+  // Reference triangle nodes for each order:
+  struct RefNode { double xi, eta; };
+  std::vector<RefNode> fine_nodes;
+  if (p_fine == 1) {
+    fine_nodes = {{0,0},{1,0},{0,1}};
+  } else if (p_fine == 2) {
+    fine_nodes = {{0,0},{1,0},{0,1},{0.5,0.5},{0,0.5},{0.5,0}};
+  } else if (p_fine == 3) {
+    fine_nodes = {{0,0},{1,0},{0,1},
+                  {2.0/3,1.0/3},{1.0/3,2.0/3},
+                  {0,1.0/3},{0,2.0/3},
+                  {1.0/3,0},{2.0/3,0},
+                  {1.0/3,1.0/3}};
+  } else {
+    std::cerr << "prolongP1toP2: p_fine=" << p_fine << " not supported" << std::endl;
+    return U_p2;
+  }
+
+  int ndof_coarse = ndof_per_elem;
+  for (int e = 0; e < Ne; ++e) {
+    for (int j = 0; j < ndof_fine; ++j) {
+      auto phi = evaluateBasis(fine_nodes[j].xi, fine_nodes[j].eta, p_order);
+      Vec4 val{0,0,0,0};
+      for (int d = 0; d < ndof_coarse; ++d)
+        val = val + U_p1[e][d] * phi[d];
+      U_p2[e][j] = val;
+    }
+  }
+
+  return U_p2;
 }
