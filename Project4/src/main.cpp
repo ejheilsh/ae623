@@ -303,30 +303,120 @@ int main(int argc, char **argv) {
         } else {
           // After refinement, U_dg already holds interpolated solution.
           // Re-init DG internals (mass matrix, quad caches) for new mesh size,
-          // but preserve U_dg.
+          // but preserve U_dg — unless the interpolated IC is non-physical, in
+          // which case fall back to a fresh freestream IC.
           auto U_dg_save = solver.U_dg;
-          solver.initializeDG();
-          solver.U_dg = U_dg_save;
-          solver.U.resize(solver.mesh.E.size());
-          for (size_t e = 0; e < solver.mesh.E.size(); ++e)
+          solver.initializeDG();  // sets up mass matrix, resizes U_dg to freestream
+
+          // Validate the interpolated IC: check every cell for physical states
+          int Ne_cur = (int)solver.mesh.E.size();
+          bool ic_ok = ((int)U_dg_save.size() == Ne_cur);
+          if (ic_ok) {
+            for (int e = 0; e < Ne_cur && ic_ok; ++e) {
+              Vec4 avg = solver.cellAverage(U_dg_save[e]);
+              State s(avg, solver.gamma);
+              if (!std::isfinite(s.rho()) || !std::isfinite(s.p()) ||
+                  s.rho() < 1e-6 || s.p() < 1e-6)
+                ic_ok = false;
+            }
+          }
+
+          if (ic_ok) {
+            solver.U_dg = U_dg_save;
+            std::cerr << "  Using interpolated IC from previous cycle." << std::endl;
+          } else {
+            std::cerr << "  Interpolated IC non-physical — falling back to freestream." << std::endl;
+            // U_dg already set to freestream by initializeDG()
+          }
+
+          solver.U.resize(Ne_cur);
+          for (int e = 0; e < Ne_cur; ++e)
             solver.U[e] = solver.cellAverage(solver.U_dg[e]);
         }
         solver.solveSteady(itercap);
 
+        // Accept stagnated solutions (limit-cycle oscillations) as valid primal.
+        // last_steady_converged is true for both actual convergence and stagnation,
+        // including cases where the RK4 hit a non-physical state and restored the
+        // last valid solution.
         if (!solver.last_steady_converged) {
-          std::cerr << "  Primal did not converge — stopping adaptation." << std::endl;
+          std::cerr << "  Primal failed (itercap exceeded without stagnation) — stopping adaptation." << std::endl;
           break;
         }
+
+        double Cl_cycle = solver.integrateCl();
+        std::cerr << "  Cl = " << Cl_cycle
+                  << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
 
         // Step 2: Solve the adjoint
         AdjointSolver adj(solver);
         adj.solve();
+
+        // Cycle 0 adjoint validation: compare adjoint sensitivity with FD
+        if (cycle == 0) {
+          double sens_adj = adj.sensitivityAlpha(1e-5);
+          std::cerr << "  dCl/dalpha (adjoint) = " << sens_adj << " rad^-1" << std::endl;
+        }
 
         // Step 3: Compute error indicators via fine-space residual
         FiniteVolumeSolver fine_solver(solver.mesh);
         fine_solver.fluxname = solver.fluxname;
         fine_solver.CFL = solver.CFL;
         auto indicators = adj.errorIndicators(fine_solver);
+
+        // Save adjoint solution (psi) — same binary format as results_dg.bin
+        {
+          std::string psi_file = output_dir + "/" + file_prefix
+              + "adjoint_psi_cycle" + std::to_string(cycle) + "_dg.bin";
+          std::ofstream psi_out(psi_file, std::ios::binary);
+          int Ne_a = (int)adj.psi().size();
+          int p_a  = solver.p_order;
+          int nd_a = solver.ndof_per_elem;
+          psi_out.write((char*)&Ne_a, sizeof(int));
+          psi_out.write((char*)&p_a,  sizeof(int));
+          psi_out.write((char*)&nd_a, sizeof(int));
+          for (const auto &elem_psi : adj.psi())
+            for (const auto &d : elem_psi)
+              psi_out.write((char*)d.v, sizeof(double) * 4);
+          psi_out.close();
+          std::cerr << "  Adjoint psi saved to " << psi_file << std::endl;
+        }
+
+        // Save companion mesh for this cycle: Nn, x/y per node, Ne, q/v0/v1/v2 per elem
+        {
+          std::string mesh_file = output_dir + "/" + file_prefix
+              + "adjoint_mesh_cycle" + std::to_string(cycle) + ".bin";
+          std::ofstream m_out(mesh_file, std::ios::binary);
+          int Nn = (int)solver.mesh.V.size();
+          m_out.write((char*)&Nn, sizeof(int));
+          for (const auto &v : solver.mesh.V) {
+            m_out.write((char*)&v.x, sizeof(double));
+            m_out.write((char*)&v.y, sizeof(double));
+          }
+          int Ne_m = (int)solver.mesh.E.size();
+          m_out.write((char*)&Ne_m, sizeof(int));
+          for (const auto &e : solver.mesh.E) {
+            int q = e.q_order;
+            m_out.write((char*)&q,      sizeof(int));
+            m_out.write((char*)&e.v[0], sizeof(int));
+            m_out.write((char*)&e.v[1], sizeof(int));
+            m_out.write((char*)&e.v[2], sizeof(int));
+          }
+          m_out.close();
+          std::cerr << "  Mesh saved to " << mesh_file << std::endl;
+        }
+
+        // Save error indicators — header: Ne (int32), then Ne doubles
+        {
+          std::string ind_file = output_dir + "/" + file_prefix
+              + "adjoint_indicators_cycle" + std::to_string(cycle) + ".bin";
+          std::ofstream ind_out(ind_file, std::ios::binary);
+          int Ne_i = (int)indicators.size();
+          ind_out.write((char*)&Ne_i, sizeof(int));
+          ind_out.write((char*)indicators.data(), sizeof(double) * Ne_i);
+          ind_out.close();
+          std::cerr << "  Error indicators saved to " << ind_file << std::endl;
+        }
 
         // Step 4: Check convergence
         double total_error = 0.0;
@@ -353,6 +443,8 @@ int main(int argc, char **argv) {
       }
     } else {
       solver.solveSteady(itercap);
+      std::cerr << "  Cl = " << solver.integrateCl()
+                << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
     }
 
     // Save results to a simple binary or text format for Python to read

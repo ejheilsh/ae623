@@ -74,6 +74,9 @@ public:
   // face-neighbor pair plus diagonal blocks.
   std::vector<JacobianBlock> calcJacobian();
 
+  // Lift coefficient integrated from wall pressure.
+  double integrateCl() const;
+
   // Gradient of lift coefficient w.r.t. conservative DOFs: dCl/dU.
   // Returns one Vec4 per DOF, laid out [nelem][ndof_per_elem].
   std::vector<std::vector<Vec4>> dCl_dU() const;

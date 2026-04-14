@@ -26,17 +26,60 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
   RefinementMap rmap;
   std::vector<bool> marked = marked_in;  // mutable local copy
 
-  // ── Phase 1: Propagate marks across shared edges for conformity ──
-  //    If a marked element shares an internal edge with an unmarked one,
-  //    mark the neighbor too.  Repeat until stable.
+  // ── Phase 1: Propagate marks for conformity (longest-edge bisection) ──
+  //    A marked element e is bisected along its longest edge.  If that edge
+  //    is shared with an unmarked neighbor n, then n also needs bisection
+  //    to avoid a hanging node — BUT only if the shared edge is ALSO the
+  //    longest edge of n (otherwise the neighbor's bisection would split a
+  //    different edge and the hanging node persists).  Propagate until stable.
+  //
+  //    Helper: check if a given edge (va,vb) is the longest edge of element e.
+  auto isLongestEdge = [&](int e, int va, int vb) -> bool {
+    int v0 = mesh.E[e].v[0], v1 = mesh.E[e].v[1], v2 = mesh.E[e].v[2];
+    double len01 = (mesh.V[v1] - mesh.V[v0]).norm();
+    double len12 = (mesh.V[v2] - mesh.V[v1]).norm();
+    double len20 = (mesh.V[v0] - mesh.V[v2]).norm();
+    double longestLen = std::max({len01, len12, len20});
+    double edgeLen = (mesh.V[vb] - mesh.V[va]).norm();
+    return edgeLen >= longestLen - 1e-14;
+  };
+
+  auto longestEdgeOf = [&](int e) -> std::pair<int,int> {
+    int v0 = mesh.E[e].v[0], v1 = mesh.E[e].v[1], v2 = mesh.E[e].v[2];
+    double len01 = (mesh.V[v1] - mesh.V[v0]).norm();
+    double len12 = (mesh.V[v2] - mesh.V[v1]).norm();
+    double len20 = (mesh.V[v0] - mesh.V[v2]).norm();
+    int va, vb;
+    if (len01 >= len12 && len01 >= len20) { va = v0; vb = v1; }
+    else if (len12 >= len01 && len12 >= len20) { va = v1; vb = v2; }
+    else { va = v2; vb = v0; }
+    return {std::min(va,vb), std::max(va,vb)};
+  };
+
   bool changed = true;
   while (changed) {
     changed = false;
     for (int i = 0; i < (int)mesh.IE.size(); ++i) {
       int eL = mesh.IE[i].elemL;
       int eR = mesh.IE[i].elemR;
-      if (marked[eL] && !marked[eR]) { marked[eR] = true; changed = true; }
-      if (marked[eR] && !marked[eL]) { marked[eL] = true; changed = true; }
+      int sv0 = mesh.IE[i].v[0], sv1 = mesh.IE[i].v[1];
+      // If eL is marked and eR is not: mark eR only if the shared edge
+      // is the longest edge of eL (so eL WILL be bisected along it)
+      // AND the shared edge is also the longest edge of eR.
+      if (marked[eL] && !marked[eR]) {
+        auto leL = longestEdgeOf(eL);
+        auto sharedKey = std::make_pair(std::min(sv0,sv1), std::max(sv0,sv1));
+        if (leL == sharedKey && isLongestEdge(eR, sv0, sv1)) {
+          marked[eR] = true; changed = true;
+        }
+      }
+      if (marked[eR] && !marked[eL]) {
+        auto leR = longestEdgeOf(eR);
+        auto sharedKey = std::make_pair(std::min(sv0,sv1), std::max(sv0,sv1));
+        if (leR == sharedKey && isLongestEdge(eL, sv0, sv1)) {
+          marked[eL] = true; changed = true;
+        }
+      }
     }
   }
 
@@ -52,6 +95,28 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
   int old_Ne = mesh.E.size();
   rmap.child_to_parent.resize(old_Ne);
   for (int e = 0; e < old_Ne; ++e) rmap.child_to_parent[e] = e;
+
+  // ── Pre-pass: collect curved edge midpoints from all q=2 elements ───────
+  // For a q=2 element with ho_nodes in GRI order, the curved midpoints are:
+  //   edge (v[0],v[1]) → V[ho_nodes[1]]
+  //   edge (v[1],v[2]) → V[ho_nodes[4]]
+  //   edge (v[0],v[2]) → V[ho_nodes[3]]
+  // Storing these before bisection lets us place new bisection vertices ON the
+  // actual curved boundary instead of at the straight arithmetic average.
+  std::map<std::pair<int,int>, Vec2> curved_edge_midpoint;
+  for (int e = 0; e < old_Ne; ++e) {
+    if (mesh.E[e].q_order < 2 || mesh.E[e].ho_nodes.size() < 6) continue;
+    int v0 = mesh.E[e].v[0], v1 = mesh.E[e].v[1], v2 = mesh.E[e].v[2];
+    const auto &hn = mesh.E[e].ho_nodes;
+    auto add = [&](int a, int b, int mid_hn) {
+      auto key = std::make_pair(std::min(a,b), std::max(a,b));
+      if (!curved_edge_midpoint.count(key))
+        curved_edge_midpoint[key] = mesh.V[hn[mid_hn]];
+    };
+    add(v0, v1, 1);   // midpoint of edge v[0]–v[1] lives at ho_nodes[1]
+    add(v1, v2, 4);   // midpoint of edge v[1]–v[2] lives at ho_nodes[4]
+    add(v0, v2, 3);   // midpoint of edge v[0]–v[2] lives at ho_nodes[3]
+  }
 
   std::map<std::pair<int,int>, int> edge_midpoint;  // sorted edge → midpoint vertex
 
@@ -76,7 +141,12 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       vm = edge_midpoint[edge_key];
     } else {
       vm = (int)mesh.V.size();
-      mesh.V.push_back((mesh.V[va] + mesh.V[vb]) * 0.5);
+      // Use the actual curved midpoint if available (from a q=2 parent element),
+      // otherwise fall back to the straight arithmetic average.
+      if (curved_edge_midpoint.count(edge_key))
+        mesh.V.push_back(curved_edge_midpoint[edge_key]);
+      else
+        mesh.V.push_back((mesh.V[va] + mesh.V[vb]) * 0.5);
       edge_midpoint[edge_key] = vm;
       rmap.new_vertex_edges.push_back({va, vb});
 

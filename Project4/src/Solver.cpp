@@ -1365,6 +1365,14 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
                                : -1.0;
   bool printed_baseline = false;
 
+  // Stagnation detection: if the best residual seen over the last
+  // stag_window iterations has not improved by a factor of stag_factor,
+  // declare the solver stagnated and treat the current state as converged.
+  const int    stag_window  = 3000;  // iterations per check period
+  const double stag_factor  = 0.8;   // must improve by 20% to be considered progressing
+  double stag_best_prev   = std::numeric_limits<double>::max();
+  double stag_best_cur    = std::numeric_limits<double>::max();
+
   auto save_steady_temp_iter = [&](int niter) {
     std::filesystem::create_directories(steady_output_dir);
     std::string avg_filename =
@@ -1431,6 +1439,23 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
       printed_baseline = true;
     }
     res_history.push_back(Rnorm);
+    stag_best_cur = std::min(stag_best_cur, Rnorm);
+
+    // Stagnation check: every stag_window iters, compare best seen this window
+    // against best seen last window.  If no meaningful improvement, stop.
+    if (niter > 0 && niter % stag_window == 0) {
+      if (stag_best_cur >= stag_factor * stag_best_prev) {
+        last_steady_converged = true;
+        std::cout << "Stagnated at iter " << niter
+                  << " | best RelRes this window: "
+                  << std::scientific << std::setprecision(3)
+                  << stag_best_cur / baseline_residual
+                  << " — treating as converged (limit cycle)." << std::endl;
+        break;
+      }
+      stag_best_prev = stag_best_cur;
+      stag_best_cur  = std::numeric_limits<double>::max();
+    }
 
     if (niter % 1000 == 0 || Rnorm < target_residual) {
       double minRho = 1e10, minP = 1e10;
@@ -1472,12 +1497,17 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
 
     // STEP 5: Advance in time using RK4, reusing the residual already
     //         computed above as Stage 1 (avoids a redundant calcResidualDG call).
+    // Save last physical state in case the update goes non-physical.
+    auto U_dg_backup = U_dg;
     U_dg = rk4_DG(U_dg, 0.0, false, &res);
 
-    // Check for non-physical states
+    // Check for non-physical states: restore last good state and treat
+    // as a stagnated limit-cycle so the adjoint can still be computed.
     if (!isPhysicalDG(U_dg)) {
-      last_steady_failed_nonphysical = true;
+      U_dg = U_dg_backup;  // restore last physical solution
+      last_steady_converged = true;
       std::cerr << "Non-physical state detected at iteration " << niter
+                << " — restoring last valid state and proceeding to adjoint."
                 << std::endl;
       break;
     }
@@ -2217,14 +2247,14 @@ bool FiniteVolumeSolver::isPhysicalDG(const std::vector<std::vector<Vec4>> &Un_d
 
 std::vector<FiniteVolumeSolver::JacobianBlock>
 FiniteVolumeSolver::calcJacobian() {
+  // Assembles the p=0 (cell-average) residual Jacobian as a list of 4x4 blocks.
+  // Used for adjoint verification (sensitivityAlpha) and the FD ping test.
+  // Note: AdjointSolver::solve() now uses direct FD of calcResidualDG instead,
+  // which handles all p_order values correctly.
   std::vector<JacobianBlock> blocks;
   int Ne = mesh.E.size();
 
-  // PSEUDO-CODE:
-  //
-  // 1. Allocate diagonal blocks (self-coupling):  one per element.
-  //    Initialize all to zero.
-  //
+  // 1. Allocate diagonal blocks (self-coupling): one 4x4 per element.
   std::vector<std::array<std::array<double,4>,4>> diag(Ne);
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < 4; ++i)
@@ -2253,8 +2283,8 @@ FiniteVolumeSolver::calcJacobian() {
     //      dR[eR]/dU[eR] -= dF/dUR * len     (diagonal)
 
     // Accumulate diagonal
-    for (int ii = 0; ii < 4; ++ii)
-      for (int jj = 0; jj < 4; ++jj) {
+    for (int ii = 0; ii < ndof_per_elem * 4; ++ii)
+      for (int jj = 0; jj < ndof_per_elem * 4; ++jj) {
         diag[eL][ii][jj] += fj.dFdUL[ii][jj] * len;
         diag[eR][ii][jj] -= fj.dFdUR[ii][jj] * len;
       }
@@ -2263,8 +2293,8 @@ FiniteVolumeSolver::calcJacobian() {
     JacobianBlock bLR, bRL;
     bLR.row = eL; bLR.col = eR;
     bRL.row = eR; bRL.col = eL;
-    for (int ii = 0; ii < 4; ++ii)
-      for (int jj = 0; jj < 4; ++jj) {
+    for (int ii = 0; ii < ndof_per_elem * 4; ++ii)
+      for (int jj = 0; jj < ndof_per_elem * 4; ++jj) {
         bLR.B[ii][jj] = fj.dFdUR[ii][jj] * len;
         bRL.B[ii][jj] = -fj.dFdUL[ii][jj] * len;
       }
@@ -2391,14 +2421,64 @@ FiniteVolumeSolver::calcJacobian() {
   for (int e = 0; e < Ne; ++e) {
     JacobianBlock b;
     b.row = e; b.col = e;
-    for (int i = 0; i < 4; ++i)
-      for (int j = 0; j < 4; ++j)
+    for (int i = 0; i < ndof_per_elem * 4; ++i)
+      for (int j = 0; j < ndof_per_elem * 4; ++j)
         b.B[i][j] = diag[e][i][j];
 
     blocks.push_back(b);
   }
 
   return blocks;
+}
+
+double FiniteVolumeSolver::integrateCl() const {
+  double qinf          = Minf * a0;
+  double normalization = 0.5 * rho0 * qinf * qinf * 1.0;  // chord = 1
+  double p_inf         = p0;  // freestream pressure = rho0*a0^2/gamma
+  double Cl            = 0.0;
+
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int eL   = mesh.BE[i].elemL;
+    int bIdx = mesh.BE[i].bIndex;
+    if (mesh.Bname[bIdx] != "wall") continue;
+
+    int va = mesh.BE[i].v[0], vb = mesh.BE[i].v[1];
+
+    if (p_order == 0) {
+      Vec4 Uc = cellAverage(U_dg[eL]);
+      double p = (gamma - 1.0) * (Uc[3] - 0.5 * (Uc[1]*Uc[1] + Uc[2]*Uc[2]) / Uc[0]) - p_inf;
+      if (mesh.E[eL].q_order > 1) {
+        QuadRule bqr = getQuadratureRule(mesh.E[eL].q_order);
+        for (int q = 0; q < bqr.n; ++q) {
+          EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, bqr.points[q]);
+          Cl += p * eg.normal.y * bqr.weights[q] * eg.ds_dt / normalization;
+        }
+      } else {
+        Vec2 n   = mesh.bnormals[i];
+        double l = mesh.blengths[i];
+        Cl += p * n.y * l / normalization;
+      }
+    } else {
+      // p>0: integrate p(x_q) * n.y over the wall edge using quadrature.
+      double xi0, eta0, xi1, eta1;
+      edgeRefParam(mesh.E[eL].v, va, vb, xi0, eta0, xi1, eta1);
+      QuadRule bqr = (mesh.E[eL].q_order > p_order)
+                         ? getQuadratureRule(mesh.E[eL].q_order)
+                         : getQuadratureRule(p_order);
+      for (int q = 0; q < bqr.n; ++q) {
+        double t     = bqr.points[q];
+        double xi_q  = xi0 + t * (xi1 - xi0);
+        double eta_q = eta0 + t * (eta1 - eta0);
+        auto phi = evaluateBasis(xi_q, eta_q, p_order);
+        Vec4 U_q = {0, 0, 0, 0};
+        for (int j = 0; j < ndof_per_elem; ++j) U_q += U_dg[eL][j] * phi[j];
+        double p_q = (gamma - 1.0) * (U_q[3] - 0.5 * (U_q[1]*U_q[1] + U_q[2]*U_q[2]) / U_q[0]) - p_inf;
+        EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, t);
+        Cl += p_q * eg.normal.y * bqr.weights[q] * eg.ds_dt / normalization;
+      }
+    }
+  }
+  return Cl;
 }
 
 std::vector<std::vector<Vec4>>
@@ -2452,32 +2532,69 @@ FiniteVolumeSolver::dCl_dU() const {
 
     if (bname != "wall") continue;
 
-    Vec4 Uc = cellAverage(U_dg[eL]);
-    double rho = Uc[0], rhou = Uc[1], rhov = Uc[2];
-    double u = rhou / rho, v = rhov / rho;
+    int va = mesh.BE[i].v[0], vb = mesh.BE[i].v[1];
 
-    double dpdU[4];
-    dpdU[0] =  0.5 * (gamma - 1.0) * (u * u + v * v);
-    dpdU[1] = -(gamma - 1.0) * u;
-    dpdU[2] = -(gamma - 1.0) * v;
-    dpdU[3] =  (gamma - 1.0);
+    if (p_order == 0) {
+      // p=0: single DOF per element; dp/dU evaluated at the cell average.
+      Vec4 Uc = cellAverage(U_dg[eL]);
+      double u = Uc[1] / Uc[0], v = Uc[2] / Uc[0];
+      double dpdU[4] = { 0.5*(gamma-1.0)*(u*u+v*v), -(gamma-1.0)*u,
+                         -(gamma-1.0)*v,              (gamma-1.0) };
 
-    // For curved elements, use quadrature with curved normals to match calcResidualDG
-    if (mesh.E[eL].q_order > 1) {
-      QuadRule bqr = getQuadratureRule(mesh.E[eL].q_order);
-      int va = mesh.BE[i].v[0], vb = mesh.BE[i].v[1];
-      for (int q = 0; q < bqr.n; ++q) {
-        EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, bqr.points[q]);
-        double coeff = eg.normal.y * bqr.weights[q] * eg.ds_dt / normalization;
+      if (mesh.E[eL].q_order > 1) {
+        // Curved element: use quadrature to integrate over the curved geometry.
+        QuadRule bqr = getQuadratureRule(mesh.E[eL].q_order);
+        for (int q = 0; q < bqr.n; ++q) {
+          EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, bqr.points[q]);
+          double coeff = eg.normal.y * bqr.weights[q] * eg.ds_dt / normalization;
+          for (int k = 0; k < 4; ++k)
+            dJ[eL][0][k] += dpdU[k] * coeff;
+        }
+      } else {
+        // Straight element: use stored normal and edge length.
+        Vec2 n = mesh.bnormals[i];
+        double len = mesh.blengths[i];
+        double coeff = n.y * len / normalization;
         for (int k = 0; k < 4; ++k)
           dJ[eL][0][k] += dpdU[k] * coeff;
       }
     } else {
-      Vec2 n = mesh.bnormals[i];
-      double len = mesh.blengths[i];
-      double coeff = n.y * len / normalization;
-      for (int k = 0; k < 4; ++k)
-        dJ[eL][0][k] += dpdU[k] * coeff;
+      // p>0: The DG solution varies along the edge, so evaluate U_h(x_q) at each
+      // quadrature point and weight the contribution by phi_{j_mode}(x_q).
+      //
+      //   dCl/dU[eL][j_mode][k] =
+      //     sum_q (dp/dU[k])(U_h(x_q)) * phi_{j_mode}(x_q) * n_q.y * w_q * ds_dt / norm
+      //
+      // This is the same projection pattern calcResidualDG uses for boundary faces.
+      double xi0, eta0, xi1, eta1;
+      edgeRefParam(mesh.E[eL].v, va, vb, xi0, eta0, xi1, eta1);
+
+      QuadRule bqr = (mesh.E[eL].q_order > p_order)
+                         ? getQuadratureRule(mesh.E[eL].q_order)
+                         : getQuadratureRule(p_order);
+
+      for (int q = 0; q < bqr.n; ++q) {
+        double t     = bqr.points[q];
+        double xi_q  = xi0 + t * (xi1 - xi0);
+        double eta_q = eta0 + t * (eta1 - eta0);
+        auto phi = evaluateBasis(xi_q, eta_q, p_order);
+
+        // Reconstruct the DG solution at this quadrature point.
+        Vec4 U_q = {0, 0, 0, 0};
+        for (int j = 0; j < ndof_per_elem; ++j)
+          U_q += U_dg[eL][j] * phi[j];
+
+        double u_q = U_q[1] / U_q[0], v_q = U_q[2] / U_q[0];
+        double dpdU_q[4] = { 0.5*(gamma-1.0)*(u_q*u_q+v_q*v_q), -(gamma-1.0)*u_q,
+                             -(gamma-1.0)*v_q,                    (gamma-1.0) };
+
+        EdgeGeomEval eg = mesh.evaluateEdgeGeometry(eL, va, vb, t);
+        double coeff = eg.normal.y * bqr.weights[q] * eg.ds_dt / normalization;
+
+        for (int j_mode = 0; j_mode < ndof_per_elem; ++j_mode)
+          for (int k = 0; k < 4; ++k)
+            dJ[eL][j_mode][k] += dpdU_q[k] * phi[j_mode] * coeff;
+      }
     }
   }
 

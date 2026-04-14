@@ -119,3 +119,30 @@ g++ -O2 -std=c++17 test_results/test_jacobian.cpp src/State.cpp src/Mesh.cpp src
 - `src/MeshRefinement.cpp` — element marking, longest-edge bisection, solution interpolation
 - `src/Solver.cpp` — `prolongP1toP2` (nodal interpolation for p→p+1)
 - `src/main.cpp` — adaptation loop (search for `--adjoint-adapt`)
+
+
+## Quick Start (Windows)
+
+Run the adjoint-based adaptive solver on the baseline curved mesh:
+
+```powershell
+# Arguments: <mesh> <p_order> <CFL> <flux> <max_iter> steady --adjoint-adapt <tol> <max_cycles> <refine_fraction>
+#   p_order=0          → piecewise-constant (DG p=0)
+#   CFL=1.0            → time step scaling
+#   flux=roe           → Roe upwind flux
+#   max_iter=200000    → iteration budget per cycle
+#   tol=1e-3           → stop when estimated |ΔCl| < tol
+#   max_cycles=5       → run up to 5 adaptation cycles
+#   refine_fraction=0.25 → refine the top 25% of elements by error indicator
+.\euler_solver.exe grids/base.gri 0 1.0 roe 200000 steady --adjoint-adapt 1e-3 5 0.25
+```
+
+Results are saved per-cycle to `data_steady/`. Plot the adjoint field and error indicators for any cycle:
+
+```powershell
+# Cycle 0 (89 elements)
+python postproc/plot_adjoint.py data_steady 0
+
+# Cycle 1 (178 elements), etc.
+python postproc/plot_adjoint.py data_steady 1
+```
