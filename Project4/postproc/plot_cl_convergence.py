@@ -126,6 +126,13 @@ def plot_effectivity(adapt_log, out_path):
         print("No effectivity data found.")
         return
 
+    # Clamp zeros to a small floor so log scale doesn't break
+    estimated = np.array(estimated)
+    actual = np.array(actual)
+    floor = 1e-15
+    estimated = np.maximum(estimated, floor)
+    actual = np.maximum(actual, floor)
+
     fig, ax = plt.subplots(figsize=(7, 5))
     x = np.arange(len(estimated))
     ax.semilogy(x, estimated, 'b-o', label='Estimated $|\\Delta C_l|$')

@@ -2432,8 +2432,13 @@ FiniteVolumeSolver::calcJacobian() {
 }
 
 double FiniteVolumeSolver::integrateCl() const {
-  double qinf          = Minf * a0;
-  double normalization = 0.5 * rho0 * qinf * qinf * 1.0;  // chord = 1
+  // Use exit-dynamic-pressure normalization consistent with postproc scripts
+  double chord         = 18.804;
+  double p_out_ref     = 0.7 * p0;
+  double ratio         = p0 / p_out_ref;
+  double M2_exit       = (2.0 / (gamma - 1.0)) * (std::pow(ratio, (gamma - 1.0) / gamma) - 1.0);
+  double q_out         = 0.5 * gamma * p_out_ref * M2_exit;
+  double normalization = q_out * chord;
   double p_inf         = p0;  // freestream pressure = rho0*a0^2/gamma
   double Cl            = 0.0;
 
@@ -2522,8 +2527,12 @@ FiniteVolumeSolver::dCl_dU() const {
   //   chord = 1.0 by convention for the NACA meshes
 
   // p=0 implementation: loop over wall boundary edges, accumulate dp/dU * n.y * len
-  double qinf = Minf * a0;
-  double normalization = 0.5 * rho0 * qinf * qinf * 1.0;  // chord = 1
+  double chord         = 18.804;
+  double p_out_ref     = 0.7 * p0;
+  double ratio         = p0 / p_out_ref;
+  double M2_exit       = (2.0 / (gamma - 1.0)) * (std::pow(ratio, (gamma - 1.0) / gamma) - 1.0);
+  double q_out         = 0.5 * gamma * p_out_ref * M2_exit;
+  double normalization = q_out * chord;
 
   for (int i = 0; i < (int)mesh.BE.size(); ++i) {
     int eL = mesh.BE[i].elemL;

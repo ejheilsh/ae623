@@ -54,6 +54,7 @@ fig.suptitle(f"Cycle {cycle} | p={p_order} | {Ne} elements")
 ax = axes[0]
 pc = PolyCollection(verts, cmap="plasma", edgecolors="none")
 pc.set_array(psi_mag)
+pc.set_clim(psi_mag.min(), psi_mag.max())
 ax.add_collection(pc)
 ax.set_xlim(nodes[:, 0].min(), nodes[:, 0].max())
 ax.set_ylim(nodes[:, 1].min(), nodes[:, 1].max())
@@ -62,8 +63,12 @@ fig.colorbar(pc, ax=ax, label="|psi|")
 ax.set_title("Adjoint Magnitude")
 
 ax = axes[1]
-pc2 = PolyCollection(verts, cmap="hot_r", edgecolors="none")
-pc2.set_array(np.log10(np.maximum(indicators, 1e-30)))
+ind_log = np.log10(np.maximum(indicators, 1e-30))
+nonzero = ind_log[indicators > 0]
+vmin_ind = nonzero.min() if len(nonzero) else ind_log.min()
+pc2 = PolyCollection(verts, cmap="hot", edgecolors="none")
+pc2.set_array(ind_log)
+pc2.set_clim(vmin_ind, ind_log.max())
 ax.add_collection(pc2)
 ax.set_xlim(nodes[:, 0].min(), nodes[:, 0].max())
 ax.set_ylim(nodes[:, 1].min(), nodes[:, 1].max())

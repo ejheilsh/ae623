@@ -135,6 +135,8 @@ Run the adjoint-based adaptive solver on the baseline curved mesh:
 #   max_cycles=5       → run up to 5 adaptation cycles
 #   refine_fraction=0.25 → refine the top 25% of elements by error indicator
 .\euler_solver.exe grids/base.gri 0 1.0 roe 200000 steady --adjoint-adapt 1e-3 5 0.25
+windows MYSYS64:
+C:\msys64\msys2_shell.cmd -ucrt64 -defterm -no-start -here -c "bash run_paper.sh"
 ```
 
 Results are saved per-cycle to `data_steady/`. Plot the adjoint field and error indicators for any cycle:

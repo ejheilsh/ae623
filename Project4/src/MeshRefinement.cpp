@@ -120,6 +120,30 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
 
   std::map<std::pair<int,int>, int> edge_midpoint;  // sorted edge → midpoint vertex
 
+  // ── Geometry midpoint tracking for q=2 preservation ──
+  std::map<std::pair<int,int>, int> geo_midpoint;  // sorted edge → q=2 geometry midpoint vertex
+  for (int e = 0; e < old_Ne; ++e) {
+    if (mesh.E[e].q_order < 2 || mesh.E[e].ho_nodes.size() < 6) continue;
+    int gv0 = mesh.E[e].v[0], gv1 = mesh.E[e].v[1], gv2 = mesh.E[e].v[2];
+    const auto &ghn = mesh.E[e].ho_nodes;
+    auto addGeo = [&](int a, int b, int hn_idx) {
+      auto key = std::make_pair(std::min(a,b), std::max(a,b));
+      if (!geo_midpoint.count(key))
+        geo_midpoint[key] = ghn[hn_idx];
+    };
+    addGeo(gv0, gv1, 1);
+    addGeo(gv1, gv2, 4);
+    addGeo(gv0, gv2, 3);
+  }
+  auto getOrCreateGeoMid = [&](int a, int b, Vec2 pos) -> int {
+    auto key = std::make_pair(std::min(a,b), std::max(a,b));
+    if (geo_midpoint.count(key)) return geo_midpoint[key];
+    int idx = (int)mesh.V.size();
+    mesh.V.push_back(pos);
+    geo_midpoint[key] = idx;
+    return idx;
+  };
+
   for (int e = 0; e < old_Ne; ++e) {
     if (!marked[e]) continue;
 
@@ -160,17 +184,63 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       }
     }
 
-    // Replace element e with child 1: (vc, va, vm)
-    mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
-    mesh.E[e].q_order = 1;
-    mesh.E[e].ho_nodes.clear();
+    // Create children, preserving q=2 geometry when parent is curved
+    std::cerr << "  DBG bisect e=" << e << " q=" << mesh.E[e].q_order
+              << " ho=" << mesh.E[e].ho_nodes.size() << std::endl;
+    if (mesh.E[e].q_order >= 2 && mesh.E[e].ho_nodes.size() >= 6) {
+      // Cache parent data before modifying element e
+      std::vector<int> phn = mesh.E[e].ho_nodes;
+      int pv0 = mesh.E[e].v[0], pv1 = mesh.E[e].v[1], pv2 = mesh.E[e].v[2];
+      // ho_nodes GRI order: [v0, mid01, v1, mid02, mid12, v2]
+      int mid01 = phn[1], mid02 = phn[3], mid12 = phn[4];
 
-    // Append child 2: (vc, vm, vb)
-    Element child2;
-    child2.v[0] = vc; child2.v[1] = vm; child2.v[2] = vb;
-    child2.q_order = 1;
-    mesh.E.push_back(child2);
-    rmap.child_to_parent.push_back(e);
+      // Identify midpoint vertex indices for inherited and split edges
+      int mid_split = -1, mid_vc_va = -1, mid_vc_vb = -1;
+      struct EM { int a, b, mid; };
+      EM ems[3] = {{pv0,pv1,mid01}, {pv1,pv2,mid12}, {pv0,pv2,mid02}};
+      for (auto &em : ems) {
+        if ((em.a==va && em.b==vb) || (em.a==vb && em.b==va)) mid_split = em.mid;
+        if ((em.a==vc && em.b==va) || (em.a==va && em.b==vc)) mid_vc_va = em.mid;
+        if ((em.a==vc && em.b==vb) || (em.a==vb && em.b==vc)) mid_vc_vb = em.mid;
+      }
+
+      // Quadratic subdivision: evaluate original curve at t=0.25 and t=0.75
+      // Lagrange basis on (va, mid_split, vb) at t=0,0.5,1:
+      //   N0(0.25)=0.375, N1(0.25)=0.75,  N2(0.25)=-0.125
+      //   N0(0.75)=-0.125, N1(0.75)=0.75, N2(0.75)=0.375
+      Vec2 qpt  = mesh.V[va]*0.375 + mesh.V[mid_split]*0.75 + mesh.V[vb]*(-0.125);
+      Vec2 tqpt = mesh.V[va]*(-0.125) + mesh.V[mid_split]*0.75 + mesh.V[vb]*0.375;
+
+      // Get or create geometry midpoint vertices for new child edges
+      int gm_vc_vm = getOrCreateGeoMid(vc, vm, (mesh.V[vc]+mesh.V[vm])*0.5);
+      int gm_va_vm = getOrCreateGeoMid(va, vm, qpt);
+      int gm_vm_vb = getOrCreateGeoMid(vm, vb, tqpt);
+
+      // Child 1: (vc, va, vm)
+      // ho_nodes GRI order: [c0, mid(c0,c1), c1, mid(c0,c2), mid(c1,c2), c2]
+      mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
+      mesh.E[e].q_order = 2;
+      mesh.E[e].ho_nodes = {vc, mid_vc_va, va, gm_vc_vm, gm_va_vm, vm};
+
+      // Child 2: (vc, vm, vb)
+      Element child2;
+      child2.v[0] = vc; child2.v[1] = vm; child2.v[2] = vb;
+      child2.q_order = 2;
+      child2.ho_nodes = {vc, gm_vc_vm, vm, mid_vc_vb, gm_vm_vb, vb};
+      mesh.E.push_back(child2);
+      rmap.child_to_parent.push_back(e);
+    } else {
+      // q=1 parent: keep q=1 children
+      mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
+      mesh.E[e].q_order = 1;
+      mesh.E[e].ho_nodes.clear();
+
+      Element child2;
+      child2.v[0] = vc; child2.v[1] = vm; child2.v[2] = vb;
+      child2.q_order = 1;
+      mesh.E.push_back(child2);
+      rmap.child_to_parent.push_back(e);
+    }
   }
 
   // ── Phase 3: Rebuild IE and BE from scratch ──
@@ -218,9 +288,15 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     mesh.BE.push_back(be);
   }
 
-  // Recompute geometric data (centroids, areas, normals, lengths)
+  // Detect actual geometry order after refinement
   mesh.has_curved_elements = false;
   mesh.q_order_global = 1;
+  for (int e = 0; e < (int)mesh.E.size(); ++e) {
+    if (mesh.E[e].q_order > 1) {
+      mesh.has_curved_elements = true;
+      mesh.q_order_global = std::max(mesh.q_order_global, mesh.E[e].q_order);
+    }
+  }
   mesh.computeGeometry();
 
   std::cerr << "bisectMarkedElements: " << old_Ne << " -> " << new_Ne

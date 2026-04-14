@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 
@@ -345,7 +346,7 @@ int main(int argc, char **argv) {
         }
 
         double Cl_cycle = solver.integrateCl();
-        std::cerr << "  Cl = " << Cl_cycle
+        std::cerr << "  Cl = " << std::setprecision(6) << Cl_cycle
                   << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
 
         // Step 2: Solve the adjoint
@@ -443,7 +444,7 @@ int main(int argc, char **argv) {
       }
     } else {
       solver.solveSteady(itercap);
-      std::cerr << "  Cl = " << solver.integrateCl()
+      std::cerr << "  Cl = " << std::setprecision(6) << solver.integrateCl()
                 << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
     }
 
