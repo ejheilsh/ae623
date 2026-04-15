@@ -2,7 +2,11 @@
 # ============================================================================
 # run_data.sh — Generate all solver data needed for the Project 4 report
 # ============================================================================
-# Usage:  bash run_data.sh [--skip-existing]
+# Usage:  bash run_data.sh [--skip-existing] [--resume]
+#
+#   --skip-existing : Skip cases whose final results.bin already exists
+#   --resume        : Resume interrupted cases from _temp_iter_latest_dg.bin
+#                     (implies --skip-existing)
 #
 # This script runs:
 #   1. Uniform refinement: p=0 steady on 2k, 8k, 32k, 128k grids
@@ -18,9 +22,13 @@ OUTDIR="data_steady"
 FLUX="roe"
 
 SKIP_EXISTING=false
-if [[ "$1" == "--skip-existing" ]]; then
-  SKIP_EXISTING=true
-fi
+RESUME=false
+for arg in "$@"; do
+  case "$arg" in
+    --skip-existing) SKIP_EXISTING=true ;;
+    --resume)        RESUME=true; SKIP_EXISTING=true ;;
+  esac
+done
 
 mkdir -p "$OUTDIR"
 
@@ -32,6 +40,17 @@ should_skip() {
     return 0
   fi
   return 1
+}
+
+# Helper: find a resume IC file for a case, return path in RESUME_IC
+find_resume_ic() {
+  RESUME_IC=""
+  if ! $RESUME; then return; fi
+  local dg_temp="$1"
+  if [[ -f "$dg_temp" ]]; then
+    echo "  [RESUME] Found checkpoint: $dg_temp"
+    RESUME_IC="$dg_temp"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -52,8 +71,10 @@ for grid in 2k 8k 32k; do #128k
 
   if should_skip "$MARKER"; then continue; fi
 
+  find_resume_ic "${OUTDIR}/steady_${grid}_p0_temp_iter_latest_dg.bin"
+
   echo "--- Running p=0 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 0 1.0 $FLUX 200000 steady \
+  $SOLVER "$GRIDFILE" 0 1.0 $FLUX 200000 steady $RESUME_IC \
     2>&1 | tee "${OUTDIR}/${grid}_p0_run.log"
   echo ""
 done
@@ -85,8 +106,10 @@ for grid in 2k 8k; do
 
   if should_skip "$MARKER"; then continue; fi
 
+  find_resume_ic "${OUTDIR}/steady_${grid}_p1_temp_iter_latest_dg.bin"
+
   echo "--- Running p=1 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 1 1.0 $FLUX 200000 steady \
+  $SOLVER "$GRIDFILE" 1 1.0 $FLUX 200000 steady $RESUME_IC \
     2>&1 | tee "${OUTDIR}/${grid}_p1_run.log"
   echo ""
 done
@@ -98,8 +121,10 @@ for grid in 2k 8k; do
 
   if should_skip "$MARKER"; then continue; fi
 
+  find_resume_ic "${OUTDIR}/steady_${grid}_p2_temp_iter_latest_dg.bin"
+
   echo "--- Running p=2 CFL=10 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 2 10.0 $FLUX 200000 steady \
+  $SOLVER "$GRIDFILE" 2 10.0 $FLUX 200000 steady $RESUME_IC \
     2>&1 | tee "${OUTDIR}/${grid}_p2_run.log"
   echo ""
 done
