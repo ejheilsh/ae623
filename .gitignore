@@ -217,3 +217,13 @@ __marimo__/
 *.jpeg
 *.bin.DS_Store
 
+# Project4: allow report figures, logs, and data bins (except large grids)
+!Project4/**/*.png
+!Project4/**/*.log
+!Project4/**/*.bin
+Project4/grids/
+Project4/data_steady/
+Project4/euler_solver.exe
+Project4/report_figures/01_solution_summaries/
+Project4/report_figures/02_processed_cases/
+

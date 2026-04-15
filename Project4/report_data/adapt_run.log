@@ -1,0 +1,806 @@
+PeriodicGroup read: total_pairs=10, groups=1, per_group=[10]
+pairing periodic edges from ordered node pairs...
+Added 8 periodic IEs to mesh
+WARNING: periodic ordered-pair candidates not added. count=1, samples=[(g=0, i=4, bottom=(4,31), top=(24,51), missing_edge)]
+Mesh loaded: Ni=125, Nb=17, Ne=89
+Mesh geometry order: q=2 (curved elements present)
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=2 (curved elements present)
+  Geometry q=2 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=0.333333  eta=0.333333  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2 -> CFL scale factor 2/sr: 1
+Starting solver for grids/base.gri (DG Order p=0, CFL: 1, Flux: roe, IterCap: 200000, Mode: Steady)
+=== Adaptation cycle 0 ===
+  Mesh: 89 elements
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=2 (curved elements present)
+  Geometry q=2 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=0.333333  eta=0.333333  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2 -> CFL scale factor 2/sr: 1
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 3.015513e+01 | Target residual (1e-5 * baseline): 3.015513e-04
+Iter:      0 | Residual: 3.015513e+01 | RelRes: 1.000000e+00 | Min Rho: 1.000000e+00 | Min P: 7.142857e-01
+Iter:    682 | Residual: 2.940737e-04 | RelRes: 9.752028e-06 | Min Rho: 6.499084e-01 | Min P: 4.143133e-01
+Converged in 682 iterations.
+  Cl = 350.397  (89 elements)
+Adjoint: assembling sparse Jacobian (356 DOFs) via FD...
+  FD: 0% (0/356)
+  FD: 9% (35/356)
+  FD: 19% (70/356)
+  FD: 29% (105/356)
+  FD: 39% (140/356)
+  FD: 49% (175/356)
+  FD: 58% (210/356)
+  FD: 68% (245/356)
+  FD: 78% (280/356)
+  FD: 88% (315/356)
+  FD: 98% (350/356)
+  Sparse: 5424 nnz, avg 15.24/row, 4.28% fill
+  GMRES(150)  tol=1e-10  max_restarts=30
+  GMRES restart 0 iter    0  relres=0.95
+  GMRES restart 0 iter   50  relres=0.11
+  GMRES restart 0 iter  100  relres=0.034
+  GMRES: restarting (relres=0.0018)
+  GMRES restart 1 iter    0  relres=0.0018
+  GMRES restart 1 iter   50  relres=0.00054
+  GMRES restart 1 iter  100  relres=8.6e-05
+  GMRES: restarting (relres=5.8e-07)
+  GMRES restart 2 iter    0  relres=5.7e-07
+  GMRES restart 2 iter   50  relres=1.9e-07
+  GMRES restart 2 iter  100  relres=2.9e-08
+  GMRES: restarting (relres=2.3e-10)
+  GMRES restart 3 iter    0  relres=2.3e-10
+  GMRES: converged at restart 3  (relres=9.8e-11).
+Adjoint: solve complete.
+  |dR/dalpha| = 1.4  |psi| = 2.8e+03
+  Adjoint residual |A^T psi + dJ/dU| = 0.00034  |dJ/dU| = 1.1e+03
+  dCl/dalpha (adjoint) = 1.4e+02 rad^-1
+Initializing DG solver with p=1, ndof_per_elem=3
+  Mesh geometry order: q=2 (curved elements present)
+  Geometry q=2 >= solution p=1 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=1): 2.400000e+01 -> CFL scale factor 2/sr: 8.333333e-02
+  Error indicators: sum |eps_e| = 0.0086 (estimated |delta_Cl|)
+  Adjoint psi saved to data_steady/steady_base_p0_adjoint_psi_cycle0_dg.bin
+  Mesh saved to data_steady/steady_base_p0_adjoint_mesh_cycle0.bin
+  Error indicators saved to data_steady/steady_base_p0_adjoint_indicators_cycle0.bin
+  Estimated |delta_Cl| = 0.0086
+  Marking 22 elements for refinement
+bisectMarkedElements: 89 -> 178 elements (89 added)
+=== Adaptation cycle 1 ===
+  Mesh: 178 elements
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2.000000e+00 -> CFL scale factor 2/sr: 1.000000e+00
+  Using interpolated IC from previous cycle.
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 1.095087e+02 | Target residual (1e-5 * baseline): 1.095087e-03
+Iter:      0 | Residual: 1.095087e+02 | RelRes: 1.000000e+00 | Min Rho: 6.499084e-01 | Min P: 4.143133e-01
+Iter:   1000 | Residual: 3.516598e+00 | RelRes: 3.211250e-02 | Min Rho: 1.261650e-01 | Min P: 5.197395e-02
+Iter:   2000 | Residual: 4.603069e+00 | RelRes: 4.203382e-02 | Min Rho: 1.263752e-01 | Min P: 5.212598e-02
+Iter:   3000 | Residual: 1.012948e+01 | RelRes: 9.249931e-02 | Min Rho: 1.260155e-01 | Min P: 5.191270e-02
+Iter:   4000 | Residual: 7.149368e+00 | RelRes: 6.528584e-02 | Min Rho: 1.262216e-01 | Min P: 5.203920e-02
+Iter:   5000 | Residual: 6.379820e+00 | RelRes: 5.825856e-02 | Min Rho: 1.259064e-01 | Min P: 5.185293e-02
+Stagnated at iter 6000 | best RelRes this window: 2.576e-02 — treating as converged (limit cycle).
+  Cl = 4.4e+02  (178 elements)
+Adjoint: assembling sparse Jacobian (712 DOFs) via FD...
+  FD: 0% (0/712)
+  FD: 9% (71/712)
+  FD: 19% (142/712)
+  FD: 29% (213/712)
+  FD: 39% (284/712)
+  FD: 49% (355/712)
+  FD: 59% (426/712)
+  FD: 69% (497/712)
+  FD: 79% (568/712)
+  FD: 89% (639/712)
+  FD: 99% (710/712)
+  Sparse: 10688 nnz, avg 15.01/row, 2.11% fill
+  GMRES(150)  tol=1e-10  max_restarts=30
+  GMRES restart 0 iter    0  relres=0.95
+  GMRES restart 0 iter   50  relres=0.35
+  GMRES restart 0 iter  100  relres=0.23
+  GMRES: restarting (relres=0.16)
+  GMRES restart 1 iter    0  relres=0.16
+  GMRES restart 1 iter   50  relres=0.16
+  GMRES restart 1 iter  100  relres=0.14
+  GMRES: restarting (relres=0.068)
+  GMRES restart 2 iter    0  relres=0.068
+  GMRES restart 2 iter   50  relres=0.036
+  GMRES restart 2 iter  100  relres=0.014
+  GMRES: restarting (relres=0.003)
+  GMRES restart 3 iter    0  relres=0.003
+  GMRES restart 3 iter   50  relres=0.0026
+  GMRES restart 3 iter  100  relres=0.002
+  GMRES: restarting (relres=0.0004)
+  GMRES restart 4 iter    0  relres=0.00039
+  GMRES restart 4 iter   50  relres=0.00022
+  GMRES restart 4 iter  100  relres=0.00014
+  GMRES: restarting (relres=1.6e-05)
+  GMRES restart 5 iter    0  relres=1.6e-05
+  GMRES restart 5 iter   50  relres=1.2e-05
+  GMRES restart 5 iter  100  relres=8.3e-06
+  GMRES: restarting (relres=2.6e-06)
+  GMRES restart 6 iter    0  relres=2.6e-06
+  GMRES restart 6 iter   50  relres=1.7e-06
+  GMRES restart 6 iter  100  relres=1e-06
+  GMRES: restarting (relres=3.5e-07)
+  GMRES restart 7 iter    0  relres=3.5e-07
+  GMRES restart 7 iter   50  relres=2.7e-07
+  GMRES restart 7 iter  100  relres=1.3e-07
+  GMRES: restarting (relres=4.7e-08)
+  GMRES restart 8 iter    0  relres=4.7e-08
+  GMRES restart 8 iter   50  relres=3.6e-08
+  GMRES restart 8 iter  100  relres=2.2e-08
+  GMRES: restarting (relres=8.1e-09)
+  GMRES restart 9 iter    0  relres=8.1e-09
+  GMRES restart 9 iter   50  relres=4.3e-09
+  GMRES restart 9 iter  100  relres=1.5e-09
+  GMRES: restarting (relres=4.9e-10)
+  GMRES restart 10 iter    0  relres=4.9e-10
+  GMRES restart 10 iter   50  relres=4.1e-10
+  GMRES restart 10 iter  100  relres=2.8e-10
+  GMRES: converged at restart 10  (relres=9.9e-11).
+Adjoint: solve complete.
+Initializing DG solver with p=1, ndof_per_elem=3
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=1 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333e-01  eta=3.333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=1): 2.400e+01 -> CFL scale factor 2/sr: 8.333e-02
+  Error indicators: sum |eps_e| = 82 (estimated |delta_Cl|)
+  Adjoint psi saved to data_steady/steady_base_p0_adjoint_psi_cycle1_dg.bin
+  Mesh saved to data_steady/steady_base_p0_adjoint_mesh_cycle1.bin
+  Error indicators saved to data_steady/steady_base_p0_adjoint_indicators_cycle1.bin
+  Estimated |delta_Cl| = 82
+  Marking 44 elements for refinement
+bisectMarkedElements: 178 -> 356 elements (178 added)
+=== Adaptation cycle 2 ===
+  Mesh: 356 elements
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333e-01  eta=3.333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2.000e+00 -> CFL scale factor 2/sr: 1.000e+00
+  Using interpolated IC from previous cycle.
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 6.474218e+01 | Target residual (1e-5 * baseline): 6.474218e-04
+Iter:      0 | Residual: 6.474218e+01 | RelRes: 1.000000e+00 | Min Rho: 1.262085e-01 | Min P: 5.204753e-02
+Non-physical state detected at iteration 24 — restoring last valid state and proceeding to adjoint.
+  Cl = 9.5e+02  (356 elements)
+Adjoint: assembling sparse Jacobian (1424 DOFs) via FD...
+  FD: 0% (0/1424)
+  FD: 9% (142/1424)
+  FD: 19% (284/1424)
+  FD: 29% (426/1424)
+  FD: 39% (568/1424)
+  FD: 49% (710/1424)
+  FD: 59% (852/1424)
+  FD: 69% (994/1424)
+  FD: 79% (1136/1424)
+  FD: 89% (1278/1424)
+  FD: 99% (1420/1424)
+  Sparse: 21312 nnz, avg 14.97/row, 1.05% fill
+  GMRES(150)  tol=1e-10  max_restarts=30
+  GMRES restart 0 iter    0  relres=0.98
+  GMRES restart 0 iter   50  relres=0.76
+  GMRES restart 0 iter  100  relres=0.68
+  GMRES: restarting (relres=0.48)
+  GMRES restart 1 iter    0  relres=0.48
+  GMRES restart 1 iter   50  relres=0.48
+  GMRES restart 1 iter  100  relres=0.47
+  GMRES: restarting (relres=0.45)
+  GMRES restart 2 iter    0  relres=0.45
+  GMRES restart 2 iter   50  relres=0.45
+  GMRES restart 2 iter  100  relres=0.45
+  GMRES: restarting (relres=0.44)
+  GMRES restart 3 iter    0  relres=0.44
+  GMRES restart 3 iter   50  relres=0.44
+  GMRES restart 3 iter  100  relres=0.44
+  GMRES: restarting (relres=0.42)
+  GMRES restart 4 iter    0  relres=0.42
+  GMRES restart 4 iter   50  relres=0.42
+  GMRES restart 4 iter  100  relres=0.42
+  GMRES: restarting (relres=0.41)
+  GMRES restart 5 iter    0  relres=0.41
+  GMRES restart 5 iter   50  relres=0.41
+  GMRES restart 5 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 6 iter    0  relres=0.41
+  GMRES restart 6 iter   50  relres=0.41
+  GMRES restart 6 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 7 iter    0  relres=0.41
+  GMRES restart 7 iter   50  relres=0.41
+  GMRES restart 7 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 8 iter    0  relres=0.41
+  GMRES restart 8 iter   50  relres=0.41
+  GMRES restart 8 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 9 iter    0  relres=0.41
+  GMRES restart 9 iter   50  relres=0.41
+  GMRES restart 9 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 10 iter    0  relres=0.41
+  GMRES restart 10 iter   50  relres=0.41
+  GMRES restart 10 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 11 iter    0  relres=0.41
+  GMRES restart 11 iter   50  relres=0.41
+  GMRES restart 11 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 12 iter    0  relres=0.41
+  GMRES restart 12 iter   50  relres=0.41
+  GMRES restart 12 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 13 iter    0  relres=0.41
+  GMRES restart 13 iter   50  relres=0.41
+  GMRES restart 13 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 14 iter    0  relres=0.41
+  GMRES restart 14 iter   50  relres=0.41
+  GMRES restart 14 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 15 iter    0  relres=0.41
+  GMRES restart 15 iter   50  relres=0.41
+  GMRES restart 15 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 16 iter    0  relres=0.41
+  GMRES restart 16 iter   50  relres=0.41
+  GMRES restart 16 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 17 iter    0  relres=0.41
+  GMRES restart 17 iter   50  relres=0.41
+  GMRES restart 17 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 18 iter    0  relres=0.41
+  GMRES restart 18 iter   50  relres=0.41
+  GMRES restart 18 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 19 iter    0  relres=0.41
+  GMRES restart 19 iter   50  relres=0.41
+  GMRES restart 19 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 20 iter    0  relres=0.41
+  GMRES restart 20 iter   50  relres=0.41
+  GMRES restart 20 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 21 iter    0  relres=0.41
+  GMRES restart 21 iter   50  relres=0.41
+  GMRES restart 21 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 22 iter    0  relres=0.41
+  GMRES restart 22 iter   50  relres=0.41
+  GMRES restart 22 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 23 iter    0  relres=0.41
+  GMRES restart 23 iter   50  relres=0.41
+  GMRES restart 23 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 24 iter    0  relres=0.41
+  GMRES restart 24 iter   50  relres=0.41
+  GMRES restart 24 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 25 iter    0  relres=0.41
+  GMRES restart 25 iter   50  relres=0.41
+  GMRES restart 25 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 26 iter    0  relres=0.41
+  GMRES restart 26 iter   50  relres=0.41
+  GMRES restart 26 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 27 iter    0  relres=0.41
+  GMRES restart 27 iter   50  relres=0.41
+  GMRES restart 27 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 28 iter    0  relres=0.41
+  GMRES restart 28 iter   50  relres=0.41
+  GMRES restart 28 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES restart 29 iter    0  relres=0.41
+  GMRES restart 29 iter   50  relres=0.41
+  GMRES restart 29 iter  100  relres=0.41
+  GMRES: restarting (relres=0.41)
+  GMRES: max restarts reached — using best iterate.
+Adjoint: solve complete.
+Initializing DG solver with p=1, ndof_per_elem=3
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=1 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=1): 2.400000e+01 -> CFL scale factor 2/sr: 8.333333e-02
+  Error indicators: sum |eps_e| = 4.6e+02 (estimated |delta_Cl|)
+  Adjoint psi saved to data_steady/steady_base_p0_adjoint_psi_cycle2_dg.bin
+  Mesh saved to data_steady/steady_base_p0_adjoint_mesh_cycle2.bin
+  Error indicators saved to data_steady/steady_base_p0_adjoint_indicators_cycle2.bin
+  Estimated |delta_Cl| = 4.6e+02
+  Marking 89 elements for refinement
+bisectMarkedElements: 356 -> 708 elements (352 added)
+=== Adaptation cycle 3 ===
+  Mesh: 708 elements
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2.000000e+00 -> CFL scale factor 2/sr: 1.000000e+00
+  Using interpolated IC from previous cycle.
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 5.315840e+01 | Target residual (1e-5 * baseline): 5.315840e-04
+Iter:      0 | Residual: 5.315840e+01 | RelRes: 1.000000e+00 | Min Rho: 1.593388e-02 | Min P: 9.137538e-03
+Non-physical state detected at iteration 27 — restoring last valid state and proceeding to adjoint.
+  Cl = 7.2e+02  (708 elements)
+Adjoint: assembling sparse Jacobian (2832 DOFs) via FD...
+  FD: 0% (0/2832)
+  FD: 9% (283/2832)
+  FD: 19% (566/2832)
+  FD: 29% (849/2832)
+  FD: 39% (1132/2832)
+  FD: 49% (1415/2832)
+  FD: 59% (1698/2832)
+  FD: 69% (1981/2832)
+  FD: 79% (2264/2832)
+  FD: 89% (2547/2832)
+  FD: 99% (2830/2832)
+  Sparse: 43488 nnz, avg 15.36/row, 0.54% fill
+  GMRES(150)  tol=1e-10  max_restarts=30
+  GMRES restart 0 iter    0  relres=0.96
+  GMRES restart 0 iter   50  relres=0.77
+  GMRES restart 0 iter  100  relres=0.75
+  GMRES: restarting (relres=0.71)
+  GMRES restart 1 iter    0  relres=0.71
+  GMRES restart 1 iter   50  relres=0.71
+  GMRES restart 1 iter  100  relres=0.71
+  GMRES: restarting (relres=0.7)
+  GMRES restart 2 iter    0  relres=0.7
+  GMRES restart 2 iter   50  relres=0.7
+  GMRES restart 2 iter  100  relres=0.7
+  GMRES: restarting (relres=0.7)
+  GMRES restart 3 iter    0  relres=0.7
+  GMRES restart 3 iter   50  relres=0.7
+  GMRES restart 3 iter  100  relres=0.7
+  GMRES: restarting (relres=0.69)
+  GMRES restart 4 iter    0  relres=0.69
+  GMRES restart 4 iter   50  relres=0.69
+  GMRES restart 4 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 5 iter    0  relres=0.69
+  GMRES restart 5 iter   50  relres=0.69
+  GMRES restart 5 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 6 iter    0  relres=0.69
+  GMRES restart 6 iter   50  relres=0.69
+  GMRES restart 6 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 7 iter    0  relres=0.69
+  GMRES restart 7 iter   50  relres=0.69
+  GMRES restart 7 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 8 iter    0  relres=0.69
+  GMRES restart 8 iter   50  relres=0.69
+  GMRES restart 8 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 9 iter    0  relres=0.69
+  GMRES restart 9 iter   50  relres=0.69
+  GMRES restart 9 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 10 iter    0  relres=0.69
+  GMRES restart 10 iter   50  relres=0.69
+  GMRES restart 10 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 11 iter    0  relres=0.69
+  GMRES restart 11 iter   50  relres=0.69
+  GMRES restart 11 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 12 iter    0  relres=0.69
+  GMRES restart 12 iter   50  relres=0.69
+  GMRES restart 12 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 13 iter    0  relres=0.69
+  GMRES restart 13 iter   50  relres=0.69
+  GMRES restart 13 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 14 iter    0  relres=0.69
+  GMRES restart 14 iter   50  relres=0.69
+  GMRES restart 14 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 15 iter    0  relres=0.69
+  GMRES restart 15 iter   50  relres=0.69
+  GMRES restart 15 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 16 iter    0  relres=0.69
+  GMRES restart 16 iter   50  relres=0.69
+  GMRES restart 16 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 17 iter    0  relres=0.69
+  GMRES restart 17 iter   50  relres=0.69
+  GMRES restart 17 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 18 iter    0  relres=0.69
+  GMRES restart 18 iter   50  relres=0.69
+  GMRES restart 18 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 19 iter    0  relres=0.69
+  GMRES restart 19 iter   50  relres=0.69
+  GMRES restart 19 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 20 iter    0  relres=0.69
+  GMRES restart 20 iter   50  relres=0.69
+  GMRES restart 20 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 21 iter    0  relres=0.69
+  GMRES restart 21 iter   50  relres=0.69
+  GMRES restart 21 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 22 iter    0  relres=0.69
+  GMRES restart 22 iter   50  relres=0.69
+  GMRES restart 22 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 23 iter    0  relres=0.69
+  GMRES restart 23 iter   50  relres=0.69
+  GMRES restart 23 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 24 iter    0  relres=0.69
+  GMRES restart 24 iter   50  relres=0.69
+  GMRES restart 24 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 25 iter    0  relres=0.69
+  GMRES restart 25 iter   50  relres=0.69
+  GMRES restart 25 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 26 iter    0  relres=0.69
+  GMRES restart 26 iter   50  relres=0.69
+  GMRES restart 26 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 27 iter    0  relres=0.69
+  GMRES restart 27 iter   50  relres=0.69
+  GMRES restart 27 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 28 iter    0  relres=0.69
+  GMRES restart 28 iter   50  relres=0.69
+  GMRES restart 28 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES restart 29 iter    0  relres=0.69
+  GMRES restart 29 iter   50  relres=0.69
+  GMRES restart 29 iter  100  relres=0.69
+  GMRES: restarting (relres=0.69)
+  GMRES: max restarts reached — using best iterate.
+Adjoint: solve complete.
+Initializing DG solver with p=1, ndof_per_elem=3
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=1 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=1): 2.400000e+01 -> CFL scale factor 2/sr: 8.333333e-02
+  Error indicators: sum |eps_e| = 66 (estimated |delta_Cl|)
+  Adjoint psi saved to data_steady/steady_base_p0_adjoint_psi_cycle3_dg.bin
+  Mesh saved to data_steady/steady_base_p0_adjoint_mesh_cycle3.bin
+  Error indicators saved to data_steady/steady_base_p0_adjoint_indicators_cycle3.bin
+  Estimated |delta_Cl| = 66
+  Marking 177 elements for refinement
+bisectMarkedElements: 708 -> 1408 elements (700 added)
+=== Adaptation cycle 4 ===
+  Mesh: 1408 elements
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2.000000e+00 -> CFL scale factor 2/sr: 1.000000e+00
+  Using interpolated IC from previous cycle.
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 4.887285e+01 | Target residual (1e-5 * baseline): 4.887285e-04
+Iter:      0 | Residual: 4.887285e+01 | RelRes: 1.000000e+00 | Min Rho: 1.035321e-03 | Min P: 4.657514e-05
+Non-physical state detected at iteration 0 — restoring last valid state and proceeding to adjoint.
+  Cl = 7.2e+02  (1408 elements)
+Adjoint: assembling sparse Jacobian (5632 DOFs) via FD...
+  FD: 0% (0/5632)
+  FD: 9% (563/5632)
+  FD: 19% (1126/5632)
+  FD: 29% (1689/5632)
+  FD: 39% (2252/5632)
+  FD: 49% (2815/5632)
+  FD: 59% (3378/5632)
+  FD: 69% (3941/5632)
+  FD: 79% (4504/5632)
+  FD: 89% (5067/5632)
+  FD: 99% (5630/5632)
+  Sparse: 86912 nnz, avg 15.43/row, 0.27% fill
+  GMRES(150)  tol=1e-10  max_restarts=30
+  GMRES restart 0 iter    0  relres=0.97
+  GMRES restart 0 iter   50  relres=0.78
+  GMRES restart 0 iter  100  relres=0.71
+  GMRES: restarting (relres=0.66)
+  GMRES restart 1 iter    0  relres=0.66
+  GMRES restart 1 iter   50  relres=0.66
+  GMRES restart 1 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 2 iter    0  relres=0.66
+  GMRES restart 2 iter   50  relres=0.66
+  GMRES restart 2 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 3 iter    0  relres=0.66
+  GMRES restart 3 iter   50  relres=0.66
+  GMRES restart 3 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 4 iter    0  relres=0.66
+  GMRES restart 4 iter   50  relres=0.66
+  GMRES restart 4 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 5 iter    0  relres=0.66
+  GMRES restart 5 iter   50  relres=0.66
+  GMRES restart 5 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 6 iter    0  relres=0.66
+  GMRES restart 6 iter   50  relres=0.66
+  GMRES restart 6 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 7 iter    0  relres=0.66
+  GMRES restart 7 iter   50  relres=0.66
+  GMRES restart 7 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 8 iter    0  relres=0.66
+  GMRES restart 8 iter   50  relres=0.66
+  GMRES restart 8 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 9 iter    0  relres=0.66
+  GMRES restart 9 iter   50  relres=0.66
+  GMRES restart 9 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 10 iter    0  relres=0.66
+  GMRES restart 10 iter   50  relres=0.66
+  GMRES restart 10 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 11 iter    0  relres=0.66
+  GMRES restart 11 iter   50  relres=0.66
+  GMRES restart 11 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 12 iter    0  relres=0.66
+  GMRES restart 12 iter   50  relres=0.66
+  GMRES restart 12 iter  100  relres=0.66
+  GMRES: restarting (relres=0.66)
+  GMRES restart 13 iter    0  relres=0.66
+  GMRES restart 13 iter   50  relres=0.66
+  GMRES restart 13 iter  100  relres=0.66
+  GMRES: restarting (relres=0.64)
+  GMRES restart 14 iter    0  relres=0.64
+  GMRES restart 14 iter   50  relres=0.64
+  GMRES restart 14 iter  100  relres=0.64
+  GMRES: restarting (relres=0.63)
+  GMRES restart 15 iter    0  relres=0.63
+  GMRES restart 15 iter   50  relres=0.63
+  GMRES restart 15 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 16 iter    0  relres=0.63
+  GMRES restart 16 iter   50  relres=0.63
+  GMRES restart 16 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 17 iter    0  relres=0.63
+  GMRES restart 17 iter   50  relres=0.63
+  GMRES restart 17 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 18 iter    0  relres=0.63
+  GMRES restart 18 iter   50  relres=0.63
+  GMRES restart 18 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 19 iter    0  relres=0.63
+  GMRES restart 19 iter   50  relres=0.63
+  GMRES restart 19 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 20 iter    0  relres=0.63
+  GMRES restart 20 iter   50  relres=0.63
+  GMRES restart 20 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 21 iter    0  relres=0.63
+  GMRES restart 21 iter   50  relres=0.63
+  GMRES restart 21 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 22 iter    0  relres=0.63
+  GMRES restart 22 iter   50  relres=0.63
+  GMRES restart 22 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 23 iter    0  relres=0.63
+  GMRES restart 23 iter   50  relres=0.63
+  GMRES restart 23 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 24 iter    0  relres=0.63
+  GMRES restart 24 iter   50  relres=0.63
+  GMRES restart 24 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 25 iter    0  relres=0.63
+  GMRES restart 25 iter   50  relres=0.63
+  GMRES restart 25 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 26 iter    0  relres=0.63
+  GMRES restart 26 iter   50  relres=0.63
+  GMRES restart 26 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 27 iter    0  relres=0.63
+  GMRES restart 27 iter   50  relres=0.63
+  GMRES restart 27 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 28 iter    0  relres=0.63
+  GMRES restart 28 iter   50  relres=0.63
+  GMRES restart 28 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES restart 29 iter    0  relres=0.63
+  GMRES restart 29 iter   50  relres=0.63
+  GMRES restart 29 iter  100  relres=0.63
+  GMRES: restarting (relres=0.63)
+  GMRES: max restarts reached — using best iterate.
+Adjoint: solve complete.
+Initializing DG solver with p=1, ndof_per_elem=3
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=1 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=1): 2.400000e+01 -> CFL scale factor 2/sr: 8.333333e-02
+  Error indicators: sum |eps_e| = 1.9e+02 (estimated |delta_Cl|)
+  Adjoint psi saved to data_steady/steady_base_p0_adjoint_psi_cycle4_dg.bin
+  Mesh saved to data_steady/steady_base_p0_adjoint_mesh_cycle4.bin
+  Error indicators saved to data_steady/steady_base_p0_adjoint_indicators_cycle4.bin
+  Estimated |delta_Cl| = 1.9e+02
+  Marking 352 elements for refinement
+bisectMarkedElements: 1408 -> 2806 elements (1398 added)
+=== Adaptation cycle 5 ===
+  Mesh: 2806 elements
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2.000000e+00 -> CFL scale factor 2/sr: 1.000000e+00
+  Using interpolated IC from previous cycle.
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 5.815937e+01 | Target residual (1e-5 * baseline): 5.815937e-04
+Iter:      0 | Residual: 5.815937e+01 | RelRes: 1.000000e+00 | Min Rho: 1.035321e-03 | Min P: 4.657514e-05
+Non-physical state detected at iteration 0 — restoring last valid state and proceeding to adjoint.
+  Cl = 7.2e+02  (2806 elements)
+Adjoint: assembling sparse Jacobian (11224 DOFs) via FD...
+  FD: 0% (0/11224)
+  FD: 9% (1122/11224)
+  FD: 19% (2244/11224)
+  FD: 29% (3366/11224)
+  FD: 39% (4488/11224)
+  FD: 49% (5610/11224)
+  FD: 59% (6732/11224)
+  FD: 69% (7854/11224)
+  FD: 79% (8976/11224)
+  FD: 89% (10098/11224)
+  FD: 99% (11220/11224)
+  Sparse: 175648 nnz, avg 15.65/row, 0.14% fill
+  GMRES(150)  tol=1e-10  max_restarts=30
+  GMRES restart 0 iter    0  relres=0.96
+  GMRES restart 0 iter   50  relres=0.74
+  GMRES restart 0 iter  100  relres=0.7
+  GMRES: restarting (relres=0.68)
+  GMRES restart 1 iter    0  relres=0.68
+  GMRES restart 1 iter   50  relres=0.68
+  GMRES restart 1 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 2 iter    0  relres=0.68
+  GMRES restart 2 iter   50  relres=0.68
+  GMRES restart 2 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 3 iter    0  relres=0.68
+  GMRES restart 3 iter   50  relres=0.68
+  GMRES restart 3 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 4 iter    0  relres=0.68
+  GMRES restart 4 iter   50  relres=0.68
+  GMRES restart 4 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 5 iter    0  relres=0.68
+  GMRES restart 5 iter   50  relres=0.68
+  GMRES restart 5 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 6 iter    0  relres=0.68
+  GMRES restart 6 iter   50  relres=0.68
+  GMRES restart 6 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 7 iter    0  relres=0.68
+  GMRES restart 7 iter   50  relres=0.68
+  GMRES restart 7 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 8 iter    0  relres=0.68
+  GMRES restart 8 iter   50  relres=0.68
+  GMRES restart 8 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 9 iter    0  relres=0.68
+  GMRES restart 9 iter   50  relres=0.68
+  GMRES restart 9 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 10 iter    0  relres=0.68
+  GMRES restart 10 iter   50  relres=0.68
+  GMRES restart 10 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 11 iter    0  relres=0.68
+  GMRES restart 11 iter   50  relres=0.68
+  GMRES restart 11 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 12 iter    0  relres=0.68
+  GMRES restart 12 iter   50  relres=0.68
+  GMRES restart 12 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 13 iter    0  relres=0.68
+  GMRES restart 13 iter   50  relres=0.68
+  GMRES restart 13 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 14 iter    0  relres=0.68
+  GMRES restart 14 iter   50  relres=0.68
+  GMRES restart 14 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 15 iter    0  relres=0.68
+  GMRES restart 15 iter   50  relres=0.68
+  GMRES restart 15 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 16 iter    0  relres=0.68
+  GMRES restart 16 iter   50  relres=0.68
+  GMRES restart 16 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 17 iter    0  relres=0.68
+  GMRES restart 17 iter   50  relres=0.68
+  GMRES restart 17 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 18 iter    0  relres=0.68
+  GMRES restart 18 iter   50  relres=0.68
+  GMRES restart 18 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 19 iter    0  relres=0.68
+  GMRES restart 19 iter   50  relres=0.68
+  GMRES restart 19 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 20 iter    0  relres=0.68
+  GMRES restart 20 iter   50  relres=0.68
+  GMRES restart 20 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 21 iter    0  relres=0.68
+  GMRES restart 21 iter   50  relres=0.68
+  GMRES restart 21 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 22 iter    0  relres=0.68
+  GMRES restart 22 iter   50  relres=0.68
+  GMRES restart 22 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 23 iter    0  relres=0.68
+  GMRES restart 23 iter   50  relres=0.68
+  GMRES restart 23 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 24 iter    0  relres=0.68
+  GMRES restart 24 iter   50  relres=0.68
+  GMRES restart 24 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 25 iter    0  relres=0.68
+  GMRES restart 25 iter   50  relres=0.68
+  GMRES restart 25 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 26 iter    0  relres=0.68
+  GMRES restart 26 iter   50  relres=0.68
+  GMRES restart 26 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 27 iter    0  relres=0.68
+  GMRES restart 27 iter   50  relres=0.68
+  GMRES restart 27 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 28 iter    0  relres=0.68
+  GMRES restart 28 iter   50  relres=0.68
+  GMRES restart 28 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES restart 29 iter    0  relres=0.68
+  GMRES restart 29 iter   50  relres=0.68
+  GMRES restart 29 iter  100  relres=0.68
+  GMRES: restarting (relres=0.68)
+  GMRES: max restarts reached — using best iterate.
+Adjoint: solve complete.
+Initializing DG solver with p=1, ndof_per_elem=3
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=1 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=3.333333e-01  eta=3.333333e-01  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=1): 2.400000e+01 -> CFL scale factor 2/sr: 8.333333e-02
+  Error indicators: sum |eps_e| = 1.3e+02 (estimated |delta_Cl|)
+  Adjoint psi saved to data_steady/steady_base_p0_adjoint_psi_cycle5_dg.bin
+  Mesh saved to data_steady/steady_base_p0_adjoint_mesh_cycle5.bin
+  Error indicators saved to data_steady/steady_base_p0_adjoint_indicators_cycle5.bin
+  Estimated |delta_Cl| = 1.3e+02
+  Marking 701 elements for refinement
+bisectMarkedElements: 2806 -> 5602 elements (2796 added)
+Results saved to data_steady/steady_base_p0_results.bin
+DG coefficients saved to data_steady/steady_base_p0_results_dg.bin
+Residual history saved to data_steady/steady_base_p0_residual.bin
+Spatial residuals saved to data_steady/steady_base_p0_cell_res.bin

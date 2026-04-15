@@ -1,0 +1,95 @@
+PeriodicGroup read: total_pairs=30, groups=1, per_group=[30]
+pairing periodic edges from ordered node pairs...
+Added 28 periodic IEs to mesh
+WARNING: periodic ordered-pair candidates not added. count=1, samples=[(g=0, i=14, bottom=(11,226), top=(143,358), missing_edge)]
+Mesh loaded: Ni=2918, Nb=131, Ne=1989
+Mesh geometry order: q=1 (straight triangles)
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=0.333333  eta=0.333333  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2 -> CFL scale factor 2/sr: 1
+Starting solver for grids/2k.gri (DG Order p=0, CFL: 1, Flux: roe, IterCap: 200000, Mode: Steady)
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 3.049299e+01 | Target residual (1e-5 * baseline): 3.049299e-04
+Iter:      0 | Residual: 3.049299e+01 | RelRes: 1.000000e+00 | Min Rho: 1.000000e+00 | Min P: 7.142857e-01
+Iter:   1000 | Residual: 9.022266e-01 | RelRes: 2.958800e-02 | Min Rho: 7.135161e-01 | Min P: 4.525367e-01
+Iter:   2000 | Residual: 7.218642e-02 | RelRes: 2.367312e-03 | Min Rho: 7.246823e-01 | Min P: 4.630583e-01
+Iter:   3000 | Residual: 5.174114e-03 | RelRes: 1.696821e-04 | Min Rho: 7.245544e-01 | Min P: 4.629087e-01
+Iter:   4000 | Residual: 4.101271e-04 | RelRes: 1.344988e-05 | Min Rho: 7.244797e-01 | Min P: 4.628401e-01
+Iter:   4138 | Residual: 3.036596e-04 | RelRes: 9.958342e-06 | Min Rho: 7.244819e-01 | Min P: 4.628419e-01
+Converged in 4138 iterations.
+  Cl = 490.391  (1989 elements)
+Results saved to data_steady/steady_2k_p0_results.bin
+DG coefficients saved to data_steady/steady_2k_p0_results_dg.bin
+Residual history saved to data_steady/steady_2k_p0_residual.bin
+Spatial residuals saved to data_steady/steady_2k_p0_cell_res.bin
+PeriodicGroup read: total_pairs=58, groups=1, per_group=[58]
+pairing periodic edges from ordered node pairs...
+Added 56 periodic IEs to mesh
+WARNING: periodic ordered-pair candidates not added. count=1, samples=[(g=0, i=28, bottom=(11,226), top=(143,358), missing_edge)]
+Mesh loaded: Ni=11803, Nb=262, Ne=7956
+Mesh geometry order: q=1 (straight triangles)
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=0.333333  eta=0.333333  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2 -> CFL scale factor 2/sr: 1
+Starting solver for grids/8k.gri (DG Order p=0, CFL: 1, Flux: roe, IterCap: 200000, Mode: Steady)
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 3.049298e+01 | Target residual (1e-5 * baseline): 3.049298e-04
+Iter:      0 | Residual: 3.049298e+01 | RelRes: 1.000000e+00 | Min Rho: 1.000000e+00 | Min P: 7.142857e-01
+Iter:   1000 | Residual: 6.470998e+00 | RelRes: 2.122127e-01 | Min Rho: 7.033882e-01 | Min P: 4.401274e-01
+Iter:   2000 | Residual: 1.577122e+00 | RelRes: 5.172083e-02 | Min Rho: 7.064327e-01 | Min P: 4.434113e-01
+Iter:   3000 | Residual: 4.387575e-01 | RelRes: 1.438880e-02 | Min Rho: 7.183950e-01 | Min P: 4.546093e-01
+Iter:   4000 | Residual: 2.154903e-01 | RelRes: 7.066883e-03 | Min Rho: 7.278973e-01 | Min P: 4.628993e-01
+Iter:   5000 | Residual: 9.017602e-02 | RelRes: 2.957271e-03 | Min Rho: 7.249572e-01 | Min P: 4.601582e-01
+Iter:   6000 | Residual: 4.026482e-02 | RelRes: 1.320462e-03 | Min Rho: 7.258599e-01 | Min P: 4.610211e-01
+Iter:   7000 | Residual: 2.039505e-02 | RelRes: 6.688440e-04 | Min Rho: 7.265443e-01 | Min P: 4.616175e-01
+Iter:   8000 | Residual: 9.014489e-03 | RelRes: 2.956250e-04 | Min Rho: 7.260057e-01 | Min P: 4.611434e-01
+Iter:   9000 | Residual: 3.907620e-03 | RelRes: 1.281482e-04 | Min Rho: 7.261609e-01 | Min P: 4.612800e-01
+Iter:   9999 | Saved steady temp checkpoint: data_steady/steady_8k_p0_temp_iter_latest.bin | Saved steady temp DG checkpoint: data_steady/steady_8k_p0_temp_iter_latest_dg.bin | Saved steady temp residual history: data_steady/steady_8k_p0_temp_iter_residual.bin | Saved steady temp cell residuals: data_steady/steady_8k_p0_temp_iter_cell_res.bin
+Iter:  10000 | Residual: 1.967848e-03 | RelRes: 6.453446e-05 | Min Rho: 7.261836e-01 | Min P: 4.612998e-01
+Iter:  11000 | Residual: 9.427455e-04 | RelRes: 3.091680e-05 | Min Rho: 7.261348e-01 | Min P: 4.612570e-01
+Iter:  12000 | Residual: 3.986243e-04 | RelRes: 1.307266e-05 | Min Rho: 7.261574e-01 | Min P: 4.612768e-01
+Iter:  12346 | Residual: 3.048159e-04 | RelRes: 9.996265e-06 | Min Rho: 7.261514e-01 | Min P: 4.612716e-01
+Converged in 12346 iterations.
+  Cl = 511.27  (7956 elements)
+Results saved to data_steady/steady_8k_p0_results.bin
+DG coefficients saved to data_steady/steady_8k_p0_results_dg.bin
+Residual history saved to data_steady/steady_8k_p0_residual.bin
+Spatial residuals saved to data_steady/steady_8k_p0_cell_res.bin
+PeriodicGroup read: total_pairs=114, groups=1, per_group=[114]
+pairing periodic edges from ordered node pairs...
+Added 112 periodic IEs to mesh
+WARNING: periodic ordered-pair candidates not added. count=1, samples=[(g=0, i=56, bottom=(11,226), top=(143,358), missing_edge)]
+Mesh loaded: Ni=47474, Nb=524, Ne=31824
+Mesh geometry order: q=1 (straight triangles)
+Initializing DG solver with p=0, ndof_per_elem=1
+  Mesh geometry order: q=1 (straight triangles, no curved elements)
+  Geometry q=1 >= solution p=0 — isoparametric or superparametric. Good.
+  Inverse mapping check (elem 0 centroid): converged  xi=0.333333  eta=0.333333  (expected ~0.333, ~0.333)
+  M_ref^{-1} spectral radius (p=0): 2 -> CFL scale factor 2/sr: 1
+Starting solver for grids/32k.gri (DG Order p=0, CFL: 1, Flux: roe, IterCap: 200000, Mode: Steady)
+Beginning DG solver loop for 200000 iterations (p=0)...
+Baseline residual: 3.049298e+01 | Target residual (1e-5 * baseline): 3.049298e-04
+Iter:      0 | Residual: 3.049298e+01 | RelRes: 1.000000e+00 | Min Rho: 1.000000e+00 | Min P: 7.142857e-01
+Iter:   1000 | Residual: 2.310668e+01 | RelRes: 7.577704e-01 | Min Rho: 6.345918e-01 | Min P: 3.794140e-01
+Iter:   2000 | Residual: 1.047288e+01 | RelRes: 3.434521e-01 | Min Rho: 6.836615e-01 | Min P: 4.216062e-01
+Iter:   3000 | Residual: 6.707132e+00 | RelRes: 2.199566e-01 | Min Rho: 6.807320e-01 | Min P: 4.193697e-01
+Iter:   4000 | Residual: 3.148033e+00 | RelRes: 1.032379e-01 | Min Rho: 6.936628e-01 | Min P: 4.304041e-01
+Iter:   5000 | Residual: 1.888149e+00 | RelRes: 6.192077e-02 | Min Rho: 7.362325e-01 | Min P: 4.680313e-01
+Iter:   6000 | Residual: 1.030593e+00 | RelRes: 3.379771e-02 | Min Rho: 7.147602e-01 | Min P: 4.493838e-01
+Iter:   7000 | Residual: 6.297714e-01 | RelRes: 2.065299e-02 | Min Rho: 7.197540e-01 | Min P: 4.535891e-01
+Iter:   8000 | Residual: 5.018605e-01 | RelRes: 1.645823e-02 | Min Rho: 7.274035e-01 | Min P: 4.604035e-01
+Iter:   9000 | Residual: 3.674951e-01 | RelRes: 1.205179e-02 | Min Rho: 7.213700e-01 | Min P: 4.550228e-01
+Iter:   9999 | Saved steady temp checkpoint: data_steady/steady_32k_p0_temp_iter_latest.bin | Saved steady temp DG checkpoint: data_steady/steady_32k_p0_temp_iter_latest_dg.bin | Saved steady temp residual history: data_steady/steady_32k_p0_temp_iter_residual.bin | Saved steady temp cell residuals: data_steady/steady_32k_p0_temp_iter_cell_res.bin
+Iter:  10000 | Residual: 2.843399e-01 | RelRes: 9.324764e-03 | Min Rho: 7.249069e-01 | Min P: 4.581227e-01
+Iter:  11000 | Residual: 2.359022e-01 | RelRes: 7.736277e-03 | Min Rho: 7.298041e-01 | Min P: 4.624766e-01
+Iter:  12000 | Residual: 1.843987e-01 | RelRes: 6.047251e-03 | Min Rho: 7.240915e-01 | Min P: 4.574530e-01
+Iter:  13000 | Residual: 1.339044e-01 | RelRes: 4.391319e-03 | Min Rho: 7.270299e-01 | Min P: 4.599919e-01
+Iter:  14000 | Residual: 1.056140e-01 | RelRes: 3.463549e-03 | Min Rho: 7.290888e-01 | Min P: 4.618377e-01
+Iter:  15000 | Residual: 8.456491e-02 | RelRes: 2.773258e-03 | Min Rho: 7.257941e-01 | Min P: 4.589177e-01
+Iter:  16000 | Residual: 6.071808e-02 | RelRes: 1.991215e-03 | Min Rho: 7.274384e-01 | Min P: 4.603587e-01
+Iter:  17000 | Residual: 4.867874e-02 | RelRes: 1.596392e-03 | Min Rho: 7.280833e-01 | Min P: 4.609527e-01
+Iter:  18000 | Residual: 3.942250e-02 | RelRes: 1.292838e-03 | Min Rho: 7.265906e-01 | Min P: 4.596164e-01

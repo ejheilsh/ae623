@@ -1,1 +1,10 @@
-*.bin
+# Large binary data and build artifacts
+grids/
+data_steady/
+euler_solver.exe
+*.o
+*.obj
+
+# Heavy rendered summaries (keep contours, adjoint, Cl plots)
+report_figures/01_solution_summaries/
+report_figures/02_processed_cases/
