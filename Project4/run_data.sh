@@ -41,7 +41,7 @@ echo "================================================================"
 echo "  SECTION 1: Uniform refinement — p=0 on all mesh sizes"
 echo "================================================================"
 
-for grid in 2k 8k 32k 128k; do
+for grid in 2k 8k 32k; do #128k
   GRIDFILE="grids/${grid}.gri"
   MARKER="${OUTDIR}/steady_${grid}_p0_results.bin"
 
@@ -62,7 +62,7 @@ done
 echo "--- Collecting uniform Cl values ---"
 UNIFORM_LOG="${OUTDIR}/uniform_run.log"
 > "$UNIFORM_LOG"
-for grid in 2k 8k 32k 128k; do
+for grid in 2k 8k 32k; do #128k
   LOG="${OUTDIR}/${grid}_p0_run.log"
   if [[ -f "$LOG" ]]; then
     cat "$LOG" >> "$UNIFORM_LOG"
