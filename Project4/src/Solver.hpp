@@ -110,6 +110,9 @@ public:
 private:
   // Mass matrix (reference triangle, inverted once at init)
   std::vector<std::vector<double>> MassMatrixInv;
+  // Per-element physical mass matrix inverses for curved (q>1) elements.
+  // For affine elements (q=1), elemMassInv[e] is empty and we use MassMatrixInv / area_scale.
+  std::vector<std::vector<std::vector<double>>> elemMassInv;
   double mass_spectral_radius = 2.0;
 
   // Cell-average weights: w_j = (1/A_ref) * int phi_j dA_ref

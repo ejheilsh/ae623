@@ -1,4 +1,0 @@
-data_steady/steady_32k_q3_p1_temp_iter_latest.bin
-data_steady/steady_32k_q3_p1_temp_iter_latest_dg.bin
-data_steady/steady_32k_q3_p1_temp_iter_residual.bin
-data_steady/steady_32k_q3_p1_temp_iter_cell_res.bin

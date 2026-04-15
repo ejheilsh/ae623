@@ -634,6 +634,59 @@ void FiniteVolumeSolver::computeMassMatrix() {
               << mass_spectral_radius << " -> CFL scale factor 2/sr: "
               << 2.0 / mass_spectral_radius << std::endl;
   }
+
+  // ── Per-element physical mass matrices for curved elements ─────────────
+  // For curved (q>1) elements, |J(ξ,η)| varies over the element, so
+  // M_phys ≠ |J_const| * M_ref.  Compute and invert M_phys per element.
+  {
+    int Ne = (int)mesh.E.size();
+    elemMassInv.assign(Ne, {});
+    int n_curved = 0;
+    for (int e = 0; e < Ne; ++e) {
+      if (mesh.E[e].q_order <= 1) continue;
+      n_curved++;
+      // Build physical mass matrix: M_ij = ∫ phi_i(ξ,η) phi_j(ξ,η) |J(ξ,η)| dξ dη
+      std::vector<std::vector<double>> Mphys(ndof, std::vector<double>(ndof, 0.0));
+      for (const auto &qp : qpts) {
+        std::vector<double> phi = evaluateBasis(qp.xi, qp.eta, p_order);
+        ElementGeomEval geom = mesh.evaluateElementGeometry(e, qp.xi, qp.eta);
+        double w = qp.w * std::abs(geom.detJ);
+        for (int i = 0; i < ndof; ++i)
+          for (int j = 0; j < ndof; ++j)
+            Mphys[i][j] += w * phi[i] * phi[j];
+      }
+      // Invert via Gauss-Jordan
+      std::vector<std::vector<double>> aug(ndof, std::vector<double>(2*ndof, 0.0));
+      for (int i = 0; i < ndof; ++i) {
+        for (int j = 0; j < ndof; ++j) aug[i][j] = Mphys[i][j];
+        aug[i][ndof + i] = 1.0;
+      }
+      for (int col = 0; col < ndof; ++col) {
+        int pivot = col;
+        for (int row = col+1; row < ndof; ++row)
+          if (std::abs(aug[row][col]) > std::abs(aug[pivot][col])) pivot = row;
+        std::swap(aug[col], aug[pivot]);
+        double diag = aug[col][col];
+        if (std::abs(diag) < 1e-14) {
+          std::cerr << "computeMassMatrix: singular physical mass matrix at elem=" << e << std::endl;
+          exit(1);
+        }
+        for (int j = 0; j < 2*ndof; ++j) aug[col][j] /= diag;
+        for (int row = 0; row < ndof; ++row) {
+          if (row == col) continue;
+          double factor = aug[row][col];
+          for (int j = 0; j < 2*ndof; ++j) aug[row][j] -= factor * aug[col][j];
+        }
+      }
+      elemMassInv[e].assign(ndof, std::vector<double>(ndof, 0.0));
+      for (int i = 0; i < ndof; ++i)
+        for (int j = 0; j < ndof; ++j)
+          elemMassInv[e][i][j] = aug[i][ndof + j];
+    }
+    if (n_curved > 0)
+      std::cout << "  Built per-element physical mass matrices for " << n_curved
+                << " curved elements." << std::endl;
+  }
 }
 
 // cellAverage — compute the true L2 cell average from nodal DOF vector
@@ -1097,6 +1150,8 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
         if (mesh.E[eR].v[k] == vbR) ibR = k;
       }
 
+      bool curved_face = (mesh.E[eL].q_order > 1);
+
       for (int q = 0; q < qr.n; ++q) {
         double t = qr.points[q];
         const auto &phiL =
@@ -1114,11 +1169,21 @@ FiniteVolumeSolver::calcResidualDG(const std::vector<std::vector<Vec4>> &Un_dg,
           u_R += Un_dg[eR][j] * phiR[j];
         }
 
-        FluxResult fr;
-        if (fluxname == "hlle") fr = fluxHLLE(u_L, u_R, normal, gamma);
-        else                     fr = fluxRoe (u_L, u_R, normal, gamma);
+        Vec2 n_q;
+        double w;
+        if (curved_face) {
+          EdgeGeomEval edge_geom = mesh.evaluateEdgeGeometry(eL, va, vb, t);
+          n_q = edge_geom.normal;
+          w = qr.weights[q] * edge_geom.ds_dt;
+        } else {
+          n_q = normal;
+          w = qr.weights[q] * len;
+        }
 
-        double w = qr.weights[q] * len;
+        FluxResult fr;
+        if (fluxname == "hlle") fr = fluxHLLE(u_L, u_R, n_q, gamma);
+        else                     fr = fluxRoe (u_L, u_R, n_q, gamma);
+
         for (int j = 0; j < ndof_per_elem; ++j) {
           Racc[eL * ndof_per_elem + j] += fr.F * (w * phiL[j]);
           Racc[eR * ndof_per_elem + j] -= fr.F * (w * phiR[j]);
@@ -1368,7 +1433,12 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
   // Stagnation detection: if the best residual seen over the last
   // stag_window iterations has not improved by a factor of stag_factor,
   // declare the solver stagnated and treat the current state as converged.
-  const int    stag_window  = 3000;  // iterations per check period
+  // Scale the window by the inverse CFL factor so higher-order solves (which
+  // take proportionally smaller time steps) get enough iterations to show
+  // meaningful progress before being declared stagnated.
+  const double cfl_scale = 2.0 / mass_spectral_radius;  // same as in rk4_DG
+  const int    stag_window_raw = (int)(3000.0 / cfl_scale);
+  const int    stag_window  = std::max(3000, std::min(stag_window_raw, 50000));
   const double stag_factor  = 0.8;   // must improve by 20% to be considered progressing
   double stag_best_prev   = std::numeric_limits<double>::max();
   double stag_best_cur    = std::numeric_limits<double>::max();
@@ -1481,8 +1551,12 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
                 << " | Residual: " << std::scientific << std::setprecision(6)
                 << Rnorm
                 << " | RelRes: " << (baseline_residual > 0.0 ? Rnorm / baseline_residual : 0.0)
-                << " | Min Rho: " << minRho << " | Min P: " << minP
-                << std::endl;
+                << " | Min Rho: " << minRho << " | Min P: " << minP;
+      if (niter > 0 && niter % 5000 == 0) {
+        double Cl_now = integrateCl();
+        std::cout << " | Cl: " << std::fixed << std::setprecision(6) << Cl_now;
+      }
+      std::cout << std::endl;
     }
 
     if ((niter + 1) % temp_snapshot_interval == 0) {
@@ -2053,6 +2127,17 @@ static void applyMassInv(const std::vector<std::vector<double>> &Minv,
   }
 }
 
+// Apply per-element physical mass matrix inverse (for curved elements, no area_scale needed)
+static void applyMassInvPhys(const std::vector<std::vector<double>> &Minv_phys,
+                              const Vec4 *R_elem, int ndof, Vec4 *out) {
+  for (int i = 0; i < ndof; ++i) {
+    Vec4 rhs = {0,0,0,0};
+    for (int j = 0; j < ndof; ++j)
+      rhs += R_elem[j] * Minv_phys[i][j];
+    out[i] = rhs;
+  }
+}
+
 // DG RK4 with local time stepping (for steady state)
 std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
     const std::vector<std::vector<Vec4>> &Un_dg,
@@ -2082,16 +2167,16 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   // k1 = M^{-1} R(Un)
   std::vector<std::vector<Vec4>> k1(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k1[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, area_scale, k1[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res1.R[e * ndof_per_elem], ndof_per_elem, k1[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k1[e].data());
   }
 
   // --- Stage 2: k2 = M^{-1} R(Un - 0.5*dt*k1) ---
   std::vector<std::vector<Vec4>> Utmp(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Build the stage-2 state independently for each element.
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
@@ -2099,15 +2184,15 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   ResidualResult res2 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k2(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k2[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, area_scale, k2[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res2.R[e * ndof_per_elem], ndof_per_elem, k2[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k2[e].data());
   }
 
   // --- Stage 3: k3 = M^{-1} R(Un - 0.5*dt*k2) ---
-  // Build the stage-3 state independently for each element.
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
@@ -2115,15 +2200,15 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   ResidualResult res3 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k3(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k3[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, area_scale, k3[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res3.R[e * ndof_per_elem], ndof_per_elem, k3[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k3[e].data());
   }
 
   // --- Stage 4: k4 = M^{-1} R(Un - dt*k3) ---
-  // Build the stage-4 state independently for each element.
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
@@ -2131,11 +2216,12 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   ResidualResult res4 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k4(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k4[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, area_scale, k4[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res4.R[e * ndof_per_elem], ndof_per_elem, k4[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k4[e].data());
   }
 
   // --- Update: Un+1 = Un - dt/6 * (k1 + 2*k2 + 2*k3 + k4) ---
@@ -2164,16 +2250,16 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
                                          : calcResidualDG(Un_dg, time, use_unsteady_wake);
 
   std::vector<std::vector<Vec4>> k1(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k1[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, area_scale, k1[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res1.R[e * ndof_per_elem], ndof_per_elem, k1[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res1.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k1[e].data());
   }
 
   // --- Stage 2: k2 = M^{-1} R(Un - 0.5*dt*k1) ---
   std::vector<std::vector<Vec4>> Utmp(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Build the stage-2 state independently for each element.
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
@@ -2181,15 +2267,15 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   ResidualResult res2 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k2(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k2[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, area_scale, k2[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res2.R[e * ndof_per_elem], ndof_per_elem, k2[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res2.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k2[e].data());
   }
 
   // --- Stage 3: k3 = M^{-1} R(Un - 0.5*dt*k2) ---
-  // Build the stage-3 state independently for each element.
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
@@ -2197,15 +2283,15 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   ResidualResult res3 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k3(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k3[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, area_scale, k3[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res3.R[e * ndof_per_elem], ndof_per_elem, k3[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res3.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k3[e].data());
   }
 
   // --- Stage 4: k4 = M^{-1} R(Un - dt*k3) ---
-  // Build the stage-4 state independently for each element.
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e)
     for (int i = 0; i < ndof_per_elem; ++i)
@@ -2213,11 +2299,12 @@ std::vector<std::vector<Vec4>> FiniteVolumeSolver::rk4_DG(
 
   ResidualResult res4 = calcResidualDG(Utmp, time, use_unsteady_wake);
   std::vector<std::vector<Vec4>> k4(Ne, std::vector<Vec4>(ndof_per_elem));
-  // Mass-matrix application is element-local and writes only into k4[e].
 #pragma omp parallel for if (Ne > 64)
   for (int e = 0; e < Ne; ++e) {
-    double area_scale = mesh.areas[e] / 0.5;
-    applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, area_scale, k4[e].data());
+    if (!elemMassInv[e].empty())
+      applyMassInvPhys(elemMassInv[e], &res4.R[e * ndof_per_elem], ndof_per_elem, k4[e].data());
+    else
+      applyMassInv(MassMatrixInv, &res4.R[e * ndof_per_elem], ndof_per_elem, mesh.areas[e] / 0.5, k4[e].data());
   }
 
   // --- Update: Un+1 = Un - dt/6 * (k1 + 2*k2 + 2*k3 + k4) ---
