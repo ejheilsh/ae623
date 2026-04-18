@@ -54,7 +54,7 @@ struct BladeSplineReference {
   double xmax = 0.0;
   double s_total_upper = 0.0;
   double s_total_lower = 0.0;
-  double snap_distance_tol = 1.0;
+  double snap_distance_tol = 50.0;
   tk::spline upper_x;
   tk::spline upper_y;
   tk::spline lower_x;
@@ -77,7 +77,7 @@ BladeSplineReference &bladeSplineReference() {
   if (const char *shift_env = std::getenv("BLADE_SURFACE_YSHIFT")) {
     if (*shift_env) domain_height = std::atof(shift_env);
   }
-  double snap_distance_tol = 1.0;
+  double snap_distance_tol = 50.0;
   if (const char *snap_env = std::getenv("BLADE_SNAP_MAX_DIST")) {
     if (*snap_env) snap_distance_tol = std::atof(snap_env);
   }

@@ -150,12 +150,29 @@ def save_mp4(frames, durations_ms, output):
         subprocess.run(cmd, cwd=tmpdir, check=True)
 
 
+def compute_boundary_edges(elements):
+    """Return list of (v0, v1) pairs that appear in exactly one triangle."""
+    from collections import Counter
+    counts = Counter()
+    for tri in elements:
+        v = list(tri)
+        for i in range(3):
+            counts[tuple(sorted([v[i], v[(i + 1) % 3]]))] += 1
+    return [e for e, c in counts.items() if c == 1]
+
+
 def render_frame(nodes, elements, q_orders, cycle, figscale, dpi,
                  xlim, ylim, indicators=None, ind_limits=None, blade=None):
     verts = [nodes[e] for e in elements]
     ne = len(elements)
     n_curved = int(np.count_nonzero(q_orders > 1))
     q_global = int(q_orders.max()) if len(q_orders) else 1
+
+    # Boundary edges — drawn in orange over the mesh to show wall node positions.
+    bdry_edges = compute_boundary_edges(elements)
+    # Collect unique boundary nodes for scatter plot.
+    bdry_node_idx = sorted({v for e in bdry_edges for v in e})
+    bdry_nodes = nodes[bdry_node_idx] if bdry_node_idx else np.empty((0, 2))
 
     if indicators is not None:
         fig, axes = plt.subplots(1, 2, figsize=(14 * figscale, 5 * figscale))
@@ -165,37 +182,49 @@ def render_frame(nodes, elements, q_orders, cycle, figscale, dpi,
 
     fig.suptitle(f"Adaptation cycle {cycle} | {ne} elements | q_max={q_global} | curved={n_curved}")
 
-    ax = axes[0]
-    mesh_pc = PolyCollection(verts, facecolors="white", edgecolors="black", linewidths=0.35)
-    ax.add_collection(mesh_pc)
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
-    ax.set_aspect("equal")
-    ax.set_title("Mesh")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    if blade is not None:
-        ax.plot(blade["upper"][:, 0], blade["upper"][:, 1], color="crimson", lw=1.2)
-        ax.plot(blade["lower"][:, 0], blade["lower"][:, 1], color="crimson", lw=1.2)
+    for ax_idx, ax in enumerate(axes):
+        is_indicator_panel = (ax_idx == 1 and indicators is not None)
 
-    if indicators is not None:
-        ax2 = axes[1]
-        ind_log = np.log10(np.maximum(indicators, 1e-30))
-        vmin, vmax = ind_limits
-        ind_pc = PolyCollection(verts, cmap="hot", edgecolors="black", linewidths=0.15)
-        ind_pc.set_array(ind_log)
-        ind_pc.set_clim(vmin, vmax)
-        ax2.add_collection(ind_pc)
-        ax2.set_xlim(*xlim)
-        ax2.set_ylim(*ylim)
-        ax2.set_aspect("equal")
-        ax2.set_title("Indicators")
-        ax2.set_xlabel("x")
-        ax2.set_ylabel("y")
+        if is_indicator_panel:
+            ind_log = np.log10(np.maximum(indicators, 1e-30))
+            vmin, vmax = ind_limits
+            pc = PolyCollection(verts, cmap="hot", edgecolors="black", linewidths=0.15)
+            pc.set_array(ind_log)
+            pc.set_clim(vmin, vmax)
+            ax.add_collection(pc)
+            fig.colorbar(pc, ax=ax, label="log10(indicator)")
+            ax.set_title("Indicators")
+        else:
+            pc = PolyCollection(verts, facecolors="white", edgecolors="#aaaaaa",
+                                linewidths=0.35)
+            ax.add_collection(pc)
+            ax.set_title("Mesh")
+
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_aspect("equal")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+
+        # Blade reference splines — true geometry the wall nodes should lie on.
         if blade is not None:
-            ax2.plot(blade["upper"][:, 0], blade["upper"][:, 1], color="cyan", lw=1.0)
-            ax2.plot(blade["lower"][:, 0], blade["lower"][:, 1], color="cyan", lw=1.0)
-        fig.colorbar(ind_pc, ax=ax2, label="log10(indicator)")
+            blade_col = "cyan" if is_indicator_panel else "crimson"
+            ax.plot(blade["upper"][:, 0], blade["upper"][:, 1],
+                    color=blade_col, lw=1.5, label="blade surface", zorder=4)
+            ax.plot(blade["lower"][:, 0], blade["lower"][:, 1],
+                    color=blade_col, lw=1.5, zorder=4)
+
+        # Boundary edges — orange so wall snapping quality is easy to see.
+        from matplotlib.collections import LineCollection
+        segs = [[nodes[e[0]], nodes[e[1]]] for e in bdry_edges]
+        if segs:
+            lc = LineCollection(segs, colors="darkorange", linewidths=1.4, zorder=3)
+            ax.add_collection(lc)
+
+        # Boundary nodes — dots to show exact vertex positions on/near the blade.
+        if len(bdry_nodes):
+            ax.scatter(bdry_nodes[:, 0], bdry_nodes[:, 1],
+                       s=14, color="darkorange", zorder=5)
 
     fig.tight_layout()
     buf = io.BytesIO()
@@ -262,22 +291,21 @@ def main():
     else:
         ind_limits = (ind_vmin, ind_vmax)
 
-    blade = None
-    if args.show_blade:
-        blade = load_blade_reference(
-            upper_path=args.blade_upper,
-            lower_path=args.blade_lower,
-            lower_shift=args.blade_lower_shift,
+    # Always try to load blade reference — show_blade flag kept for back-compat.
+    blade = load_blade_reference(
+        upper_path=args.blade_upper,
+        lower_path=args.blade_lower,
+        lower_shift=args.blade_lower_shift,
+    )
+    if blade is not None:
+        print(
+            "Using blade reference:",
+            blade["upper_path"],
+            blade["lower_path"],
+            f"(lower shift={blade['lower_shift']})",
         )
-        if blade is None:
-            print("Warning: blade reference requested but no bladeupper/bladelower files were found.")
-        else:
-            print(
-                "Using blade reference:",
-                blade["upper_path"],
-                blade["lower_path"],
-                f"(lower shift={blade['lower_shift']})",
-            )
+    else:
+        print("No blade reference files found — blade curves will not be shown.")
 
     frames = []
     for idx, cycle in enumerate(cycles, start=1):
