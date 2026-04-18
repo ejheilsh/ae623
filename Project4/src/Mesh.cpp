@@ -223,6 +223,18 @@ bool Mesh::readGRI(const std::string &filename) {
     // Standard GRI format: nElements degree TriLagrange
     // degree = geometry order: 1 → 3 nodes, 2 → 6 nodes, 3 → 10 nodes
     // nodes_per_elem = (degree+1)*(degree+2)/2
+    if (type != "TriLagrange") {
+      std::cerr << "Warning: skipping unexpected non-element block: "
+                << ne << " " << degree << " " << type << std::endl;
+      continue;
+    }
+
+    if (ne <= 0) {
+      std::cerr << "Warning: skipping empty TriLagrange block with degree "
+                << degree << std::endl;
+      continue;
+    }
+
     int nodes_per_elem = (degree + 1) * (degree + 2) / 2;
     int q = degree;
 

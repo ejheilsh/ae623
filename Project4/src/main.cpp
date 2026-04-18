@@ -2,11 +2,157 @@
 #include "Adjoint.hpp"
 #include "MeshRefinement.hpp"
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <string>
+#include <vector>
+
+namespace {
+
+struct MeshValidationReport {
+  double min_signed_area = std::numeric_limits<double>::max();
+  double max_signed_area = -std::numeric_limits<double>::max();
+  int nonpositive_area_count = 0;
+  int tiny_area_count = 0;
+  int duplicate_boundary_edge_count = 0;
+  int invalid_boundary_owner_count = 0;
+  int invalid_interior_owner_count = 0;
+  int bad_edge_owner_count = 0;
+  int nonmanifold_edge_count = 0;
+  int orphan_edge_count = 0;
+  double min_angle_deg = 180.0;
+  double worst_quality = std::numeric_limits<double>::max();
+};
+
+std::pair<int, int> sortedEdgeKey(int a, int b) {
+  return {std::min(a, b), std::max(a, b)};
+}
+
+double triangleSignedArea(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
+  return 0.5 * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+}
+
+double angleDegBetween(const Vec2 &u, const Vec2 &v) {
+  double nu = u.norm();
+  double nv = v.norm();
+  if (nu <= 0.0 || nv <= 0.0) return 0.0;
+  double c = (u.x * v.x + u.y * v.y) / (nu * nv);
+  c = std::max(-1.0, std::min(1.0, c));
+  return std::acos(c) * 180.0 / M_PI;
+}
+
+MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
+  MeshValidationReport report;
+
+  std::map<std::pair<int, int>, int> elem_edge_counts;
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    const auto &elem = mesh.E[e];
+    const Vec2 &a = mesh.V[elem.v[0]];
+    const Vec2 &b = mesh.V[elem.v[1]];
+    const Vec2 &c = mesh.V[elem.v[2]];
+
+    double sarea = triangleSignedArea(a, b, c);
+    report.min_signed_area = std::min(report.min_signed_area, sarea);
+    report.max_signed_area = std::max(report.max_signed_area, sarea);
+    if (!(sarea > 0.0)) report.nonpositive_area_count++;
+    if (std::abs(sarea) < 1e-12) report.tiny_area_count++;
+
+    Vec2 ab = b - a, bc = c - b, ca = a - c;
+    double lab = ab.norm(), lbc = bc.norm(), lca = ca.norm();
+    double l2sum = lab * lab + lbc * lbc + lca * lca;
+    if (l2sum > 0.0) {
+      double quality = 4.0 * std::sqrt(3.0) * std::abs(sarea) / l2sum;
+      report.worst_quality = std::min(report.worst_quality, quality);
+    }
+
+    double ang_a = angleDegBetween(b - a, c - a);
+    double ang_b = angleDegBetween(a - b, c - b);
+    double ang_c = angleDegBetween(a - c, b - c);
+    report.min_angle_deg = std::min(report.min_angle_deg,
+                                    std::min(ang_a, std::min(ang_b, ang_c)));
+
+    elem_edge_counts[sortedEdgeKey(elem.v[0], elem.v[1])]++;
+    elem_edge_counts[sortedEdgeKey(elem.v[1], elem.v[2])]++;
+    elem_edge_counts[sortedEdgeKey(elem.v[2], elem.v[0])]++;
+  }
+
+  for (const auto &[edge, count] : elem_edge_counts) {
+    if (count == 1) report.orphan_edge_count++;
+    else if (count > 2) report.nonmanifold_edge_count++;
+  }
+
+  std::map<std::pair<int, int>, int> boundary_edge_counts;
+  for (const auto &be : mesh.BE) {
+    auto key = sortedEdgeKey(be.v[0], be.v[1]);
+    boundary_edge_counts[key]++;
+    if (be.elemL < 0 || be.elemL >= static_cast<int>(mesh.E.size()))
+      report.invalid_boundary_owner_count++;
+  }
+  for (const auto &[edge, count] : boundary_edge_counts) {
+    if (count > 1) report.duplicate_boundary_edge_count++;
+  }
+
+  for (const auto &ie : mesh.IE) {
+    if (ie.elemL < 0 || ie.elemL >= static_cast<int>(mesh.E.size()) ||
+        ie.elemR < 0 || ie.elemR >= static_cast<int>(mesh.E.size()) ||
+        ie.elemL == ie.elemR) {
+      report.invalid_interior_owner_count++;
+    }
+  }
+
+  for (const auto &[edge, count] : elem_edge_counts) {
+    bool in_be = boundary_edge_counts.count(edge) > 0;
+    bool in_ie = false;
+    for (const auto &ie : mesh.IE) {
+      if (sortedEdgeKey(ie.v[0], ie.v[1]) == edge) {
+        in_ie = true;
+        break;
+      }
+    }
+
+    if (count == 1 && !in_be) report.bad_edge_owner_count++;
+    if (count == 2 && !in_ie) report.bad_edge_owner_count++;
+    if (count > 2) report.bad_edge_owner_count++;
+  }
+
+  if (mesh.E.empty()) {
+    report.min_signed_area = 0.0;
+    report.max_signed_area = 0.0;
+    report.min_angle_deg = 0.0;
+    report.worst_quality = 0.0;
+  } else if (report.worst_quality == std::numeric_limits<double>::max()) {
+    report.worst_quality = 0.0;
+  }
+
+  return report;
+}
+
+void printMeshValidationReport(const MeshValidationReport &r) {
+  std::cerr << "  Mesh validation:" << std::endl;
+  std::cerr << "    signed area range = [" << r.min_signed_area << ", "
+            << r.max_signed_area << "]" << std::endl;
+  std::cerr << "    non-positive elements = " << r.nonpositive_area_count
+            << " | tiny-area elements = " << r.tiny_area_count << std::endl;
+  std::cerr << "    min angle = " << r.min_angle_deg
+            << " deg | worst quality = " << r.worst_quality << std::endl;
+  std::cerr << "    bad edge ownership = " << r.bad_edge_owner_count
+            << " | nonmanifold edges = " << r.nonmanifold_edge_count
+            << " | orphan edges = " << r.orphan_edge_count << std::endl;
+  std::cerr << "    duplicate boundary edges = "
+            << r.duplicate_boundary_edge_count
+            << " | invalid boundary owners = "
+            << r.invalid_boundary_owner_count
+            << " | invalid interior owners = "
+            << r.invalid_interior_owner_count << std::endl;
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
   std::cout << std::unitbuf; // Enable unbuffered output for immediate feedback
@@ -302,14 +448,10 @@ int main(int argc, char **argv) {
           solver.initializeDG();
           solver.setInitialCondition();
         } else {
-          // After refinement, U_dg already holds interpolated solution.
-          // Re-init DG internals (mass matrix, quad caches) for new mesh size,
-          // but preserve U_dg — unless the interpolated IC is non-physical, in
-          // which case fall back to a fresh freestream IC.
+          // Restored interpolation mapping for all p_orders
           auto U_dg_save = solver.U_dg;
-          solver.initializeDG();  // sets up mass matrix, resizes U_dg to freestream
+          solver.initializeDG();  // re-build DG data and reset to freestream IC
 
-          // Validate the interpolated IC: check every cell for physical states
           int Ne_cur = (int)solver.mesh.E.size();
           bool ic_ok = ((int)U_dg_save.size() == Ne_cur);
           if (ic_ok) {
@@ -348,6 +490,25 @@ int main(int argc, char **argv) {
         double Cl_cycle = solver.integrateCl();
         std::cerr << "  Cl = " << std::setprecision(6) << Cl_cycle
                   << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
+
+        // Save the converged/stagnated primal state for this adaptation cycle
+        // so post-processing can render solution fields on the adapted mesh.
+        {
+          std::string primal_file = output_dir + "/" + file_prefix
+              + "adjoint_primal_cycle" + std::to_string(cycle) + "_dg.bin";
+          std::ofstream primal_out(primal_file, std::ios::binary);
+          int Ne_p = (int)solver.U_dg.size();
+          int p_p  = solver.p_order;
+          int nd_p = solver.ndof_per_elem;
+          primal_out.write((char*)&Ne_p, sizeof(int));
+          primal_out.write((char*)&p_p,  sizeof(int));
+          primal_out.write((char*)&nd_p, sizeof(int));
+          for (const auto &elem_u : solver.U_dg)
+            for (const auto &d : elem_u)
+              primal_out.write((char*)d.v, sizeof(double) * 4);
+          primal_out.close();
+          std::cerr << "  Primal DG state saved to " << primal_file << std::endl;
+        }
 
         // Step 2: Solve the adjoint
         AdjointSolver adj(solver);
@@ -435,6 +596,33 @@ int main(int argc, char **argv) {
         std::cerr << "  Marking " << n_marked << " elements for refinement" << std::endl;
 
         auto rmap = bisectMarkedElements(solver.mesh, marked);
+        auto mesh_report = validateRefinedMesh(solver.mesh);
+        printMeshValidationReport(mesh_report);
+
+        // Save the newly refined mesh immediately so it can be inspected even
+        // if the next primal solve stalls or is interrupted before completion.
+        {
+          std::string refined_mesh_file = output_dir + "/" + file_prefix
+              + "adjoint_mesh_cycle" + std::to_string(cycle + 1) + ".bin";
+          std::ofstream m_out(refined_mesh_file, std::ios::binary);
+          int Nn = (int)solver.mesh.V.size();
+          m_out.write((char*)&Nn, sizeof(int));
+          for (const auto &v : solver.mesh.V) {
+            m_out.write((char*)&v.x, sizeof(double));
+            m_out.write((char*)&v.y, sizeof(double));
+          }
+          int Ne_m = (int)solver.mesh.E.size();
+          m_out.write((char*)&Ne_m, sizeof(int));
+          for (const auto &e : solver.mesh.E) {
+            int q = e.q_order;
+            m_out.write((char*)&q,      sizeof(int));
+            m_out.write((char*)&e.v[0], sizeof(int));
+            m_out.write((char*)&e.v[1], sizeof(int));
+            m_out.write((char*)&e.v[2], sizeof(int));
+          }
+          m_out.close();
+          std::cerr << "  Refined mesh preview saved to " << refined_mesh_file << std::endl;
+        }
 
         // Step 6: Transfer solution to refined mesh
         solver.U_dg = interpolateSolution(solver.U_dg, rmap, solver.ndof_per_elem);

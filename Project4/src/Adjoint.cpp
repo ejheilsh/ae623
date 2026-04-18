@@ -27,33 +27,116 @@ void AdjointSolver::solve() {
   //    Row c of the stored matrix is the gradient of R[c] w.r.t. all DOFs,
   //    which is dR/dU column c — exactly the transpose Jacobian row needed.
   //    For p=0 DG, only ~15 neighbours are non-zero per row (0.01% fill at N~10k).
-  std::cerr << "Adjoint: assembling sparse Jacobian (" << N << " DOFs) via FD...\n";
+  std::cerr << "Adjoint: assembling sparse Jacobian (" << N << " DOFs) via graph-colored FD...\n";
   std::vector<int>    row_ptr(N + 1, 0);
   std::vector<int>    col_idx;
   std::vector<double> nz_val;
   col_idx.reserve(N * 20);
   nz_val.reserve(N * 20);
+
   {
-    const double eps = 1e-7, drop_tol = 1e-12;
+    const double eps_rel = 1e-7, eps_abs = 1e-10, drop_tol = 1e-12;
     auto R0 = solver_.calcResidualDG(solver_.U_dg);
-    int stride = std::max(1, N / 10);
-    for (int c = 0; c < N; ++c) {
-      if (c % stride == 0)
-        std::cerr << "  FD: " << (100 * c / N) << "% (" << c << "/" << N << ")\n";
-      int elem = c / (ndof * 4), mode = (c / 4) % ndof, comp = c % 4;
-      auto U_pert = solver_.U_dg;
-      U_pert[elem][mode][comp] += eps;
-      auto Rp = solver_.calcResidualDG(U_pert);
-      row_ptr[c] = static_cast<int>(col_idx.size());
-      for (int e2 = 0; e2 < Ne; ++e2)
-        for (int j2 = 0; j2 < ndof; ++j2)
-          for (int k2 = 0; k2 < 4; ++k2) {
-            double v = (Rp.R[e2 * ndof + j2][k2] - R0.R[e2 * ndof + j2][k2]) / eps;
-            if (std::abs(v) > drop_tol) {
-              col_idx.push_back(e2 * ndof * 4 + j2 * 4 + k2);
-              nz_val.push_back(v);
+
+    // Build distance-1 adjacency (elements sharing internal faces)
+    std::vector<std::vector<int>> adj(Ne);
+    for (const auto& edge : solver_.mesh.IE) {
+      adj[edge.elemL].push_back(edge.elemR);
+      adj[edge.elemR].push_back(edge.elemL);
+    }
+
+    // Build distance-2 adjacency
+    std::vector<std::vector<int>> adj2(Ne);
+    for (int e = 0; e < Ne; ++e) {
+      std::set<int> nbrs2;
+      for (int n1 : adj[e]) {
+        nbrs2.insert(n1);
+        for (int n2 : adj[n1]) {
+          nbrs2.insert(n2);
+        }
+      }
+      nbrs2.erase(e);
+      adj2[e].assign(nbrs2.begin(), nbrs2.end());
+    }
+
+    // Greedy Coloring
+    std::vector<int> colors(Ne, -1);
+    int num_colors = 0;
+    for (int e = 0; e < Ne; ++e) {
+      std::set<int> used;
+      for (int nbr : adj2[e]) {
+        if (colors[nbr] != -1) used.insert(colors[nbr]);
+      }
+      int c = 0;
+      while (used.count(c)) c++;
+      colors[e] = c;
+      num_colors = std::max(num_colors, c + 1);
+    }
+
+    std::vector<std::vector<int>> color_groups(num_colors);
+    for (int e = 0; e < Ne; ++e) color_groups[colors[e]].push_back(e);
+    std::cerr << "  Graph coloring: " << num_colors << " colors used.\n";
+
+    // Since we don't compute columns sequentially, accumulate into specific rows
+    // rows[r] will hold a list of pairs (col, value) for A^T
+    std::vector<std::vector<std::pair<int, double>>> csr_rows(N);
+
+    // Evaluate colors
+    int total_evals = num_colors * ndof * 4;
+    int eval = 0;
+    int stride = std::max(1, total_evals / 10);
+
+    for (int c_idx = 0; c_idx < num_colors; ++c_idx) {
+      const auto& elems = color_groups[c_idx];
+      for (int mode = 0; mode < ndof; ++mode) {
+        for (int comp = 0; comp < 4; ++comp) {
+          if (eval % stride == 0)
+            std::cerr << "  Colored FD: " << (100 * eval / total_evals) << "% (" << eval << "/" << total_evals << ")\n";
+          eval++;
+
+          auto U_pert = solver_.U_dg;
+          std::vector<double> eps_list(Ne, 0.0);
+          
+          for (int elem : elems) {
+            double u0 = solver_.U_dg[elem][mode][comp];
+            double eps = eps_rel * std::max(1.0, std::abs(u0)) + eps_abs;
+            eps_list[elem] = eps;
+            U_pert[elem][mode][comp] += eps;
+          }
+
+          auto Rp = solver_.calcResidualDG(U_pert);
+
+          // Extract isolated footprints
+          for (int elem : elems) {
+            double eps = eps_list[elem];
+            int node_c = elem * ndof * 4 + mode * 4 + comp;
+            
+            // Perturbations manifest on elem and its dist-1 neighbors ONLY
+            std::vector<int> footprint = adj[elem];
+            footprint.push_back(elem);
+            
+            for (int e2 : footprint) {
+              for (int j2 = 0; j2 < ndof; ++j2) {
+                for (int k2 = 0; k2 < 4; ++k2) {
+                  double v = (Rp.R[e2 * ndof + j2][k2] - R0.R[e2 * ndof + j2][k2]) / eps;
+                  if (std::abs(v) > drop_tol) {
+                    csr_rows[node_c].push_back({e2 * ndof * 4 + j2 * 4 + k2, v});
+                  }
+                }
+              }
             }
           }
+        }
+      }
+    }
+    
+    // Flatten rows into CSR
+    for (int c = 0; c < N; ++c) {
+      row_ptr[c] = static_cast<int>(col_idx.size());
+      for (const auto& pair : csr_rows[c]) {
+        col_idx.push_back(pair.first);
+        nz_val.push_back(pair.second);
+      }
     }
     row_ptr[N] = static_cast<int>(col_idx.size());
   }
@@ -74,6 +157,80 @@ void AdjointSolver::solve() {
     return w;
   };
 
+  // Block-Jacobi preconditioner based on the diagonal blocks of A.
+  int n_blk = ndof * 4;
+  std::vector<std::vector<std::vector<double>>> inv_blocks(Ne, 
+      std::vector<std::vector<double>>(n_blk, std::vector<double>(n_blk, 0.0)));
+  int n_good_blocks = 0;
+
+  for (int e = 0; e < Ne; ++e) {
+    // Extract dense diagonal block
+    std::vector<std::vector<double>> B(n_blk, std::vector<double>(n_blk, 0.0));
+    for (int r = 0; r < n_blk; ++r) {
+      int row = e * n_blk + r;
+      for (int k = row_ptr[row]; k < row_ptr[row + 1]; ++k) {
+        int col = col_idx[k];
+        if (col >= e * n_blk && col < (e + 1) * n_blk) {
+          B[r][col - e * n_blk] = nz_val[k];
+        }
+      }
+    }
+
+    // Invert block via Gauss-Jordan elimination
+    std::vector<std::vector<double>> invB(n_blk, std::vector<double>(n_blk, 0.0));
+    for (int i = 0; i < n_blk; ++i) invB[i][i] = 1.0;
+    bool singular = false;
+    for (int i = 0; i < n_blk; ++i) {
+      int pivot = i;
+      for (int j = i + 1; j < n_blk; ++j) {
+        if (std::abs(B[j][i]) > std::abs(B[pivot][i])) pivot = j;
+      }
+      if (std::abs(B[pivot][i]) < 1e-13) {
+        singular = true;
+        break;
+      }
+      std::swap(B[i], B[pivot]);
+      std::swap(invB[i], invB[pivot]);
+      double div = B[i][i];
+      for (int j = 0; j < n_blk; ++j) {
+        B[i][j] /= div;
+        invB[i][j] /= div;
+      }
+      for (int j = 0; j < n_blk; ++j) {
+        if (i != j) {
+          double mult = B[j][i];
+          for (int k = 0; k < n_blk; ++k) {
+            B[j][k] -= mult * B[i][k];
+            invB[j][k] -= mult * invB[i][k];
+          }
+        }
+      }
+    }
+    
+    if (!singular) {
+      inv_blocks[e] = invB;
+      n_good_blocks++;
+    } else {
+      for (int i = 0; i < n_blk; ++i) inv_blocks[e][i][i] = 1.0;
+    }
+  }
+  std::cerr << "  Block-Jacobi preconditioner: " << n_good_blocks << "/" << Ne
+            << " usable element blocks\n";
+
+  auto applyLeftPreconditioner = [&](const std::vector<double> &v) {
+    std::vector<double> w(N, 0.0);
+    for (int e = 0; e < Ne; ++e) {
+      for (int r = 0; r < n_blk; ++r) {
+        double sum = 0.0;
+        for (int c = 0; c < n_blk; ++c) {
+          sum += inv_blocks[e][r][c] * v[e * n_blk + c];
+        }
+        w[e * n_blk + r] = sum;
+      }
+    }
+    return w;
+  };
+
   auto vdot = [&](const std::vector<double>& a, const std::vector<double>& b) {
     double s = 0.0;
     for (int i = 0; i < N; ++i) s += a[i] * b[i];
@@ -85,14 +242,15 @@ void AdjointSolver::solve() {
   //    Unlike BiCGSTAB, the residual is monotonically non-increasing and
   //    there is no breakdown.  Memory: (m+1)*N doubles per restart.
   const int    m            = 150;   // Krylov dimension per restart
-  const double gmres_tol    = 1e-10; // relative residual tolerance
-  const int    max_restarts = 30;
+  const double gmres_tol    = 1e-7; // relative residual tolerance
+  const int    max_restarts = 200;
 
   std::cerr << "  GMRES(" << m << ")  tol=" << gmres_tol
             << "  max_restarts=" << max_restarts << "\n";
 
   std::vector<double> x(N, 0.0);
-  double b_norm = std::sqrt(vdot(rhs, rhs));
+  auto rhs_pc = applyLeftPreconditioner(rhs);
+  double b_norm = std::sqrt(vdot(rhs_pc, rhs_pc));
 
   if (b_norm < 1e-30) {
     std::cerr << "  RHS is zero — psi = 0.\n";
@@ -104,10 +262,11 @@ void AdjointSolver::solve() {
 
     bool converged = false;
     for (int restart = 0; restart < max_restarts && !converged; ++restart) {
-      // Compute initial residual r = b - A x and normalise into V[0]
+      // Compute initial residual r = M^{-1}(b - A x) and normalise into V[0]
       {
         auto Ax = matvec(x);
         for (int i = 0; i < N; ++i) V[0][i] = rhs[i] - Ax[i];
+        V[0] = applyLeftPreconditioner(V[0]);
       }
       double beta = std::sqrt(vdot(V[0], V[0]));
       if (beta / b_norm < gmres_tol) { converged = true; break; }
@@ -121,14 +280,20 @@ void AdjointSolver::solve() {
 
       int j_done = m;  // number of Arnoldi steps actually taken
       for (int j = 0; j < m; ++j) {
-        // w = A * V[j]  (one sparse matvec per Arnoldi step)
-        std::vector<double> w = matvec(V[j]);
+        // w = M^{-1} A * V[j]  (one sparse matvec + Jacobi scaling per step)
+        std::vector<double> w = applyLeftPreconditioner(matvec(V[j]));
 
         // Modified Gram-Schmidt orthogonalisation against V[0..j]
         for (int i = 0; i <= j; ++i) {
           double hij = vdot(w, V[i]);
           H[i + (m + 1) * j] = hij;
           for (int k = 0; k < N; ++k) w[k] -= hij * V[i][k];
+        }
+        // Double MGS pass for stability
+        for (int i = 0; i <= j; ++i) {
+          double corr = vdot(w, V[i]);
+          H[i + (m + 1) * j] += corr;
+          for (int k = 0; k < N; ++k) w[k] -= corr * V[i][k];
         }
         double hnext = std::sqrt(vdot(w, w));
         H[(j + 1) + (m + 1) * j] = hnext;
@@ -240,7 +405,7 @@ double AdjointSolver::sensitivityAlpha(double dalpha) {
             << "  |psi| = " << std::sqrt(psi_norm) << std::endl;
 
   // Also verify adjoint solution: check ||A^T psi + dJ/dU|| should be small
-  {
+  if (solver_.p_order == 0) {
     auto blocks = solver_.calcJacobian();
     auto dJ = solver_.dCl_dU();
     int N = Ne * ndof * 4;
@@ -316,23 +481,34 @@ AdjointSolver::errorIndicators(FiniteVolumeSolver &fine_solver) {
   //
   // The sum of eps[e] gives the estimated global output error  |delta_Cl|.
 
-  // 1. Prolong coarse solution and adjoint into fine (p+1) space
+  // 1. Prolong coarse solution into fine (p+1) space
   auto U_fine = solver_.prolongP1toP2(solver_.U_dg);
-  auto psi_fine = solver_.prolongP1toP2(psi_);
+  
+  // Cache the old coarse adjoint prolongation (psi_H). We DO NOT use this
+  // directly for the error anymore; we just need it to find the gradient DIFFERENCE.
+  auto psi_prolonged = solver_.prolongP1toP2(psi_);
 
-  // 2. Set up fine solver and evaluate residual (no time-stepping)
+  // 2. Set up fine solver and evaluate continuous non-linear residual
   fine_solver.p_order = solver_.p_order + 1;
   fine_solver.initializeDG();
   fine_solver.U_dg = U_fine;
   auto res = fine_solver.calcResidualDG(U_fine);
 
-  // 3. Element-wise inner product: eps_e = |psi_h,e^T * R_h,e|
+  // 3. TRUE FINE-SPACE ADJOINT SOLVE
+  // We explicitly solve the (A_fine^T)*psi_fine = dJ_dU_fine GMRES matrix internally.
+  std::cerr << "  Evaluating true fine-space Adjoint for Error Indicators..." << std::endl;
+  AdjointSolver fine_adj(fine_solver);
+  fine_adj.solve();
+  auto psi_fine = fine_adj.psi(); 
+
+  // 4. Element-wise inner product using Dual-Weighted Residual Difference:
+  //    eps_e = |(psi_fine - psi_H)^T * R_h,e|
   int ndof_fine = fine_solver.ndof_per_elem;
   for (int e = 0; e < Ne; ++e) {
     double dot = 0.0;
     for (int j = 0; j < ndof_fine; ++j)
       for (int k = 0; k < 4; ++k)
-        dot += psi_fine[e][j][k] * res.R[e * ndof_fine + j][k];
+        dot += (psi_fine[e][j][k] - psi_prolonged[e][j][k]) * res.R[e * ndof_fine + j][k];
     eps[e] = std::abs(dot);
   }
 

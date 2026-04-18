@@ -1493,6 +1493,13 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
       Rnorm += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
     }
 
+    if (!std::isfinite(Rnorm)) {
+      last_steady_failed_nonphysical = true;
+      std::cerr << "Non-finite residual detected at iteration " << niter
+                << " — aborting steady solve." << std::endl;
+      break;
+    }
+
     if (baseline_residual < 0.0) {
       baseline_residual = Rnorm;
       target_residual = baseline_residual * 1.0e-5;
@@ -1511,8 +1518,7 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     res_history.push_back(Rnorm);
     stag_best_cur = std::min(stag_best_cur, Rnorm);
 
-    // Stagnation check: every stag_window iters, compare best seen this window
-    // against best seen last window.  If no meaningful improvement, stop.
+    // Stagnation detection restored to permit Adjoint limit cycles
     if (niter > 0 && niter % stag_window == 0) {
       if (stag_best_cur >= stag_factor * stag_best_prev) {
         last_steady_converged = true;
@@ -1575,13 +1581,13 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     auto U_dg_backup = U_dg;
     U_dg = rk4_DG(U_dg, 0.0, false, &res);
 
-    // Check for non-physical states: restore last good state and treat
-    // as a stagnated limit-cycle so the adjoint can still be computed.
+    // Check for non-physical states: restore last good state for inspection,
+    // but fail the solve so AMR does not proceed on an invalid primal.
     if (!isPhysicalDG(U_dg)) {
       U_dg = U_dg_backup;  // restore last physical solution
-      last_steady_converged = true;
+      last_steady_failed_nonphysical = true;
       std::cerr << "Non-physical state detected at iteration " << niter
-                << " — restoring last valid state and proceeding to adjoint."
+                << " — restoring last valid state and aborting steady solve."
                 << std::endl;
       break;
     }
