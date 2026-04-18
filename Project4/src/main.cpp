@@ -179,6 +179,8 @@ int main(int argc, char **argv) {
               << "\n  --save-interval-time : For unsteady runs, save checkpoints every dt in physical time"
               << "\n  --checkpoint-interval-time : For unsteady runs, overwrite one rolling checkpoint every dt in physical time"
               << "\n  --map-ic      : Load IC from coarser mesh (optional)"
+              << "\n  --final-ar-cleanup : After adjoint adaptation, do one extra refinement pass for cells above a max aspect ratio and re-solve"
+              << "\n  --smooth-iters : Set post-refinement mesh smoothing iterations"
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
               << "\n  - Output files tagged by order: steady_<mesh>_p<order>_results.bin"
@@ -208,6 +210,8 @@ int main(int argc, char **argv) {
   double adjoint_tol = 1e-4;
   int adapt_max_cycles = 10;
   double adapt_fraction = 0.25;
+  double final_ar_cleanup = 0.0;
+  int smooth_iters = 120;
 
   auto is_flag_token = [](const char *s) {
     return std::string(s).rfind("--", 0) == 0;
@@ -313,6 +317,20 @@ int main(int argc, char **argv) {
       if (i + 1 < argc && !is_flag_token(argv[i + 1])) {
         adapt_fraction = std::stod(argv[i + 1]); i += 1;
       }
+    } else if (arg == "--final-ar-cleanup") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --final-ar-cleanup requires <max_aspect_ratio>" << std::endl;
+        return 1;
+      }
+      final_ar_cleanup = std::stod(argv[i + 1]);
+      i += 1;
+    } else if (arg == "--smooth-iters") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --smooth-iters requires <iterations>" << std::endl;
+        return 1;
+      }
+      smooth_iters = std::stoi(argv[i + 1]);
+      i += 1;
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
       return 1;
@@ -320,6 +338,7 @@ int main(int argc, char **argv) {
   }
 
   try {
+    setMeshSmoothingIterations(smooth_iters);
     FiniteVolumeSolver solver(meshfile);
 
     // Extract grid name from mesh file path (needed for auto-chaining filenames)
@@ -564,6 +583,21 @@ int main(int argc, char **argv) {
             m_out.write((char*)&e.v[1], sizeof(int));
             m_out.write((char*)&e.v[2], sizeof(int));
           }
+          int Nb = (int)solver.mesh.BE.size();
+          m_out.write((char*)&Nb, sizeof(int));
+          for (const auto &be : solver.mesh.BE) {
+            int v0 = be.v[0], v1 = be.v[1], bidx = be.bIndex;
+            m_out.write((char*)&v0, sizeof(int));
+            m_out.write((char*)&v1, sizeof(int));
+            m_out.write((char*)&bidx, sizeof(int));
+          }
+          int Nnames = (int)solver.mesh.Bname.size();
+          m_out.write((char*)&Nnames, sizeof(int));
+          for (const auto &name : solver.mesh.Bname) {
+            int len = (int)name.length();
+            m_out.write((char*)&len, sizeof(int));
+            m_out.write(name.c_str(), len);
+          }
           m_out.close();
           std::cerr << "  Mesh saved to " << mesh_file << std::endl;
         }
@@ -580,20 +614,55 @@ int main(int argc, char **argv) {
           std::cerr << "  Error indicators saved to " << ind_file << std::endl;
         }
 
-        // Step 4: Check convergence
+        // Step 4: Aspect-ratio cleanup marking on the current mesh
+        std::vector<bool> ar_marked;
+        int n_ar_marked = 0;
+        if (final_ar_cleanup > 0.0) {
+          ar_marked = markByAspectRatio(solver.mesh, final_ar_cleanup);
+          for (bool m : ar_marked) if (m) n_ar_marked++;
+          std::string ar_marked_file = output_dir + "/" + file_prefix
+              + "adjoint_ar_cleanup_marked_cycle" + std::to_string(cycle) + ".bin";
+          std::ofstream ar_out(ar_marked_file, std::ios::binary);
+          int Ne_ar = static_cast<int>(ar_marked.size());
+          ar_out.write((char*)&Ne_ar, sizeof(int));
+          for (bool m : ar_marked) {
+            unsigned char flag = m ? 1 : 0;
+            ar_out.write((char*)&flag, sizeof(unsigned char));
+          }
+          ar_out.close();
+          std::cerr << "  AR cleanup threshold " << final_ar_cleanup
+                    << " marked " << n_ar_marked << " elements" << std::endl;
+        }
+
+        // Step 5: Check convergence
         double total_error = 0.0;
         for (double e : indicators) total_error += e;
         std::cerr << "  Estimated |delta_Cl| = " << total_error << std::endl;
-        if (total_error < adjoint_tol) {
+        if (total_error < adjoint_tol && n_ar_marked == 0) {
           std::cerr << "  Converged! Error below tolerance " << adjoint_tol << std::endl;
           break;
         }
 
-        // Step 5: Mark and refine
-        auto marked = markByIndicator(indicators, adapt_fraction);
+        // Step 6: Mark and refine
+        std::vector<bool> marked(indicators.size(), false);
+        if (total_error >= adjoint_tol) {
+          marked = markByIndicator(indicators, adapt_fraction);
+        }
         int n_marked = 0;
         for (bool m : marked) if (m) n_marked++;
-        std::cerr << "  Marking " << n_marked << " elements for refinement" << std::endl;
+        if (!ar_marked.empty()) {
+          for (size_t e = 0; e < marked.size(); ++e) marked[e] = marked[e] || ar_marked[e];
+        }
+        int n_total_marked = 0;
+        for (bool m : marked) if (m) n_total_marked++;
+        std::cerr << "  Marking " << n_marked << " adjoint elements";
+        if (final_ar_cleanup > 0.0)
+          std::cerr << " + " << n_ar_marked << " AR-cleanup elements";
+        std::cerr << " => " << n_total_marked << " total" << std::endl;
+        if (n_total_marked == 0) {
+          std::cerr << "  No elements marked for refinement." << std::endl;
+          break;
+        }
 
         auto rmap = bisectMarkedElements(solver.mesh, marked);
         auto mesh_report = validateRefinedMesh(solver.mesh);
@@ -619,6 +688,21 @@ int main(int argc, char **argv) {
             m_out.write((char*)&e.v[0], sizeof(int));
             m_out.write((char*)&e.v[1], sizeof(int));
             m_out.write((char*)&e.v[2], sizeof(int));
+          }
+          int Nb = (int)solver.mesh.BE.size();
+          m_out.write((char*)&Nb, sizeof(int));
+          for (const auto &be : solver.mesh.BE) {
+            int v0 = be.v[0], v1 = be.v[1], bidx = be.bIndex;
+            m_out.write((char*)&v0, sizeof(int));
+            m_out.write((char*)&v1, sizeof(int));
+            m_out.write((char*)&bidx, sizeof(int));
+          }
+          int Nnames = (int)solver.mesh.Bname.size();
+          m_out.write((char*)&Nnames, sizeof(int));
+          for (const auto &name : solver.mesh.Bname) {
+            int len = (int)name.length();
+            m_out.write((char*)&len, sizeof(int));
+            m_out.write(name.c_str(), len);
           }
           m_out.close();
           std::cerr << "  Refined mesh preview saved to " << refined_mesh_file << std::endl;

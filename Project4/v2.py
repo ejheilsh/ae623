@@ -81,7 +81,7 @@ class mesh_class():
         u = self.surface_upper
         l = self.surface_lower
         # n = 15 # arbitrary, controls fineness of initial unrefined mesh
-        n = 3 # arbitrary, controls fineness of initial unrefined mesh
+        n = 5 # arbitrary, controls fineness of initial unrefined mesh
 
         # array of points to the left of the LE
         idx_LE = np.argmin(u[:, 0])

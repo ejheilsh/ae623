@@ -18,6 +18,14 @@ struct RefinementMap {
 std::vector<bool> markByIndicator(const std::vector<double> &eps,
                                   double fraction = 0.25);
 
+// Mark triangles whose aspect ratio exceeds `max_aspect_ratio`.
+// Aspect ratio is defined as longest_edge / shortest_altitude.
+std::vector<bool> markByAspectRatio(const Mesh &mesh,
+                                    double max_aspect_ratio);
+
+// Configure the post-refinement smoother.
+void setMeshSmoothingIterations(int iterations);
+
 // Bisect each marked triangle at its longest edge.
 // Modifies `mesh` in place and returns the parent-child mapping.
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in);
