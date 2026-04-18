@@ -266,9 +266,19 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     }
   }
 
+  // Build boundary-edge lookup early so the propagation loop can use it.
+  std::map<std::pair<int,int>, int> old_boundary_edge;
+  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+    int a = mesh.BE[i].v[0], b = mesh.BE[i].v[1];
+    old_boundary_edge[{std::min(a,b), std::max(a,b)}] = mesh.BE[i].bIndex;
+  }
+
   // Propagate to prevent hanging nodes:
   // If an element is subjected to >= 2 split edges from neighbors, it upgrades to a full
   // isotropic Quartering (all 3 edges split). This stops massive chains of low-quality slivers.
+  // Additionally, any element that is going to be refined (>= 1 split edge) and touches the
+  // blade wall is always upgraded to a full red split so the wall edge gets a new on-surface
+  // vertex and snapping to the blade spline occurs.
   bool changed = true;
   while (changed) {
     changed = false;
@@ -278,11 +288,33 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       auto e1 = std::make_pair(std::min(v1,v2), std::max(v1,v2));
       auto e2 = std::make_pair(std::min(v2,v0), std::max(v2,v0));
       int counts = edge_split[e0] + edge_split[e1] + edge_split[e2];
-      
+
       if (counts == 2) {
         if (!edge_split[e0]) { edge_split[e0] = true; changed = true; }
         if (!edge_split[e1]) { edge_split[e1] = true; changed = true; }
         if (!edge_split[e2]) { edge_split[e2] = true; changed = true; }
+      }
+
+      // Wall-adjacent upgrade: any element being refined that touches a blade wall
+      // is forced to red so all three edges (including the wall edge) are split.
+      if (counts >= 1 && counts < 3) {
+        bool has_wall = false;
+        for (const auto& key : {e0, e1, e2}) {
+          auto it = old_boundary_edge.find(key);
+          if (it != old_boundary_edge.end()) {
+            int g = it->second;
+            if (g >= 0 && g < (int)mesh.Bname.size() &&
+                lowerCopy(mesh.Bname[g]) == "wall") {
+              has_wall = true;
+              break;
+            }
+          }
+        }
+        if (has_wall) {
+          if (!edge_split[e0]) { edge_split[e0] = true; changed = true; }
+          if (!edge_split[e1]) { edge_split[e1] = true; changed = true; }
+          if (!edge_split[e2]) { edge_split[e2] = true; changed = true; }
+        }
       }
     }
 
@@ -303,12 +335,6 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
   }
 
   // ── Phase 2: Red-Green Sub-Division Execution ──
-  // Record old boundary edges so we can reassign groups after splitting.
-  std::map<std::pair<int,int>, int> old_boundary_edge;
-  for (int i = 0; i < (int)mesh.BE.size(); ++i) {
-    int a = mesh.BE[i].v[0], b = mesh.BE[i].v[1];
-    old_boundary_edge[{std::min(a,b), std::max(a,b)}] = mesh.BE[i].bIndex;
-  }
 
   std::map<std::pair<int,int>, int> edge_midpoint;
   std::vector<Element> next_E;

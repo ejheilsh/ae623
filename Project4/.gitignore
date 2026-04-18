@@ -1,5 +1,4 @@
 # Large binary data and build artifacts
-grids/
 data_steady/
 euler_solver.exe
 *.o
