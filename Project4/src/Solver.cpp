@@ -1423,6 +1423,7 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
   last_steady_converged = false;
   last_steady_failed_nonphysical = false;
   last_steady_hit_itercap = false;
+  last_nonphysical_iter = -1;
 
   double baseline_residual = steady_baseline_residual_override;
   double target_residual = (baseline_residual > 0.0)
@@ -1430,18 +1431,14 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
                                : -1.0;
   bool printed_baseline = false;
 
-  // Stagnation detection: if the best residual seen over the last
-  // stag_window iterations has not improved by a factor of stag_factor,
-  // declare the solver stagnated and treat the current state as converged.
-  // Scale the window by the inverse CFL factor so higher-order solves (which
-  // take proportionally smaller time steps) get enough iterations to show
-  // meaningful progress before being declared stagnated.
-  const double cfl_scale = 2.0 / mass_spectral_radius;  // same as in rk4_DG
-  const int    stag_window_raw = (int)(3000.0 / cfl_scale);
-  const int    stag_window  = std::max(3000, std::min(stag_window_raw, 50000));
-  const double stag_factor  = 0.8;   // must improve by 20% to be considered progressing
-  double stag_best_prev   = std::numeric_limits<double>::max();
-  double stag_best_cur    = std::numeric_limits<double>::max();
+  // Stagnation detection: monitor Cl every stag_check_interval iterations.
+  // If Cl hasn't changed by more than stag_cl_tol over stag_cl_checks
+  // consecutive checks, declare stagnation.
+  const int    stag_check_interval = 2000;
+  const double stag_cl_tol = 1.0e-3;   // Cl must change by more than this
+  const int    stag_cl_checks = 3;      // need this many consecutive flat checks
+  int    stag_flat_count = 0;
+  double stag_cl_prev = std::numeric_limits<double>::quiet_NaN();
 
   auto save_steady_temp_iter = [&](int niter) {
     std::filesystem::create_directories(steady_output_dir);
@@ -1509,22 +1506,28 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
       printed_baseline = true;
     }
     res_history.push_back(Rnorm);
-    stag_best_cur = std::min(stag_best_cur, Rnorm);
 
-    // Stagnation check: every stag_window iters, compare best seen this window
-    // against best seen last window.  If no meaningful improvement, stop.
-    if (niter > 0 && niter % stag_window == 0) {
-      if (stag_best_cur >= stag_factor * stag_best_prev) {
-        last_steady_converged = true;
-        std::cout << "Stagnated at iter " << niter
-                  << " | best RelRes this window: "
-                  << std::scientific << std::setprecision(3)
-                  << stag_best_cur / baseline_residual
-                  << " — treating as converged (limit cycle)." << std::endl;
-        break;
+    // Cl-based stagnation check
+    if (niter > 0 && niter % stag_check_interval == 0) {
+      double cl_now = integrateCl();
+      if (!std::isnan(stag_cl_prev)) {
+        double cl_change = std::abs(cl_now - stag_cl_prev);
+        if (cl_change < stag_cl_tol) {
+          stag_flat_count++;
+          if (stag_flat_count >= stag_cl_checks) {
+            last_steady_converged = true;
+            std::cout << "Stagnated at iter " << niter
+                      << " | Cl = " << std::fixed << std::setprecision(6) << cl_now
+                      << " (delta=" << std::scientific << std::setprecision(2) << cl_change
+                      << ", flat for " << stag_flat_count << " checks)"
+                      << " — treating as converged." << std::endl;
+            break;
+          }
+        } else {
+          stag_flat_count = 0;
+        }
       }
-      stag_best_prev = stag_best_cur;
-      stag_best_cur  = std::numeric_limits<double>::max();
+      stag_cl_prev = cl_now;
     }
 
     if (niter % 1000 == 0 || Rnorm < target_residual) {
@@ -1578,8 +1581,20 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     // Check for non-physical states: restore last good state and treat
     // as a stagnated limit-cycle so the adjoint can still be computed.
     if (!isPhysicalDG(U_dg)) {
+      // Identify the problematic element(s)
+      for (int e = 0; e < (int)U_dg.size(); ++e) {
+        State s(cellAverage(U_dg[e]), gamma);
+        if (!(s.rho() > 0) || !(s.p() > 0)) {
+          auto avg = cellAverage(U_dg[e]);
+          std::cerr << "  Non-physical elem " << e 
+                    << " rho=" << avg.v[0] << " p=" << s.p()
+                    << " area=" << mesh.areas[e] << std::endl;
+          if (e < 5) break;  // limit output
+        }
+      }
       U_dg = U_dg_backup;  // restore last physical solution
       last_steady_converged = true;
+      last_nonphysical_iter = niter;
       std::cerr << "Non-physical state detected at iteration " << niter
                 << " — restoring last valid state and proceeding to adjoint."
                 << std::endl;

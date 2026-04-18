@@ -84,10 +84,10 @@ public:
                          double tol = 1e-10, int maxIter = 100) const;
   ElementGeomEval evaluateElementGeometry(int e, double xi, double eta) const;
   EdgeGeomEval evaluateEdgeGeometry(int e, int va, int vb, double t) const;
+  void appendPeriodicToIE();
 
 private:
   void edgeHash(const std::vector<std::vector<std::vector<int>>> &B);
-  void appendPeriodicToIE();
   void buildInteriorFaceColors();
 };
 

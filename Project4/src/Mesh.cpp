@@ -235,6 +235,10 @@ bool Mesh::readGRI(const std::string &filename) {
       q = 1;
     }
 
+    // Skip zero-element blocks (e.g. "0 2 periodicTop" boundary groups
+    // that the parser reads as degenerate element blocks).
+    if (ne == 0) continue;
+
     if (q > q_order_global) q_order_global = q;
     if (q > 1) has_curved_elements = true;
 

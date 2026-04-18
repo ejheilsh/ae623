@@ -302,40 +302,27 @@ int main(int argc, char **argv) {
           solver.initializeDG();
           solver.setInitialCondition();
         } else {
-          // After refinement, U_dg already holds interpolated solution.
-          // Re-init DG internals (mass matrix, quad caches) for new mesh size,
-          // but preserve U_dg — unless the interpolated IC is non-physical, in
-          // which case fall back to a fresh freestream IC.
-          auto U_dg_save = solver.U_dg;
-          solver.initializeDG();  // sets up mass matrix, resizes U_dg to freestream
-
-          // Validate the interpolated IC: check every cell for physical states
-          int Ne_cur = (int)solver.mesh.E.size();
-          bool ic_ok = ((int)U_dg_save.size() == Ne_cur);
-          if (ic_ok) {
-            for (int e = 0; e < Ne_cur && ic_ok; ++e) {
-              Vec4 avg = solver.cellAverage(U_dg_save[e]);
-              State s(avg, solver.gamma);
-              if (!std::isfinite(s.rho()) || !std::isfinite(s.p()) ||
-                  s.rho() < 1e-6 || s.p() < 1e-6)
-                ic_ok = false;
-            }
-          }
-
-          if (ic_ok) {
-            solver.U_dg = U_dg_save;
-            std::cerr << "  Using interpolated IC from previous cycle." << std::endl;
-          } else {
-            std::cerr << "  Interpolated IC non-physical — falling back to freestream." << std::endl;
-            // U_dg already set to freestream by initializeDG()
-          }
-
-          solver.U.resize(Ne_cur);
-          for (int e = 0; e < Ne_cur; ++e)
-            solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+          // U_dg was already interpolated onto the refined mesh by
+          // interpolateSolution() after bisection.  Just rebuild internal
+          // data structures for the new mesh and use the interpolated state
+          // as the initial condition.
+          solver.computeMassMatrix();
+          solver.U0_dg = solver.U_dg;
+          solver.steady_baseline_residual_override = -1.0;
+          solver.res_history.clear();
+          std::cerr << "  Using interpolated IC from previous cycle." << std::endl;
         }
         solver.solveSteady(itercap);
-
+        // If non-physical happened very early with interpolated IC, the
+        // interpolated state was likely unphysical.  Fall back to freestream.
+        if (cycle > 0 && solver.last_nonphysical_iter >= 0
+            && solver.last_nonphysical_iter < 100) {
+          std::cerr << "  Non-physical at iter " << solver.last_nonphysical_iter
+                    << " with interpolated IC — retrying from freestream." << std::endl;
+          solver.initializeDG();
+          solver.setInitialCondition();
+          solver.solveSteady(itercap);
+        }
         // Accept stagnated solutions (limit-cycle oscillations) as valid primal.
         // last_steady_converged is true for both actual convergence and stagnation,
         // including cases where the RK4 hit a non-physical state and restored the

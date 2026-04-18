@@ -27,11 +27,10 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
   std::vector<bool> marked = marked_in;  // mutable local copy
 
   // ── Phase 1: Propagate marks for conformity (longest-edge bisection) ──
-  //    A marked element e is bisected along its longest edge.  If that edge
-  //    is shared with an unmarked neighbor n, then n also needs bisection
-  //    to avoid a hanging node — BUT only if the shared edge is ALSO the
-  //    longest edge of n (otherwise the neighbor's bisection would split a
-  //    different edge and the hanging node persists).  Propagate until stable.
+  //    A marked element e is bisected along its split edge (longest or forced).
+  //    If that edge is shared with an unmarked neighbor n, then n MUST also be
+  //    bisected along that shared edge to avoid a hanging node.  Propagate
+  //    until stable.
   //
   //    Helper: check if a given edge (va,vb) is the longest edge of element e.
   auto isLongestEdge = [&](int e, int va, int vb) -> bool {
@@ -56,28 +55,44 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     return {std::min(va,vb), std::max(va,vb)};
   };
 
+  // forced_split_edge: when a neighbor must split along a specific (non-longest)
+  // edge to maintain conformity.  Key = element index, value = sorted edge pair.
+  std::map<int, std::pair<int,int>> forced_split_edge;
+
+  // Determine the effective split edge for each marked element
+  auto splitEdgeOf = [&](int e) -> std::pair<int,int> {
+    auto it = forced_split_edge.find(e);
+    if (it != forced_split_edge.end()) return it->second;
+    return longestEdgeOf(e);
+  };
+
   bool changed = true;
   while (changed) {
     changed = false;
     for (int i = 0; i < (int)mesh.IE.size(); ++i) {
       int eL = mesh.IE[i].elemL;
       int eR = mesh.IE[i].elemR;
-      int sv0 = mesh.IE[i].v[0], sv1 = mesh.IE[i].v[1];
-      // If eL is marked and eR is not: mark eR only if the shared edge
-      // is the longest edge of eL (so eL WILL be bisected along it)
-      // AND the shared edge is also the longest edge of eR.
+      int svL0 = mesh.IE[i].v[0],  svL1 = mesh.IE[i].v[1];
+      int svR0 = mesh.IE[i].vR[0], svR1 = mesh.IE[i].vR[1];
+      auto sharedKeyL = std::make_pair(std::min(svL0,svL1), std::max(svL0,svL1));
+      auto sharedKeyR = std::make_pair(std::min(svR0,svR1), std::max(svR0,svR1));
+
+      // If eL will split through this shared edge, eR must also split here
       if (marked[eL] && !marked[eR]) {
-        auto leL = longestEdgeOf(eL);
-        auto sharedKey = std::make_pair(std::min(sv0,sv1), std::max(sv0,sv1));
-        if (leL == sharedKey && isLongestEdge(eR, sv0, sv1)) {
-          marked[eR] = true; changed = true;
+        auto seL = splitEdgeOf(eL);
+        if (seL == sharedKeyL) {
+          marked[eR] = true;
+          forced_split_edge[eR] = sharedKeyR;
+          changed = true;
         }
       }
+      // Symmetric
       if (marked[eR] && !marked[eL]) {
-        auto leR = longestEdgeOf(eR);
-        auto sharedKey = std::make_pair(std::min(sv0,sv1), std::max(sv0,sv1));
-        if (leR == sharedKey && isLongestEdge(eL, sv0, sv1)) {
-          marked[eL] = true; changed = true;
+        auto seR = splitEdgeOf(eR);
+        if (seR == sharedKeyR) {
+          marked[eL] = true;
+          forced_split_edge[eL] = sharedKeyL;
+          changed = true;
         }
       }
     }
@@ -92,9 +107,27 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     old_boundary_edge[{std::min(a,b), std::max(a,b)}] = mesh.BE[i].bIndex;
   }
 
+  // Record periodic IE edges BEFORE bisection.
+  // For periodic IEs, v[] != vR[] — they connect different nodes on each side.
+  // Store both the bottom edge key and a mapping to the top edge key.
+  std::map<std::pair<int,int>, std::pair<int,int>> periodic_edge_partner;
+  for (int i = 0; i < (int)mesh.IE.size(); ++i) {
+    auto keyL = std::make_pair(std::min(mesh.IE[i].v[0], mesh.IE[i].v[1]),
+                               std::max(mesh.IE[i].v[0], mesh.IE[i].v[1]));
+    auto keyR = std::make_pair(std::min(mesh.IE[i].vR[0], mesh.IE[i].vR[1]),
+                               std::max(mesh.IE[i].vR[0], mesh.IE[i].vR[1]));
+    if (keyL != keyR) {  // periodic edge
+      periodic_edge_partner[keyL] = keyR;
+      periodic_edge_partner[keyR] = keyL;
+    }
+  }
+
   int old_Ne = mesh.E.size();
   rmap.child_to_parent.resize(old_Ne);
   for (int e = 0; e < old_Ne; ++e) rmap.child_to_parent[e] = e;
+
+  // Phase 1.5 is now integrated into Phase 1 above (forced_split_edge handles
+  // both periodic and non-periodic conformity).
 
   // ── Pre-pass: collect curved edge midpoints from all q=2 elements ───────
   // For a q=2 element with ho_nodes in GRI order, the curved midpoints are:
@@ -147,14 +180,22 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
   for (int e = 0; e < old_Ne; ++e) {
     if (!marked[e]) continue;
 
-    // Find the longest edge of triangle e
+    // Find the split edge: use forced override if set, else longest edge
     int v0 = mesh.E[e].v[0], v1 = mesh.E[e].v[1], v2 = mesh.E[e].v[2];
     double len01 = (mesh.V[v1] - mesh.V[v0]).norm();
     double len12 = (mesh.V[v2] - mesh.V[v1]).norm();
     double len20 = (mesh.V[v0] - mesh.V[v2]).norm();
 
-    int va, vb, vc;  // va-vb = longest edge, vc = opposite vertex
-    if (len01 >= len12 && len01 >= len20) { va = v0; vb = v1; vc = v2; }
+    int va, vb, vc;  // va-vb = split edge, vc = opposite vertex
+    auto itForced = forced_split_edge.find(e);
+    if (itForced != forced_split_edge.end()) {
+      // Forced split through a specific edge (periodic partner)
+      int fa = itForced->second.first, fb = itForced->second.second;
+      // Identify which vertex is opposite
+      if ((std::min(v0,v1) == fa && std::max(v0,v1) == fb)) { va = v0; vb = v1; vc = v2; }
+      else if ((std::min(v1,v2) == fa && std::max(v1,v2) == fb)) { va = v1; vb = v2; vc = v0; }
+      else { va = v2; vb = v0; vc = v1; }
+    } else if (len01 >= len12 && len01 >= len20) { va = v0; vb = v1; vc = v2; }
     else if (len12 >= len01 && len12 >= len20) { va = v1; vb = v2; vc = v0; }
     else                                       { va = v2; vb = v0; vc = v1; }
 
@@ -185,8 +226,6 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     }
 
     // Create children, preserving q=2 geometry when parent is curved
-    std::cerr << "  DBG bisect e=" << e << " q=" << mesh.E[e].q_order
-              << " ho=" << mesh.E[e].ho_nodes.size() << std::endl;
     if (mesh.E[e].q_order >= 2 && mesh.E[e].ho_nodes.size() >= 6) {
       // Cache parent data before modifying element e
       std::vector<int> phn = mesh.E[e].ho_nodes;
@@ -240,6 +279,90 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       child2.q_order = 1;
       mesh.E.push_back(child2);
       rmap.child_to_parent.push_back(e);
+    }
+  }
+
+  // ── Phase 2.1: Conformity repair ──────────────────────────────────────
+  //    After splitting, some edges might have a midpoint (in edge_midpoint)
+  //    but the element on the other side wasn't split along that edge.
+  //    Scan all current elements and split any that have an edge in
+  //    edge_midpoint but weren't bisected along it.  Repeat until stable.
+  {
+    bool conf_changed = true;
+    while (conf_changed) {
+      conf_changed = false;
+      int cur_Ne = (int)mesh.E.size();
+      for (int e = 0; e < cur_Ne; ++e) {
+        int v0 = mesh.E[e].v[0], v1 = mesh.E[e].v[1], v2 = mesh.E[e].v[2];
+        // Check each edge of this element
+        std::pair<int,int> edges[3] = {
+          {std::min(v0,v1), std::max(v0,v1)},
+          {std::min(v1,v2), std::max(v1,v2)},
+          {std::min(v2,v0), std::max(v2,v0)}
+        };
+        for (int ei = 0; ei < 3; ++ei) {
+          auto it = edge_midpoint.find(edges[ei]);
+          if (it == edge_midpoint.end()) continue;
+          // This edge was split but this element wasn't split along it.
+          // Split element e along this edge now.
+          int va_f, vb_f, vc_f;
+          if (ei == 0)      { va_f = v0; vb_f = v1; vc_f = v2; }
+          else if (ei == 1) { va_f = v1; vb_f = v2; vc_f = v0; }
+          else              { va_f = v2; vb_f = v0; vc_f = v1; }
+          int vm = it->second;
+          // Register boundary edge children if this is a boundary edge
+          if (old_boundary_edge.count(edges[ei])) {
+            int g = old_boundary_edge[edges[ei]];
+            old_boundary_edge[{std::min(va_f,vm), std::max(va_f,vm)}] = g;
+            old_boundary_edge[{std::min(vm,vb_f), std::max(vm,vb_f)}] = g;
+          }
+          // Child 1 replaces element e: (vc, va, vm)
+          mesh.E[e].v[0] = vc_f; mesh.E[e].v[1] = va_f; mesh.E[e].v[2] = vm;
+          mesh.E[e].q_order = 1;
+          mesh.E[e].ho_nodes.clear();
+          // Child 2 appended: (vc, vm, vb)
+          Element child2;
+          child2.v[0] = vc_f; child2.v[1] = vm; child2.v[2] = vb_f;
+          child2.q_order = 1;
+          mesh.E.push_back(child2);
+          // Parent tracking: both children map to e's parent
+          int parent = (e < old_Ne) ? rmap.child_to_parent[e] : rmap.child_to_parent[e];
+          rmap.child_to_parent[e] = parent;  // child 1 keeps mapping
+          rmap.child_to_parent.push_back(parent);  // child 2 maps to same parent
+          conf_changed = true;
+          break;  // re-scan this element (now replaced by child 1)
+        }
+      }
+    }
+  }
+
+  // ── Phase 2.5: Update periodic node pairs ─────────────────────────────
+  //    When a periodic IE edge was bisected, a midpoint was created on each
+  //    side (bottom and top).  We need to pair these new midpoints so that
+  //    appendPeriodicToIE() can re-establish periodic interior edges.
+  //
+  //    We use the periodic_edge_partner map (built before bisection) to
+  //    identify which edges in edge_midpoint are periodic boundary edges.
+  {
+    for (auto &[edge_key, vm_idx] : edge_midpoint) {
+      auto itPE = periodic_edge_partner.find(edge_key);
+      if (itPE == periodic_edge_partner.end()) continue;  // not a periodic edge
+
+      // This edge was a periodic boundary edge that was bisected.
+      // Find the partner midpoint.
+      auto partner_key = itPE->second;
+      auto itPartner = edge_midpoint.find(partner_key);
+      if (itPartner == edge_midpoint.end()) continue;  // partner not bisected
+
+      int vm_partner = itPartner->second;
+      if (vm_idx >= vm_partner) continue;  // process each pair only once
+
+      // Add the new pair to the first periodic group
+      // Ensure bottom (lower y) is first
+      int n_lo = vm_idx, n_hi = vm_partner;
+      if (mesh.V[n_lo].y > mesh.V[n_hi].y) std::swap(n_lo, n_hi);
+      mesh.periodicGroups[0].pairs.push_back({n_lo, n_hi});
+      mesh.periodicGroups[0].nPairs++;
     }
   }
 
@@ -297,7 +420,35 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       mesh.q_order_global = std::max(mesh.q_order_global, mesh.E[e].q_order);
     }
   }
+  mesh.appendPeriodicToIE();
   mesh.computeGeometry();
+
+  // Diagnostic: check for degenerate elements and dangling boundary edges
+  {
+    int n_bad_area = 0, n_bad_bIdx = 0;
+    double min_area = 1e30;
+    for (int e = 0; e < (int)mesh.E.size(); ++e) {
+      if (mesh.areas[e] < 1e-14) n_bad_area++;
+      min_area = std::min(min_area, mesh.areas[e]);
+    }
+    for (int i = 0; i < (int)mesh.BE.size(); ++i) {
+      auto skey = std::make_pair(std::min(mesh.BE[i].v[0], mesh.BE[i].v[1]),
+                                 std::max(mesh.BE[i].v[0], mesh.BE[i].v[1]));
+      if (!old_boundary_edge.count(skey)) {
+        n_bad_bIdx++;
+        std::cerr << "  UNKNOWN BE: v=(" << mesh.BE[i].v[0] << "," << mesh.BE[i].v[1]
+                  << ") bIdx=" << mesh.BE[i].bIndex
+                  << " bName=" << mesh.Bname[mesh.BE[i].bIndex]
+                  << " elem=" << mesh.BE[i].elemL
+                  << " pos=(" << mesh.V[mesh.BE[i].v[0]].x << "," << mesh.V[mesh.BE[i].v[0]].y
+                  << ")-(" << mesh.V[mesh.BE[i].v[1]].x << "," << mesh.V[mesh.BE[i].v[1]].y << ")"
+                  << std::endl;
+      }
+    }
+    if (n_bad_area > 0 || n_bad_bIdx > 0)
+      std::cerr << "  MESH QUALITY: " << n_bad_area << " zero-area elems, "
+                << n_bad_bIdx << " unknown-bIdx edges, min_area=" << min_area << std::endl;
+  }
 
   std::cerr << "bisectMarkedElements: " << old_Ne << " -> " << new_Ne
             << " elements (" << (new_Ne - old_Ne) << " added)" << std::endl;

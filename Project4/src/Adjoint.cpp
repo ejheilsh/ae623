@@ -282,51 +282,36 @@ AdjointSolver::errorIndicators(FiniteVolumeSolver &fine_solver) {
   int Ne = solver_.mesh.E.size();
   std::vector<double> eps(Ne, 0.0);
 
-  // PSEUDO-CODE:
-  //
-  // The error indicator for element e is:
-  //   eps_e = |psi_h,e^T * R_h,e(U_H^h)|
+  // DWR error estimate: eps_e = |psi_h,e^T * R_h,e(U_H^h)|
   //
   // Steps:
-  //
-  // 1. Prolong the coarse (p=1) solution into the fine (p=2) space:
-  //    auto U_p2 = solver_.prolongP1toP2(solver_.U_dg);
-  //
-  // 2. Set up the fine solver at p=2 on the same mesh:
-  //    fine_solver.p_order = 2;
-  //    fine_solver.initializeDG();
-  //    fine_solver.U_dg = U_p2;
-  //
-  // 3. Evaluate the fine-space residual (do NOT time-step, just evaluate once):
-  //    auto res = fine_solver.calcResidualDG(U_p2);
-  //    // res.R is [nelem * ndof_p2] Vec4 values (the DG residual flattened)
-  //
-  // 4. Prolong the coarse adjoint into the fine space:
-  //    auto psi_p2 = solver_.prolongP1toP2(psi_);
-  //    // Same injection as the solution: first 3 modes copied, rest zero.
-  //
-  // 5. Compute element-wise inner product:
-  //    for (int e = 0; e < Ne; ++e) {
-  //      double dot = 0.0;
-  //      for (int j = 0; j < ndof_p2; ++j)
-  //        for (int k = 0; k < 4; ++k)
-  //          dot += psi_p2[e][j][k] * res.R[e * ndof_p2 + j][k];
-  //      eps[e] = std::abs(dot);
-  //    }
-  //
-  // The sum of eps[e] gives the estimated global output error  |delta_Cl|.
+  //   1. Prolong coarse solution U_H into fine (p+1) space: U_H^h
+  //   2. Set up fine solver at p+1, assign U_H^h
+  //   3. Evaluate fine-space residual R_h(U_H^h)
+  //   4. Solve the fine-space adjoint: (dR_h/dU)^T psi_h = -(dJ_h/dU)
+  //   5. Element-wise inner product: eps_e = |psi_h,e^T * R_h,e|
 
-  // 1. Prolong coarse solution and adjoint into fine (p+1) space
+  // 1. Prolong coarse solution into fine (p+1) space
   auto U_fine = solver_.prolongP1toP2(solver_.U_dg);
-  auto psi_fine = solver_.prolongP1toP2(psi_);
 
-  // 2. Set up fine solver and evaluate residual (no time-stepping)
+  // 2. Set up fine solver at p+1 with the prolonged coarse solution
   fine_solver.p_order = solver_.p_order + 1;
   fine_solver.initializeDG();
   fine_solver.U_dg = U_fine;
+
+  // 3. Evaluate fine-space residual (single evaluation, no time-stepping)
   auto res = fine_solver.calcResidualDG(U_fine);
 
-  // 3. Element-wise inner product: eps_e = |psi_h,e^T * R_h,e|
+  // 4. Solve the fine-space adjoint on fine_solver
+  //    This gives psi_h with nonzero higher-order modes that properly
+  //    weight the fine-space residual (critical when coarse order is p=0).
+  std::cerr << "  Solving fine-space (p=" << fine_solver.p_order
+            << ") adjoint for error indicators..." << std::endl;
+  AdjointSolver fine_adj(fine_solver);
+  fine_adj.solve();
+  const auto &psi_fine = fine_adj.psi();
+
+  // 5. Element-wise inner product: eps_e = |psi_h,e^T * R_h,e|
   int ndof_fine = fine_solver.ndof_per_elem;
   for (int e = 0; e < Ne; ++e) {
     double dot = 0.0;

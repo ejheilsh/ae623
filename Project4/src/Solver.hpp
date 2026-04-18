@@ -32,6 +32,7 @@ public:
   bool last_steady_converged = false;
   bool last_steady_failed_nonphysical = false;
   bool last_steady_hit_itercap = false;
+  int  last_nonphysical_iter = -1;  // iteration where non-physical was detected
 
   double gamma = 1.4;
   double CFL   = 1.0;
@@ -106,6 +107,7 @@ public:
     std::vector<double> weights;
   };
   QuadRule getQuadratureRule(int p_order) const;
+  void computeMassMatrix();
 
 private:
   // Mass matrix (reference triangle, inverted once at init)
@@ -118,7 +120,6 @@ private:
   // Cell-average weights: w_j = (1/A_ref) * int phi_j dA_ref
   std::vector<double> cellAvgWeights;
 
-  void computeMassMatrix();
   std::vector<double> evaluateBasis    (double xi, double eta, int p) const;
   std::vector<double> evaluateBasisGrad(double xi, double eta, int p);
 
