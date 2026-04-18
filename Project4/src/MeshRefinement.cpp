@@ -488,6 +488,17 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       is_bdry[be.v[0]] = true;
       is_bdry[be.v[1]] = true;
   }
+  // Periodic IE nodes were removed from BE by appendPeriodicToIE but must
+  // not be smoothed — they sit exactly on the periodic boundary surface.
+  // Periodic IEs are identified by v[] != vR[] (regular IEs have v==vR).
+  for (const auto& ie : mesh.IE) {
+      if (ie.v[0] != ie.vR[0] || ie.v[1] != ie.vR[1]) {
+          is_bdry[ie.v[0]]  = true;
+          is_bdry[ie.v[1]]  = true;
+          is_bdry[ie.vR[0]] = true;
+          is_bdry[ie.vR[1]] = true;
+      }
+  }
   std::vector<std::vector<int>> adj(mesh.V.size());
   for (const auto& ie : mesh.IE) {
       adj[ie.v[0]].push_back(ie.v[1]);

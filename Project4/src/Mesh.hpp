@@ -74,6 +74,8 @@ public:
   std::vector<int> ie_face_colors;
   std::vector<std::vector<int>> ie_faces_by_color;
 
+  void appendPeriodicToIE(); // Used by MeshReader and MeshRefinement decorators
+
   bool readGRI(const std::string &filename);
   void computeGeometry();
 
@@ -87,7 +89,6 @@ public:
 
 private:
   void edgeHash(const std::vector<std::vector<std::vector<int>>> &B);
-  void appendPeriodicToIE();
   void buildInteriorFaceColors();
 };
 

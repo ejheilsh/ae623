@@ -17,7 +17,15 @@
 # ============================================================================
 set -e
 
-SOLVER="./euler_solver.exe"
+if [[ -x "./euler_solver" ]]; then
+  SOLVER="./euler_solver"
+elif [[ -x "./euler_solver.exe" ]]; then
+  SOLVER="./euler_solver.exe"
+else
+  echo "Error: solver binary not found. Expected ./euler_solver or ./euler_solver.exe"
+  echo "Build it first with: bash build.sh"
+  exit 1
+fi
 OUTDIR="data_steady"
 FLUX="roe"
 
