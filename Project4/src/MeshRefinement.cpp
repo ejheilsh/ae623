@@ -856,6 +856,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   RefinementMap rmap;
   int old_Ne = mesh.E.size();
   std::map<std::pair<int,int>, int> edge_midpoint;
+  std::map<std::pair<int,int>, int> edge_geom_midpoint_q2;
   std::map<std::pair<int,int>, int> old_boundary_edge;
   for (const auto &be : mesh.BE) old_boundary_edge[{std::min(be.v[0],be.v[1]), std::max(be.v[0],be.v[1])}] = be.bIndex;
   std::vector<bool> marked = marked_in;
@@ -972,6 +973,38 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     return vm;
   };
 
+  auto getGeomMidQ2 = [&](int va, int vb) {
+    auto key = std::make_pair(std::min(va, vb), std::max(va, vb));
+    if (edge_geom_midpoint_q2.count(key)) return edge_geom_midpoint_q2[key];
+    Vec2 mid = 0.5 * (mesh.V[va] + mesh.V[vb]);
+    if (old_boundary_edge.count(key)) {
+      int g = old_boundary_edge[key];
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        mid = projectToBladeSpline(mid);
+      }
+    }
+    int vm = static_cast<int>(mesh.V.size());
+    mesh.V.push_back(mid);
+    edge_geom_midpoint_q2[key] = vm;
+    return vm;
+  };
+
+  auto assignQ2Child = [&](Element &child, int a, int b, int c) {
+    child.v[0] = a;
+    child.v[1] = b;
+    child.v[2] = c;
+    child.q_order = 2;
+    child.ho_nodes = {
+      a,
+      getGeomMidQ2(a, b),
+      b,
+      getGeomMidQ2(c, a),
+      getGeomMidQ2(b, c),
+      c
+    };
+  };
+
   changed = true;
   while(changed) {
     changed = false;
@@ -1025,8 +1058,20 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
         }
       }
       int parent = rmap.child_to_parent[e];
-      mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
-      Element c2; c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
+      const int parent_q_order = mesh.E[e].q_order;
+      if (parent_q_order == 2) {
+        assignQ2Child(mesh.E[e], vc, va, vm);
+      } else {
+        mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
+        mesh.E[e].q_order = 1;
+        mesh.E[e].ho_nodes.clear();
+      }
+      Element c2;
+      if (parent_q_order == 2) {
+        assignQ2Child(c2, vc, vm, vb);
+      } else {
+        c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
+      }
       mesh.E.push_back(c2); rmap.child_to_parent.push_back(parent);
       e2b.erase(ee[t]); changed = true;
     }
@@ -1066,8 +1111,12 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
 
   mesh.appendPeriodicToIE();
   snapWallVerticesToBladeSplineConsistent(mesh);
-  mesh.has_curved_elements = false; mesh.q_order_global = 1;
-  for (auto &e : mesh.E) { e.q_order = 1; e.ho_nodes.clear(); }
+  mesh.has_curved_elements = false;
+  mesh.q_order_global = 1;
+  for (const auto &e : mesh.E) {
+    mesh.q_order_global = std::max(mesh.q_order_global, e.q_order);
+    mesh.has_curved_elements = mesh.has_curved_elements || (e.q_order > 1);
+  }
   mesh.computeGeometry();
   return rmap;
 }

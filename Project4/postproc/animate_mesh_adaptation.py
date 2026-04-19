@@ -25,6 +25,10 @@ from matplotlib.colors import LogNorm
 from matplotlib.collections import PolyCollection, LineCollection
 from PIL import Image
 
+from dg_utils import map_to_physical
+
+_COMPANION_HO_MAGIC = 0x484F3031
+
 def read_companion_mesh(filename):
     with open(filename, "rb") as f:
         data = f.read()
@@ -36,7 +40,7 @@ def read_companion_mesh(filename):
     elements = []
     for _ in range(ne):
         q, v0, v1, v2 = struct.unpack_from("iiii", data, offset); offset += 16
-        elements.append([v0, v1, v2])
+        elements.append({"q": q, "corners": [v0, v1, v2], "row": [v0, v1, v2]})
     
     bdry_edges = []
     bdry_names = {} # index -> name
@@ -53,8 +57,30 @@ def read_companion_mesh(filename):
                 name = data[offset:offset+slen].decode("utf-8")
                 bdry_names[i] = name.lower()
                 offset += slen
-                
-    return nodes, elements, bdry_edges, bdry_names
+
+    if offset + 4 <= len(data):
+        magic = struct.unpack_from("I", data, offset)[0]
+        if magic == _COMPANION_HO_MAGIC:
+            offset += 4
+            for elem in elements:
+                nrow = struct.unpack_from("i", data, offset)[0]; offset += 4
+                row = list(struct.unpack_from(f"{nrow}i", data, offset)); offset += 4 * nrow
+                elem["row"] = row
+        else:
+            for elem in elements:
+                elem["q"] = 1
+                elem["row"] = list(elem["corners"])
+    else:
+        for elem in elements:
+            elem["q"] = 1
+            elem["row"] = list(elem["corners"])
+
+    return {
+        "nodes": nodes,
+        "elements": elements,
+        "bdry_edges": bdry_edges,
+        "bdry_names": bdry_names,
+    }
 
 def find_cycles(data_dir):
     pattern = os.path.join(data_dir, "*adjoint_mesh_cycle*.bin")
@@ -91,28 +117,94 @@ def get_color_info(bidx, name):
         if bidx == 2: return "crimson", "Wall"
     return "orange", f"Group {bidx} ({name})"
 
-def build_boundary_groups(nodes, bdry_edges, bdry_names):
+def _directed_ref_edge(element, edge):
+    v0, v1, v2 = element["corners"]
+    n1, n2 = edge
+    if (n1, n2) == (v0, v1):
+        return np.array([0.0, 0.0]), np.array([1.0, 0.0])
+    if (n1, n2) == (v1, v0):
+        return np.array([1.0, 0.0]), np.array([0.0, 0.0])
+    if (n1, n2) == (v1, v2):
+        return np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    if (n1, n2) == (v2, v1):
+        return np.array([0.0, 1.0]), np.array([1.0, 0.0])
+    if (n1, n2) == (v2, v0):
+        return np.array([0.0, 1.0]), np.array([0.0, 0.0])
+    if (n1, n2) == (v0, v2):
+        return np.array([0.0, 0.0]), np.array([0.0, 1.0])
+    raise ValueError(f"Edge {edge} not found in element corners {element['corners']}")
+
+def sample_edge_segment(element, nodes, edge, samples_per_edge=21):
+    ref0, ref1 = _directed_ref_edge(element, edge)
+    tvals = np.linspace(0.0, 1.0, samples_per_edge)
+    xy = []
+    for t in tvals:
+        xi_eta = (1.0 - t) * ref0 + t * ref1
+        xy.append(map_to_physical(element, nodes, float(xi_eta[0]), float(xi_eta[1])))
+    return np.asarray(xy)
+
+def build_element_outline(element, nodes, samples_per_edge=21):
+    corners = element["corners"]
+    edges = [(corners[0], corners[1]), (corners[1], corners[2]), (corners[2], corners[0])]
+    outline_parts = []
+    for i, edge in enumerate(edges):
+        seg = sample_edge_segment(element, nodes, edge, samples_per_edge=samples_per_edge)
+        outline_parts.append(seg if i == 0 else seg[1:])
+    return np.vstack(outline_parts)
+
+def build_unique_edge_segments(mesh, samples_per_edge=21):
+    nodes = mesh["nodes"]
+    segments = []
+    seen = set()
+    for elem in mesh["elements"]:
+        corners = elem["corners"]
+        for edge in ((corners[0], corners[1]), (corners[1], corners[2]), (corners[2], corners[0])):
+            key = tuple(sorted(edge))
+            if key in seen:
+                continue
+            seen.add(key)
+            segments.append(sample_edge_segment(elem, nodes, edge, samples_per_edge=samples_per_edge))
+    return segments
+
+def build_boundary_groups(mesh, samples_per_edge=21):
+    nodes = mesh["nodes"]
+    bdry_edges = mesh["bdry_edges"]
+    bdry_names = mesh["bdry_names"]
+    edge_owner = {}
+    for elem in mesh["elements"]:
+        corners = elem["corners"]
+        for edge in ((corners[0], corners[1]), (corners[1], corners[2]), (corners[2], corners[0])):
+            edge_owner[tuple(sorted(edge))] = (elem, edge)
+
     groups = {}
     for v0, v1, bidx in bdry_edges:
         if bidx not in groups:
             groups[bidx] = {"segs": [], "name": bdry_names.get(bidx, "")}
-        groups[bidx]["segs"].append([nodes[v0], nodes[v1]])
+        owner = edge_owner.get(tuple(sorted((v0, v1))))
+        if owner is None:
+            groups[bidx]["segs"].append(np.asarray([nodes[v0], nodes[v1]]))
+        else:
+            elem, directed_edge = owner
+            if directed_edge != (v0, v1):
+                directed_edge = (v1, v0)
+            groups[bidx]["segs"].append(sample_edge_segment(elem, nodes, directed_edge, samples_per_edge=samples_per_edge))
     return groups
 
-def draw_mesh_axes(ax, verts, groups, blade_ref=None, show_blade=False, add_legend=False,
+def draw_mesh_axes(ax, fill_polys, edge_segments, groups, blade_ref=None, show_blade=False, add_legend=False,
                    scalar_values=None, scalar_norm=None, scalar_cmap='viridis'):
-    if scalar_values is not None and len(scalar_values) == len(verts):
+    if scalar_values is not None and len(scalar_values) == len(fill_polys):
         pc = PolyCollection(
-            verts,
+            fill_polys,
             array=np.asarray(scalar_values),
             cmap=scalar_cmap,
             norm=scalar_norm,
-            edgecolors='gray',
-            linewidths=0.2,
+            edgecolors='none',
         )
     else:
-        pc = PolyCollection(verts, facecolors='white', edgecolors='gray', linewidths=0.2)
+        pc = PolyCollection(fill_polys, facecolors='white', edgecolors='none')
     ax.add_collection(pc)
+    mesh_edges = LineCollection(edge_segments, colors='gray', linewidths=0.2)
+    ax.add_collection(mesh_edges)
     handles = []
     labels = []
     for bidx, info in groups.items():
@@ -165,10 +257,11 @@ def blade_inset_specs(blade_ref):
 def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_cleanup=False,
                  show_indicators=False, indicator_norm=None):
     mesh_file = glob.glob(os.path.join(data_dir, f"*adjoint_mesh_cycle{cycle}.bin"))[0]
-    nodes, elements, bdry_edges, bdry_names = read_companion_mesh(mesh_file)
-    
-    verts = [nodes[e] for e in elements]
-    groups = build_boundary_groups(nodes, bdry_edges, bdry_names)
+    mesh = read_companion_mesh(mesh_file)
+    elements = mesh["elements"]
+    fill_polys = [build_element_outline(elem, mesh["nodes"]) for elem in elements]
+    edge_segments = build_unique_edge_segments(mesh)
+    groups = build_boundary_groups(mesh)
     indicators = None
     if show_indicators:
         ind_files = glob.glob(os.path.join(data_dir, f"*adjoint_indicators_cycle{cycle}.bin"))
@@ -177,17 +270,17 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
             if len(candidate) == len(elements):
                 indicators = np.maximum(np.abs(candidate), 1e-30)
     
-    fig = plt.figure(figsize=(22, 12))
+    fig = plt.figure(figsize=(26, 13))
     gs = fig.add_gridspec(
         2, 3,
-        width_ratios=[2.1, 2.0, 2.1],
+        width_ratios=[1.7, 3.3, 1.7],
         height_ratios=[1, 1],
-        wspace=0.12,
+        wspace=0.08,
         hspace=0.18,
     )
     ax = fig.add_subplot(gs[:, 1])
     pc = draw_mesh_axes(
-        ax, verts, groups,
+        ax, fill_polys, edge_segments, groups,
         blade_ref=blade_ref,
         show_blade=show_blade,
         add_legend=False,
@@ -201,7 +294,7 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
         if ar_files:
             marked = read_marked_mask(ar_files[0])
             if len(marked) == len(elements) and np.any(marked):
-                marked_verts = [verts[i] for i, is_marked in enumerate(marked) if is_marked]
+                marked_verts = [fill_polys[i] for i, is_marked in enumerate(marked) if is_marked]
                 ar_pc = PolyCollection(
                     marked_verts,
                     facecolors='gold',
@@ -230,7 +323,7 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
         ]
         for iax, spec in zip(inset_axes_list, inset_specs):
             draw_mesh_axes(
-                iax, verts, groups,
+                iax, fill_polys, edge_segments, groups,
                 blade_ref=blade_ref,
                 show_blade=show_blade,
                 add_legend=False,

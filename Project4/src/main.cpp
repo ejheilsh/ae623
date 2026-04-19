@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,76 @@ struct MeshValidationReport {
   double min_angle_deg = 180.0;
   double worst_quality = std::numeric_limits<double>::max();
 };
+
+constexpr std::uint32_t kCompanionMeshHoMagic = 0x484f3031u; // "HO01"
+constexpr std::uint32_t kCompanionMeshPeriodicMagic = 0x50473031u; // "PG01"
+
+void writeCompanionMeshSnapshot(const Mesh &mesh, const std::string &mesh_file) {
+  std::ofstream m_out(mesh_file, std::ios::binary);
+  int Nn = static_cast<int>(mesh.V.size());
+  m_out.write((char*)&Nn, sizeof(int));
+  for (const auto &v : mesh.V) {
+    m_out.write((char*)&v.x, sizeof(double));
+    m_out.write((char*)&v.y, sizeof(double));
+  }
+
+  int Ne_m = static_cast<int>(mesh.E.size());
+  m_out.write((char*)&Ne_m, sizeof(int));
+  for (const auto &e : mesh.E) {
+    int q = e.q_order;
+    m_out.write((char*)&q,      sizeof(int));
+    m_out.write((char*)&e.v[0], sizeof(int));
+    m_out.write((char*)&e.v[1], sizeof(int));
+    m_out.write((char*)&e.v[2], sizeof(int));
+  }
+
+  int Nb = static_cast<int>(mesh.BE.size());
+  m_out.write((char*)&Nb, sizeof(int));
+  for (const auto &be : mesh.BE) {
+    int v0 = be.v[0], v1 = be.v[1], bidx = be.bIndex;
+    m_out.write((char*)&v0, sizeof(int));
+    m_out.write((char*)&v1, sizeof(int));
+    m_out.write((char*)&bidx, sizeof(int));
+  }
+
+  int Nnames = static_cast<int>(mesh.Bname.size());
+  m_out.write((char*)&Nnames, sizeof(int));
+  for (const auto &name : mesh.Bname) {
+    int len = static_cast<int>(name.length());
+    m_out.write((char*)&len, sizeof(int));
+    m_out.write(name.c_str(), len);
+  }
+
+  m_out.write((char*)&kCompanionMeshHoMagic, sizeof(kCompanionMeshHoMagic));
+  for (const auto &e : mesh.E) {
+    int nrow = (e.q_order > 1 && !e.ho_nodes.empty()) ? static_cast<int>(e.ho_nodes.size()) : 3;
+    m_out.write((char*)&nrow, sizeof(int));
+    if (nrow == 3) {
+      m_out.write((char*)&e.v[0], sizeof(int));
+      m_out.write((char*)&e.v[1], sizeof(int));
+      m_out.write((char*)&e.v[2], sizeof(int));
+    } else {
+      m_out.write((char*)e.ho_nodes.data(), sizeof(int) * nrow);
+    }
+  }
+
+  m_out.write((char*)&kCompanionMeshPeriodicMagic, sizeof(kCompanionMeshPeriodicMagic));
+  int ngroups = static_cast<int>(mesh.periodicGroups.size());
+  m_out.write((char*)&ngroups, sizeof(int));
+  for (const auto &pg : mesh.periodicGroups) {
+    int type_len = static_cast<int>(pg.type.size());
+    int npairs = static_cast<int>(pg.pairs.size());
+    m_out.write((char*)&type_len, sizeof(int));
+    m_out.write(pg.type.c_str(), type_len);
+    m_out.write((char*)&npairs, sizeof(int));
+    for (const auto &pair : pg.pairs) {
+      int n0 = pair.first;
+      int n1 = pair.second;
+      m_out.write((char*)&n0, sizeof(int));
+      m_out.write((char*)&n1, sizeof(int));
+    }
+  }
+}
 
 std::pair<int, int> sortedEdgeKey(int a, int b) {
   return {std::min(a, b), std::max(a, b)};
@@ -580,38 +651,7 @@ int main(int argc, char **argv) {
         {
           std::string mesh_file = output_dir + "/" + file_prefix
               + "adjoint_mesh_cycle" + std::to_string(cycle) + ".bin";
-          std::ofstream m_out(mesh_file, std::ios::binary);
-          int Nn = (int)solver.mesh.V.size();
-          m_out.write((char*)&Nn, sizeof(int));
-          for (const auto &v : solver.mesh.V) {
-            m_out.write((char*)&v.x, sizeof(double));
-            m_out.write((char*)&v.y, sizeof(double));
-          }
-          int Ne_m = (int)solver.mesh.E.size();
-          m_out.write((char*)&Ne_m, sizeof(int));
-          for (const auto &e : solver.mesh.E) {
-            int q = e.q_order;
-            m_out.write((char*)&q,      sizeof(int));
-            m_out.write((char*)&e.v[0], sizeof(int));
-            m_out.write((char*)&e.v[1], sizeof(int));
-            m_out.write((char*)&e.v[2], sizeof(int));
-          }
-          int Nb = (int)solver.mesh.BE.size();
-          m_out.write((char*)&Nb, sizeof(int));
-          for (const auto &be : solver.mesh.BE) {
-            int v0 = be.v[0], v1 = be.v[1], bidx = be.bIndex;
-            m_out.write((char*)&v0, sizeof(int));
-            m_out.write((char*)&v1, sizeof(int));
-            m_out.write((char*)&bidx, sizeof(int));
-          }
-          int Nnames = (int)solver.mesh.Bname.size();
-          m_out.write((char*)&Nnames, sizeof(int));
-          for (const auto &name : solver.mesh.Bname) {
-            int len = (int)name.length();
-            m_out.write((char*)&len, sizeof(int));
-            m_out.write(name.c_str(), len);
-          }
-          m_out.close();
+          writeCompanionMeshSnapshot(solver.mesh, mesh_file);
           std::cerr << "  Mesh saved to " << mesh_file << std::endl;
         }
 
@@ -713,38 +753,7 @@ int main(int argc, char **argv) {
         {
           std::string refined_mesh_file = output_dir + "/" + file_prefix
               + "adjoint_mesh_cycle" + std::to_string(cycle + 1) + ".bin";
-          std::ofstream m_out(refined_mesh_file, std::ios::binary);
-          int Nn = (int)solver.mesh.V.size();
-          m_out.write((char*)&Nn, sizeof(int));
-          for (const auto &v : solver.mesh.V) {
-            m_out.write((char*)&v.x, sizeof(double));
-            m_out.write((char*)&v.y, sizeof(double));
-          }
-          int Ne_m = (int)solver.mesh.E.size();
-          m_out.write((char*)&Ne_m, sizeof(int));
-          for (const auto &e : solver.mesh.E) {
-            int q = e.q_order;
-            m_out.write((char*)&q,      sizeof(int));
-            m_out.write((char*)&e.v[0], sizeof(int));
-            m_out.write((char*)&e.v[1], sizeof(int));
-            m_out.write((char*)&e.v[2], sizeof(int));
-          }
-          int Nb = (int)solver.mesh.BE.size();
-          m_out.write((char*)&Nb, sizeof(int));
-          for (const auto &be : solver.mesh.BE) {
-            int v0 = be.v[0], v1 = be.v[1], bidx = be.bIndex;
-            m_out.write((char*)&v0, sizeof(int));
-            m_out.write((char*)&v1, sizeof(int));
-            m_out.write((char*)&bidx, sizeof(int));
-          }
-          int Nnames = (int)solver.mesh.Bname.size();
-          m_out.write((char*)&Nnames, sizeof(int));
-          for (const auto &name : solver.mesh.Bname) {
-            int len = (int)name.length();
-            m_out.write((char*)&len, sizeof(int));
-            m_out.write(name.c_str(), len);
-          }
-          m_out.close();
+          writeCompanionMeshSnapshot(solver.mesh, refined_mesh_file);
           std::cerr << "  Refined mesh preview saved to " << refined_mesh_file << std::endl;
         }
 
