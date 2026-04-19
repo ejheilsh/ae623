@@ -235,6 +235,14 @@ Vec2 projectToBladeSpline(const Vec2 &p) {
   return proj.valid ? proj.pt : p;
 }
 
+double triangleMinAngleDeg(const Element &elem, const std::vector<Vec2> &verts);
+double triangleSignedAreaPts(const Vec2 &a, const Vec2 &b, const Vec2 &c);
+double triangleMinAngleDegPts(const Vec2 &a, const Vec2 &b, const Vec2 &c);
+bool segmentsIntersect(const Vec2 &a, const Vec2 &b,
+                       const Vec2 &c, const Vec2 &d,
+                       double tol = 1e-12);
+bool pointIsOnFluidSide(const Vec2 &p, const BladeProjection &proj, double tol = 1e-10);
+
 double triangleQuality(const Element &elem, const std::vector<Vec2> &verts) {
   const Vec2 &a = verts[elem.v[0]];
   const Vec2 &b = verts[elem.v[1]];
@@ -252,9 +260,167 @@ double triangleSignedArea(const Element &elem, const std::vector<Vec2> &verts) {
   const Vec2 &a = verts[elem.v[0]];
   const Vec2 &b = verts[elem.v[1]];
   const Vec2 &c = verts[elem.v[2]];
+  return triangleSignedAreaPts(a, b, c);
+}
+
+double triangleSignedAreaPts(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
   return 0.5 * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
 }
 
+Element makePositiveElement(int a, int b, int c, const std::vector<Vec2> &verts) {
+  Element elem;
+  elem.q_order = 1;
+  elem.ho_nodes.clear();
+  const double area2 = (verts[b].x - verts[a].x) * (verts[c].y - verts[a].y) -
+                       (verts[b].y - verts[a].y) * (verts[c].x - verts[a].x);
+  if (area2 > 0.0) {
+    elem.v[0] = a; elem.v[1] = b; elem.v[2] = c;
+  } else {
+    elem.v[0] = a; elem.v[1] = c; elem.v[2] = b;
+  }
+  return elem;
+}
+
+void rebuildMeshEdgeConnectivity(
+    Mesh &mesh,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups) {
+  std::map<std::pair<int, int>, int> H;
+  mesh.IE.clear();
+  mesh.BE.clear();
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    for (int i = 0; i < 3; ++i) {
+      const int n1 = mesh.E[e].v[i];
+      const int n2 = mesh.E[e].v[(i + 1) % 3];
+      if (H.count({n2, n1})) {
+        Edge ie;
+        ie.v[0] = n2; ie.v[1] = n1;
+        ie.vR[0] = n2; ie.vR[1] = n1;
+        ie.elemL = H[{n2, n1}] - 1;
+        ie.elemR = e;
+        mesh.IE.push_back(ie);
+        H.erase({n2, n1});
+      } else {
+        H[{n1, n2}] = e + 1;
+      }
+    }
+  }
+
+  for (const auto &[key, val] : H) {
+    auto skey = std::make_pair(std::min(key.first, key.second),
+                               std::max(key.first, key.second));
+    auto it = boundary_edge_groups.find(skey);
+    if (it == boundary_edge_groups.end()) continue;
+    BoundaryEdge be;
+    be.v[0] = key.first;
+    be.v[1] = key.second;
+    be.elemL = val - 1;
+    be.bIndex = it->second;
+    mesh.BE.push_back(be);
+  }
+}
+
+bool localWallSplitPatchValid(const Mesh &mesh,
+                              int va, int vb, int vopp,
+                              const Vec2 &mid,
+                              const Vec2 &vopp_pos,
+                              const std::vector<std::vector<int>> &node_to_elem,
+                              double area_tol = 1e-12,
+                              double min_angle_tol = 8.0,
+                              double min_quality_tol = 0.18,
+                              double area_ratio_tol = 0.10) {
+  std::vector<Vec2> verts = mesh.V;
+  verts[vopp] = vopp_pos;
+
+  std::set<int> local_elems;
+  for (int e : node_to_elem[va]) local_elems.insert(e);
+  for (int e : node_to_elem[vb]) local_elems.insert(e);
+  for (int e : node_to_elem[vopp]) local_elems.insert(e);
+
+  double orig_local_min_area = std::numeric_limits<double>::infinity();
+  double orig_local_min_quality = std::numeric_limits<double>::infinity();
+  double orig_local_min_angle = std::numeric_limits<double>::infinity();
+  for (int e : local_elems) {
+    orig_local_min_area = std::min(orig_local_min_area, triangleSignedArea(mesh.E[e], mesh.V));
+    orig_local_min_quality = std::min(orig_local_min_quality, triangleQuality(mesh.E[e], mesh.V));
+    orig_local_min_angle = std::min(orig_local_min_angle, triangleMinAngleDeg(mesh.E[e], mesh.V));
+  }
+  if (!std::isfinite(orig_local_min_area)) return false;
+
+  const double a1 = triangleSignedAreaPts(vopp_pos, verts[va], mid);
+  const double a2 = triangleSignedAreaPts(vopp_pos, mid, verts[vb]);
+  if (!(a1 > area_tol) || !(a2 > area_tol)) return false;
+  if (a1 < area_ratio_tol * orig_local_min_area || a2 < area_ratio_tol * orig_local_min_area) {
+    return false;
+  }
+
+  const double ang1 = triangleMinAngleDegPts(vopp_pos, verts[va], mid);
+  const double ang2 = triangleMinAngleDegPts(vopp_pos, mid, verts[vb]);
+  if (ang1 < min_angle_tol || ang2 < min_angle_tol) return false;
+
+  const double q1 = std::abs(2.0 * std::sqrt(3.0) *
+                             ((verts[va] - vopp_pos).x * (mid - vopp_pos).y -
+                              (verts[va] - vopp_pos).y * (mid - vopp_pos).x)) /
+                    std::max((verts[va] - vopp_pos).normSq() +
+                                 (mid - verts[va]).normSq() +
+                                 (vopp_pos - mid).normSq(),
+                             1e-16);
+  const double q2 = std::abs(2.0 * std::sqrt(3.0) *
+                             ((mid - vopp_pos).x * (verts[vb] - vopp_pos).y -
+                              (mid - vopp_pos).y * (verts[vb] - vopp_pos).x)) /
+                    std::max((mid - vopp_pos).normSq() +
+                                 (verts[vb] - mid).normSq() +
+                                 (vopp_pos - verts[vb]).normSq(),
+                             1e-16);
+  if (q1 < min_quality_tol || q2 < min_quality_tol) return false;
+
+  for (int e : node_to_elem[vopp]) {
+    const auto &elem = mesh.E[e];
+    if ((elem.v[0] == va || elem.v[1] == va || elem.v[2] == va) &&
+        (elem.v[0] == vb || elem.v[1] == vb || elem.v[2] == vb)) {
+      continue;
+    }
+    if (!(triangleSignedArea(elem, verts) > area_tol)) return false;
+    if (triangleMinAngleDeg(elem, verts) < min_angle_tol) return false;
+    const double local_quality_floor =
+        (orig_local_min_quality > 0.0)
+            ? std::max(min_quality_tol, 0.5 * orig_local_min_quality)
+            : min_quality_tol;
+    if (triangleQuality(elem, verts) < local_quality_floor) {
+      return false;
+    }
+  }
+
+  std::set<std::pair<int, int>> local_edges;
+  for (int e : local_elems) {
+    const auto &elem = mesh.E[e];
+    local_edges.insert({std::min(elem.v[0], elem.v[1]), std::max(elem.v[0], elem.v[1])});
+    local_edges.insert({std::min(elem.v[1], elem.v[2]), std::max(elem.v[1], elem.v[2])});
+    local_edges.insert({std::min(elem.v[2], elem.v[0]), std::max(elem.v[2], elem.v[0])});
+  }
+  const std::vector<std::pair<Vec2, Vec2>> new_edges = {
+      {mid, verts[va]},
+      {mid, verts[vb]},
+      {mid, vopp_pos},
+  };
+  for (const auto &[e0, e1] : new_edges) {
+    const Vec2 edge_mid = 0.5 * (e0 + e1);
+    BladeProjection proj = projectToBladeSplineDetailed(edge_mid);
+    if (proj.valid && !pointIsOnFluidSide(edge_mid, proj)) return false;
+  }
+  for (const auto &edge : local_edges) {
+    const int x = edge.first;
+    const int y = edge.second;
+    if ((x == va && y == vb) || (x == vb && y == va)) continue;
+    for (const auto &[e0, e1] : new_edges) {
+      const bool shares_va = (verts[x] - e0).normSq() <= 1e-24 || (verts[y] - e0).normSq() <= 1e-24;
+      const bool shares_vb = (verts[x] - e1).normSq() <= 1e-24 || (verts[y] - e1).normSq() <= 1e-24;
+      if (shares_va || shares_vb) continue;
+      if (segmentsIntersect(e0, e1, verts[x], verts[y])) return false;
+    }
+  }
+
+  return true;
+}
 bool pointInTriangleStrict(const Vec2 &p, const Vec2 &a, const Vec2 &b, const Vec2 &c,
                            double tol = 1e-12) {
   const auto orient = [](const Vec2 &u, const Vec2 &v, const Vec2 &w) {
@@ -281,6 +447,10 @@ double triangleMinAngleDeg(const Element &elem, const std::vector<Vec2> &verts) 
   const Vec2 &a = verts[elem.v[0]];
   const Vec2 &b = verts[elem.v[1]];
   const Vec2 &c = verts[elem.v[2]];
+  return triangleMinAngleDegPts(a, b, c);
+}
+
+double triangleMinAngleDegPts(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
   const double ang_a = angleDegBetween(b - a, c - a);
   const double ang_b = angleDegBetween(a - b, c - b);
   const double ang_c = angleDegBetween(a - c, b - c);
@@ -325,7 +495,7 @@ Vec2 branchFluidNormal(BladeBranch branch, double s) {
   return n_hat / nn;
 }
 
-bool pointIsOnFluidSide(const Vec2 &p, const BladeProjection &proj, double tol = 1e-10) {
+bool pointIsOnFluidSide(const Vec2 &p, const BladeProjection &proj, double tol) {
   if (!proj.valid) return true;
   if (branchFluidIsAbove(proj.branch)) return p.y >= proj.pt.y - tol;
   return p.y <= proj.pt.y + tol;
@@ -348,7 +518,7 @@ bool onSegment(const Vec2 &a, const Vec2 &b, const Vec2 &p, double tol = 1e-12) 
 
 bool segmentsIntersect(const Vec2 &a, const Vec2 &b,
                        const Vec2 &c, const Vec2 &d,
-                       double tol = 1e-12) {
+                       double tol) {
   const double o1 = orient2d(a, b, c);
   const double o2 = orient2d(a, b, d);
   const double o3 = orient2d(c, d, a);
@@ -435,435 +605,6 @@ bool localMovePreservesMesh(const Mesh &mesh,
   return true;
 }
 
-std::vector<bool> snapWallVerticesToBladeSpline(Mesh &mesh) {
-  std::set<int> wall_vertices;
-  for (const auto &be : mesh.BE) {
-    if (be.bIndex < 0 || be.bIndex >= static_cast<int>(mesh.Bname.size())) continue;
-    if (lowerCopy(mesh.Bname[be.bIndex]) != "wall") continue;
-    wall_vertices.insert(be.v[0]);
-    wall_vertices.insert(be.v[1]);
-  }
-
-  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
-  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
-    node_to_elem[mesh.E[e].v[0]].push_back(e);
-    node_to_elem[mesh.E[e].v[1]].push_back(e);
-    node_to_elem[mesh.E[e].v[2]].push_back(e);
-  }
-
-  int rejected = 0;
-  int accepted = 0;
-  std::vector<bool> rejected_elem_marks(mesh.E.size(), false);
-  std::vector<Vec2> trial = mesh.V;
-  for (int vid : wall_vertices) {
-    const Vec2 original = mesh.V[vid];
-    const Vec2 snapped = projectToBladeSpline(original);
-    if ((snapped - original).normSq() <= 1e-24) continue;
-
-    bool moved = false;
-    for (int backtrack = 0; backtrack < 8 && !moved; ++backtrack) {
-      const double step = std::ldexp(1.0, -backtrack);
-      const Vec2 candidate = original + step * (snapped - original);
-      if (localMovePreservesMesh(mesh, vid, node_to_elem, mesh.V, trial, candidate)) {
-        mesh.V[vid] = candidate;
-        trial[vid] = candidate;
-        accepted++;
-        moved = true;
-      }
-    }
-    if (!moved) {
-      trial[vid] = mesh.V[vid];
-      rejected++;
-      for (int e : node_to_elem[vid]) {
-        rejected_elem_marks[e] = true;
-        const auto &elem = mesh.E[e];
-        for (int n : {elem.v[0], elem.v[1], elem.v[2]}) {
-          for (int ee : node_to_elem[n]) rejected_elem_marks[ee] = true;
-        }
-      }
-    }
-  }
-
-  if (rejected > 0) {
-    std::cerr << "    wall snapping accepted " << accepted
-              << " moves, rejected " << rejected
-              << " due to local consistency checks" << std::endl;
-  }
-  return rejected_elem_marks;
-}
-
-void snapWallVerticesToBladeSplineConsistent(Mesh &mesh) {
-  std::vector<std::set<int>> wall_adj(mesh.V.size());
-  for (const auto &be : mesh.BE) {
-    if (be.bIndex < 0 || be.bIndex >= static_cast<int>(mesh.Bname.size())) continue;
-    if (lowerCopy(mesh.Bname[be.bIndex]) != "wall") continue;
-    wall_adj[be.v[0]].insert(be.v[1]);
-    wall_adj[be.v[1]].insert(be.v[0]);
-  }
-
-  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
-  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
-    node_to_elem[mesh.E[e].v[0]].push_back(e);
-    node_to_elem[mesh.E[e].v[1]].push_back(e);
-    node_to_elem[mesh.E[e].v[2]].push_back(e);
-  }
-
-  int accepted = 0;
-  int rejected = 0;
-  std::vector<bool> visited(mesh.V.size(), false);
-  std::vector<Vec2> trial = mesh.V;
-  for (int start = 0; start < static_cast<int>(mesh.V.size()); ++start) {
-    if (visited[start] || wall_adj[start].empty()) continue;
-
-    std::vector<int> component;
-    std::vector<int> stack{start};
-    visited[start] = true;
-    while (!stack.empty()) {
-      int v = stack.back();
-      stack.pop_back();
-      component.push_back(v);
-      for (int nbr : wall_adj[v]) {
-        if (!visited[nbr]) {
-          visited[nbr] = true;
-          stack.push_back(nbr);
-        }
-      }
-    }
-
-    BladeBranch best_branch = BladeBranch::none;
-    double best_cost = std::numeric_limits<double>::infinity();
-    std::map<int, BladeProjection> best_proj_by_vid;
-    for (BladeBranch branch : {BladeBranch::upper, BladeBranch::lower,
-                               BladeBranch::upper_shifted, BladeBranch::lower_shifted}) {
-      double total_cost = 0.0;
-      std::map<int, BladeProjection> proj_by_vid;
-      bool ok = true;
-      for (int vid : component) {
-        BladeProjection proj = projectToBladeBranchDetailed(mesh.V[vid], branch);
-        if (!proj.valid) {
-          ok = false;
-          break;
-        }
-        total_cost += proj.d2;
-        proj_by_vid[vid] = proj;
-      }
-      if (ok && total_cost < best_cost) {
-        best_cost = total_cost;
-        best_branch = branch;
-        best_proj_by_vid = std::move(proj_by_vid);
-      }
-    }
-    if (best_branch == BladeBranch::none) continue;
-
-    for (int vid : component) {
-      const Vec2 original = mesh.V[vid];
-      const Vec2 snapped = best_proj_by_vid[vid].pt;
-      if ((snapped - original).normSq() <= 1e-24) continue;
-
-      bool moved = false;
-      for (int backtrack = 0; backtrack < 8 && !moved; ++backtrack) {
-        const double step = std::ldexp(1.0, -backtrack);
-        const Vec2 candidate = original + step * (snapped - original);
-        if (localMovePreservesMesh(mesh, vid, node_to_elem, mesh.V, trial, candidate)) {
-          mesh.V[vid] = candidate;
-          trial[vid] = candidate;
-          accepted++;
-          moved = true;
-        }
-      }
-      if (!moved) {
-        trial[vid] = mesh.V[vid];
-        rejected++;
-      }
-    }
-  }
-
-  if (accepted > 0 || rejected > 0) {
-    std::cerr << "    consistent wall snapping accepted " << accepted
-              << " moves, rejected " << rejected
-              << " due to local consistency checks" << std::endl;
-  }
-}
-
-void redistributeWallVerticesAlongBlade(Mesh &mesh, int iterations = 20, double omega = 0.35) {
-  std::vector<std::set<int>> wall_adj(mesh.V.size());
-  for (const auto &be : mesh.BE) {
-    if (be.bIndex < 0 || be.bIndex >= static_cast<int>(mesh.Bname.size())) continue;
-    if (lowerCopy(mesh.Bname[be.bIndex]) != "wall") continue;
-    wall_adj[be.v[0]].insert(be.v[1]);
-    wall_adj[be.v[1]].insert(be.v[0]);
-  }
-
-  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
-  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
-    node_to_elem[mesh.E[e].v[0]].push_back(e);
-    node_to_elem[mesh.E[e].v[1]].push_back(e);
-    node_to_elem[mesh.E[e].v[2]].push_back(e);
-  }
-
-  std::vector<bool> visited(mesh.V.size(), false);
-  for (int start = 0; start < static_cast<int>(mesh.V.size()); ++start) {
-    if (visited[start] || wall_adj[start].empty()) continue;
-
-    std::vector<int> component;
-    std::vector<int> stack{start};
-    visited[start] = true;
-    while (!stack.empty()) {
-      int v = stack.back();
-      stack.pop_back();
-      component.push_back(v);
-      for (int nbr : wall_adj[v]) {
-        if (!visited[nbr]) {
-          visited[nbr] = true;
-          stack.push_back(nbr);
-        }
-      }
-    }
-
-    int path_start = component.front();
-    for (int v : component) {
-      if (wall_adj[v].size() == 1) {
-        path_start = v;
-        break;
-      }
-    }
-
-    std::vector<int> path;
-    std::set<int> seen;
-    int prev = -1;
-    int cur = path_start;
-    while (cur >= 0 && !seen.count(cur)) {
-      path.push_back(cur);
-      seen.insert(cur);
-      int next = -1;
-      for (int nbr : wall_adj[cur]) {
-        if (nbr != prev) {
-          next = nbr;
-          break;
-        }
-      }
-      prev = cur;
-      cur = next;
-    }
-    if (path.size() < 3) continue;
-
-    std::vector<BladeProjection> proj(path.size());
-    bool compatible = true;
-    for (size_t i = 0; i < path.size(); ++i) {
-      proj[i] = projectToBladeSplineDetailed(mesh.V[path[i]]);
-      if (!proj[i].valid) { compatible = false; break; }
-      if (i > 0 && proj[i].branch != proj[0].branch) { compatible = false; break; }
-    }
-    if (!compatible) continue;
-
-    const double sign = (proj.back().s >= proj.front().s) ? 1.0 : -1.0;
-    std::vector<double> u(path.size());
-    for (size_t i = 0; i < path.size(); ++i) u[i] = sign * proj[i].s;
-    const double min_sep = 0.05 * std::abs(u.back() - u.front()) / std::max<int>(1, path.size() - 1);
-
-    std::vector<Vec2> trial = mesh.V;
-    for (int iter = 0; iter < iterations; ++iter) {
-      int moved = 0;
-      for (size_t i = 1; i + 1 < path.size(); ++i) {
-        const double target_u = (1.0 - omega) * u[i] + 0.5 * omega * (u[i - 1] + u[i + 1]);
-        const double lo = u[i - 1] + min_sep;
-        const double hi = u[i + 1] - min_sep;
-        if (lo >= hi) continue;
-        const double new_u = std::max(lo, std::min(hi, target_u));
-        const double new_s = sign * new_u;
-        const Vec2 candidate = evaluateBladeBranch(proj[i].branch, new_s);
-        if (localMovePreservesMesh(mesh, path[i], node_to_elem, mesh.V, trial, candidate)) {
-          mesh.V[path[i]] = candidate;
-          trial[path[i]] = candidate;
-          u[i] = new_u;
-          moved++;
-        }
-      }
-      if (moved == 0) break;
-    }
-  }
-}
-
-void relocateSkinnyTriangleApexes(Mesh &mesh,
-                                  double quality_trigger = 0.10,
-                                  double omega = 0.35,
-                                  int passes = 2) {
-  if (mesh.E.empty()) return;
-
-  std::vector<bool> frozen(mesh.V.size(), false);
-  for (const auto &be : mesh.BE) {
-    frozen[be.v[0]] = true;
-    frozen[be.v[1]] = true;
-  }
-  for (const auto &pg : mesh.periodicGroups) {
-    for (const auto &pair : pg.pairs) {
-      frozen[pair.first] = true;
-      frozen[pair.second] = true;
-    }
-  }
-
-  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
-  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
-    node_to_elem[mesh.E[e].v[0]].push_back(e);
-    node_to_elem[mesh.E[e].v[1]].push_back(e);
-    node_to_elem[mesh.E[e].v[2]].push_back(e);
-  }
-
-  std::vector<Vec2> trial = mesh.V;
-  for (int pass = 0; pass < passes; ++pass) {
-    int moved = 0;
-    for (const auto &elem : mesh.E) {
-      const double q = triangleQuality(elem, mesh.V);
-      if (q >= quality_trigger) continue;
-
-      const int v[3] = {elem.v[0], elem.v[1], elem.v[2]};
-      const double l2[3] = {
-          (mesh.V[v[1]] - mesh.V[v[0]]).normSq(),
-          (mesh.V[v[2]] - mesh.V[v[1]]).normSq(),
-          (mesh.V[v[0]] - mesh.V[v[2]]).normSq(),
-      };
-      int shortest = 0;
-      if (l2[1] < l2[shortest]) shortest = 1;
-      if (l2[2] < l2[shortest]) shortest = 2;
-
-      const int apex = v[(shortest + 2) % 3];
-      const int b0 = v[shortest];
-      const int b1 = v[(shortest + 1) % 3];
-      if (frozen[apex]) continue;
-
-      const Vec2 base_mid = 0.5 * (mesh.V[b0] + mesh.V[b1]);
-      const Vec2 base = mesh.V[b1] - mesh.V[b0];
-      const double base_len = base.norm();
-      if (base_len <= 1e-12) continue;
-
-      Vec2 n{-base.y / base_len, base.x / base_len};
-      const double orient = orient2d(mesh.V[b0], mesh.V[b1], mesh.V[apex]);
-      if (orient < 0.0) n = -1.0 * n;
-
-      const Vec2 ideal = base_mid + n * (0.8660254037844386 * base_len);
-      const Vec2 candidate = (1.0 - omega) * mesh.V[apex] + omega * ideal;
-      if (localMovePreservesMesh(mesh, apex, node_to_elem, mesh.V, trial, candidate)) {
-        mesh.V[apex] = candidate;
-        trial[apex] = candidate;
-        moved++;
-      }
-    }
-    if (moved == 0) break;
-  }
-}
-
-void smoothInteriorVertices(Mesh &mesh, int iterations,
-                            double blend_old = 0.2, double blend_avg = 0.8,
-                            double quality_slack = 1e-3) {
-  if (mesh.V.empty() || mesh.E.empty() || iterations <= 0) return;
-
-  std::vector<std::set<int>> neighbors(mesh.V.size());
-  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
-  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
-    const auto &elem = mesh.E[e];
-    const int v0 = elem.v[0];
-    const int v1 = elem.v[1];
-    const int v2 = elem.v[2];
-    neighbors[v0].insert(v1); neighbors[v0].insert(v2);
-    neighbors[v1].insert(v0); neighbors[v1].insert(v2);
-    neighbors[v2].insert(v0); neighbors[v2].insert(v1);
-    node_to_elem[v0].push_back(e);
-    node_to_elem[v1].push_back(e);
-    node_to_elem[v2].push_back(e);
-  }
-
-  std::vector<bool> frozen(mesh.V.size(), false);
-  for (const auto &be : mesh.BE) {
-    frozen[be.v[0]] = true;
-    frozen[be.v[1]] = true;
-  }
-  for (const auto &pg : mesh.periodicGroups) {
-    for (const auto &pair : pg.pairs) {
-      frozen[pair.first] = true;
-      frozen[pair.second] = true;
-    }
-  }
-
-  for (int iter = 0; iter < iterations; ++iter) {
-    int moved = 0;
-    int inversion_rejects = 0;
-    int angle_rejects = 0;
-    for (int i = 0; i < static_cast<int>(mesh.V.size()); ++i) {
-      if (frozen[i] || neighbors[i].empty()) continue;
-
-      double orig_min_qual = std::numeric_limits<double>::infinity();
-      double orig_min_area = std::numeric_limits<double>::infinity();
-      double orig_min_angle = std::numeric_limits<double>::infinity();
-      double min_incident_edge = std::numeric_limits<double>::infinity();
-      for (int e : node_to_elem[i]) {
-        orig_min_qual = std::min(orig_min_qual, triangleQuality(mesh.E[e], mesh.V));
-        orig_min_area = std::min(orig_min_area, triangleSignedArea(mesh.E[e], mesh.V));
-        orig_min_angle = std::min(orig_min_angle, triangleMinAngleDeg(mesh.E[e], mesh.V));
-      }
-      for (int j : neighbors[i]) {
-        min_incident_edge = std::min(min_incident_edge, (mesh.V[j] - mesh.V[i]).norm());
-      }
-
-      Vec2 avg{0.0, 0.0};
-      for (int j : neighbors[i]) avg += mesh.V[j];
-      avg = avg / static_cast<double>(neighbors[i].size());
-      Vec2 target = blend_old * mesh.V[i] + blend_avg * avg;
-      Vec2 raw_step = target - mesh.V[i];
-      const double raw_norm = raw_step.norm();
-      const double max_step = 0.35 * std::max(min_incident_edge, 1e-12);
-      if (raw_norm > max_step) {
-        target = mesh.V[i] + (max_step / raw_norm) * raw_step;
-      }
-
-      bool accepted = false;
-      std::vector<Vec2> trial = mesh.V;
-      for (int backtrack = 0; backtrack < 8 && !accepted; ++backtrack) {
-        const double step = std::ldexp(1.0, -backtrack);
-        const Vec2 candidate = mesh.V[i] + step * (target - mesh.V[i]);
-        trial[i] = candidate;
-        double new_min_qual = std::numeric_limits<double>::infinity();
-        double new_min_area = std::numeric_limits<double>::infinity();
-        double new_min_angle = std::numeric_limits<double>::infinity();
-        bool valid = true;
-        for (int e : node_to_elem[i]) {
-          const double area = triangleSignedArea(mesh.E[e], trial);
-          new_min_area = std::min(new_min_area, area);
-          if (!(area > 1e-12)) {
-            valid = false;
-            inversion_rejects++;
-            break;
-          }
-          new_min_qual = std::min(new_min_qual, triangleQuality(mesh.E[e], trial));
-          new_min_angle = std::min(new_min_angle, triangleMinAngleDeg(mesh.E[e], trial));
-        }
-
-        if (valid &&
-            (new_min_angle < 2.0 ||
-             new_min_angle < std::min(orig_min_angle - 0.25, 0.75 * orig_min_angle))) {
-          valid = false;
-          angle_rejects++;
-        }
-
-        if (valid &&
-            new_min_area >= 0.25 * orig_min_area &&
-            new_min_qual > orig_min_qual - quality_slack) {
-          mesh.V[i] = candidate;
-          moved++;
-          accepted = true;
-        }
-      }
-    }
-    if (moved == 0) break;
-    if ((inversion_rejects > 0 || angle_rejects > 0) &&
-        (iter == 0 || (iter + 1) % 25 == 0)) {
-      std::cerr << "    smoothing iter " << (iter + 1)
-                << ": rejected " << inversion_rejects
-                << " candidate moves due to local inversion/tiny area, "
-                << angle_rejects << " due to angle collapse" << std::endl;
-    }
-  }
-}
-
 RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &marked_in,
                                        int retry_depth) {
   RefinementMap rmap;
@@ -875,15 +616,11 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   std::vector<bool> marked = marked_in;
 
   std::map<std::pair<int,int>, std::vector<int>> edge_to_elem;
-  std::vector<std::set<int>> vertex_neighbors(mesh.V.size());
   for (int e = 0; e < old_Ne; ++e) {
     const int *v = mesh.E[e].v;
     edge_to_elem[{std::min(v[0], v[1]), std::max(v[0], v[1])}].push_back(e);
     edge_to_elem[{std::min(v[1], v[2]), std::max(v[1], v[2])}].push_back(e);
     edge_to_elem[{std::min(v[2], v[0]), std::max(v[2], v[0])}].push_back(e);
-    vertex_neighbors[v[0]].insert(v[1]); vertex_neighbors[v[0]].insert(v[2]);
-    vertex_neighbors[v[1]].insert(v[0]); vertex_neighbors[v[1]].insert(v[2]);
-    vertex_neighbors[v[2]].insert(v[0]); vertex_neighbors[v[2]].insert(v[1]);
   }
 
   auto getLE = [&](int e) -> std::pair<int,int> {
@@ -898,12 +635,27 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     return d.x * d.x + d.y * d.y;
   };
 
-  auto isWallEdge = [&](const std::pair<int, int> &key) {
-    auto it = old_boundary_edge.find(key);
-    if (it == old_boundary_edge.end()) return false;
-    int g = it->second;
-    return g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
-           lowerCopy(mesh.Bname[g]) == "wall";
+  auto buildCurrentNodeToElem = [&]() {
+    std::vector<std::vector<int>> cur_node_to_elem(mesh.V.size());
+    for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+      cur_node_to_elem[mesh.E[e].v[0]].push_back(e);
+      cur_node_to_elem[mesh.E[e].v[1]].push_back(e);
+      cur_node_to_elem[mesh.E[e].v[2]].push_back(e);
+    }
+    return cur_node_to_elem;
+  };
+
+  auto buildCurrentVertexNeighbors = [&]() {
+    std::vector<std::set<int>> cur_vertex_neighbors(mesh.V.size());
+    for (const auto &elem : mesh.E) {
+      cur_vertex_neighbors[elem.v[0]].insert(elem.v[1]);
+      cur_vertex_neighbors[elem.v[0]].insert(elem.v[2]);
+      cur_vertex_neighbors[elem.v[1]].insert(elem.v[0]);
+      cur_vertex_neighbors[elem.v[1]].insert(elem.v[2]);
+      cur_vertex_neighbors[elem.v[2]].insert(elem.v[0]);
+      cur_vertex_neighbors[elem.v[2]].insert(elem.v[1]);
+    }
+    return cur_vertex_neighbors;
   };
 
   std::set<std::pair<int,int>> e2b;
@@ -927,16 +679,23 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   rmap.child_to_parent.resize(old_Ne);
   for(int i=0; i<old_Ne; i++) rmap.child_to_parent[i] = i;
 
-  auto getMid = [&](int va, int vb) {
+  auto getMid = [&](int va, int vb, bool &ok) {
     auto key = std::make_pair(std::min(va,vb), std::max(va,vb));
-    if(edge_midpoint.count(key)) return edge_midpoint[key];
-    int vm = (int)mesh.V.size(); Vec2 mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
+    if(edge_midpoint.count(key)) { ok = true; return edge_midpoint[key]; }
+    int vm = (int)mesh.V.size();
+    const Vec2 straight_mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
+    Vec2 mid = straight_mid;
     if (old_boundary_edge.count(key)) {
       int g = old_boundary_edge[key];
       if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
           lowerCopy(mesh.Bname[g]) == "wall") {
-        mid = projectToBladeSpline(mid);
+        const Vec2 snapped_mid = projectToBladeSpline(straight_mid);
         auto eit = edge_to_elem.find(key);
+        const auto cur_node_to_elem = buildCurrentNodeToElem();
+        const auto cur_vertex_neighbors = buildCurrentVertexNeighbors();
+        bool accepted = true;
+        std::map<int, Vec2> repaired_positions;
+
         if (eit != edge_to_elem.end()) {
           for (int eadj : eit->second) {
             const int *ev = mesh.E[eadj].v;
@@ -948,24 +707,59 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
               }
             }
             if (vopp < 0) continue;
-            if (!pointInTriangleStrict(mid, mesh.V[va], mesh.V[vb], mesh.V[vopp])) continue;
+
+            Vec2 vopp_pos = repaired_positions.count(vopp) ? repaired_positions[vopp] : mesh.V[vopp];
+            if (localWallSplitPatchValid(mesh, va, vb, vopp, snapped_mid, vopp_pos,
+                                         cur_node_to_elem)) {
+              continue;
+            }
 
             Vec2 avg{0.0, 0.0};
-            int ncount = 0;
-            for (int nbr : vertex_neighbors[vopp]) {
-              avg += mesh.V[nbr];
-              ncount++;
+            int count = 0;
+            for (int nbr : cur_vertex_neighbors[vopp]) {
+              avg = avg + (repaired_positions.count(nbr) ? repaired_positions[nbr] : mesh.V[nbr]);
+              count++;
             }
-            if (ncount > 0) {
-              mesh.V[vopp] = avg / static_cast<double>(ncount);
+            if (count == 0) {
+              accepted = false;
+              break;
             }
+            avg = avg / static_cast<double>(count);
+            if (!localWallSplitPatchValid(mesh, va, vb, vopp, snapped_mid, avg,
+                                          cur_node_to_elem)) {
+              accepted = false;
+              break;
+            }
+            repaired_positions[vopp] = avg;
           }
         }
+
+        if (!accepted) {
+          std::cerr << "    warning: skipped refinement on wall edge (" << va
+                    << ", " << vb
+                    << ") because snap and opposite-node averaging failed"
+                    << std::endl;
+          ok = false;
+          return -1;
+        }
+        for (const auto &[vid, pos] : repaired_positions) mesh.V[vid] = pos;
+        mid = snapped_mid;
       }
       old_boundary_edge[{std::min(va,vm), std::max(va,vm)}] = g;
       old_boundary_edge[{std::min(vb,vm), std::max(vb,vm)}] = g;
+    } else {
+      BladeProjection proj = projectToBladeSplineDetailed(straight_mid);
+      if (proj.valid && !pointIsOnFluidSide(straight_mid, proj)) {
+        std::cerr << "    warning: skipped refinement on interior edge (" << va
+                  << ", " << vb
+                  << ") because midpoint would lie on wrong side of blade"
+                  << std::endl;
+        ok = false;
+        return -1;
+      }
     }
     mesh.V.push_back(mid); edge_midpoint[key] = vm; rmap.new_vertex_edges.push_back({va, vb});
+    ok = true;
     return vm;
   };
 
@@ -1030,7 +824,12 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
       }
       if(t == -1) continue;
 
-      int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb);
+      bool mid_ok = false;
+      int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb, mid_ok);
+      if (!mid_ok) {
+        e2b.erase(ee[t]);
+        continue;
+      }
       int parent = rmap.child_to_parent[e];
       const int parent_q_order = mesh.E[e].q_order;
       if (parent_q_order == 2) {
@@ -1063,26 +862,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     }
   }
 
-  std::map<std::pair<int,int>, int> H;
-  mesh.IE.clear(); mesh.BE.clear();
-  for (int e=0; e<(int)mesh.E.size(); e++)
-    for (int i=0; i<3; i++) {
-      int n1=mesh.E[e].v[i], n2=mesh.E[e].v[(i+1)%3];
-      if (H.count({n2, n1})) {
-          Edge ie; ie.v[0]=n2; ie.v[1]=n1; ie.vR[0]=n2; ie.vR[1]=n1; ie.elemL=H[{n2, n1}]-1; ie.elemR=e;
-          mesh.IE.push_back(ie); H.erase({n2, n1});
-      }
-      else H[{n1, n2}] = e + 1;
-    }
-
-  for (auto &[key, val] : H) {
-    auto skey = std::make_pair(std::min(key.first,key.second), std::max(key.first,key.second));
-    if (old_boundary_edge.count(skey)) {
-        BoundaryEdge be; be.v[0]=key.first; be.v[1]=key.second; be.elemL=val-1; be.bIndex=old_boundary_edge[skey];
-        mesh.BE.push_back(be);
-    }
-  }
-
+  rebuildMeshEdgeConnectivity(mesh, old_boundary_edge);
   mesh.appendPeriodicToIE();
   mesh.has_curved_elements = false;
   mesh.q_order_global = 1;
