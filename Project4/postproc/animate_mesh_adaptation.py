@@ -10,7 +10,7 @@
 Create a mesh-adaptation animation from saved adjoint adaptation cycles.
 
 Usage:
-    python postproc/animate_mesh_adaptation.py <data_dir> [output.gif] [--show-blade] [--show-ar-cleanup]
+    python postproc/animate_mesh_adaptation.py <data_dir> [output.gif] [--show-blade] [--show-ar-cleanup] [--show-next-refine]
 """
 
 import argparse
@@ -236,7 +236,7 @@ def blade_inset_specs(blade_ref):
     surfaces = [
         ("Top LE", np.column_stack([blade_ref['lx'], blade_ref['ly']])),
         ("Top TE", np.column_stack([blade_ref['lx'], blade_ref['ly']])),
-        ("Bottom LE", np.column_stack([blade_ref['ux'], blade_ref['uy']])),
+        ("Bottom LE", np.array([[12.379, 4.884]])),
         ("Bottom TE", np.column_stack([blade_ref['ux'], blade_ref['uy']])),
     ]
     for title, pts in surfaces:
@@ -255,7 +255,7 @@ def blade_inset_specs(blade_ref):
     return specs
 
 def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_cleanup=False,
-                 show_indicators=False, indicator_norm=None):
+                 show_indicators=False, indicator_norm=None, show_next_refine=False):
     mesh_file = glob.glob(os.path.join(data_dir, f"*adjoint_mesh_cycle{cycle}.bin"))[0]
     mesh = read_companion_mesh(mesh_file)
     elements = mesh["elements"]
@@ -306,11 +306,32 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
                 ax.add_collection(ar_pc)
                 has_ar_overlay = True
 
+    next_refine_mask = None
+    has_next_refine_overlay = False
+    if show_next_refine:
+        mark_files = glob.glob(os.path.join(data_dir, f"*adjoint_marked_cycle{cycle}.bin"))
+        if mark_files:
+            next_refine_mask = read_marked_mask(mark_files[0])
+            if len(next_refine_mask) == len(elements) and np.any(next_refine_mask):
+                marked_verts = [fill_polys[i] for i, is_marked in enumerate(next_refine_mask) if is_marked]
+                mark_pc = PolyCollection(
+                    marked_verts,
+                    facecolors='royalblue',
+                    edgecolors='navy',
+                    linewidths=0.7,
+                    alpha=0.35,
+                    label='Refine Next',
+                )
+                ax.add_collection(mark_pc)
+                has_next_refine_overlay = True
+
     title = f"Cycle {cycle} - Elements: {len(elements)}"
     if indicators is not None:
         title += " | Colored by |eps_e|"
     if has_ar_overlay:
         title += " | AR Cleanup Targets"
+    if has_next_refine_overlay:
+        title += " | Next Refine"
     ax.set_title(title)
 
     if show_blade and blade_ref:
@@ -330,6 +351,16 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
                 scalar_values=indicators,
                 scalar_norm=indicator_norm,
             )
+            if has_next_refine_overlay and next_refine_mask is not None:
+                marked_verts = [fill_polys[i] for i, is_marked in enumerate(next_refine_mask) if is_marked]
+                mark_pc = PolyCollection(
+                    marked_verts,
+                    facecolors='royalblue',
+                    edgecolors='navy',
+                    linewidths=0.7,
+                    alpha=0.35,
+                )
+                iax.add_collection(mark_pc)
             iax.set_xlim(*spec["xlim"])
             iax.set_ylim(*spec["ylim"])
             iax.set_xticks([])
@@ -350,6 +381,9 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
     if show_blade and blade_ref:
         legend_handles.append(plt.Line2D([0], [0], color='k', linestyle='--', alpha=0.5, linewidth=1.5))
         legend_labels.append('Blade Ref')
+    if has_next_refine_overlay:
+        legend_handles.append(plt.Line2D([0], [0], color='royalblue', linewidth=6, alpha=0.35))
+        legend_labels.append('Refine Next')
     ax.legend(legend_handles, legend_labels, loc='upper right')
     if indicators is not None:
         cbar = fig.colorbar(pc, ax=ax, fraction=0.046, pad=0.03)
@@ -367,6 +401,7 @@ def main():
     parser.add_argument("output", nargs="?", default="mesh_adaptation.gif")
     parser.add_argument("--show-blade", action="store_true")
     parser.add_argument("--show-ar-cleanup", action="store_true")
+    parser.add_argument("--show-next-refine", action="store_true")
     parser.add_argument("--show-indicators", action="store_true")
     args = parser.parse_args()
 
@@ -422,6 +457,7 @@ def main():
             args.show_ar_cleanup,
             args.show_indicators,
             indicator_norm,
+            args.show_next_refine,
         )))
     
     frames[0].save(args.output, save_all=True, append_images=frames[1:], duration=200, loop=0)

@@ -23,6 +23,27 @@ import numpy as np
 from dg_utils import map_to_physical, read_gri_mesh
 
 
+def load_blade_reference():
+    candidates = [
+        (Path("data/bladeupper.txt"), Path("data/bladelower.txt")),
+        (Path("../Project1/data/bladeupper.txt"), Path("../Project1/data/bladelower.txt")),
+    ]
+    for up_path, lo_path in candidates:
+        if not up_path.exists() or not lo_path.exists():
+            continue
+        up = np.loadtxt(up_path)
+        lo = np.loadtxt(lo_path)
+        le_idx = np.argmin(up[:, 0])
+        sx, sy = up[le_idx, 0], up[le_idx, 1]
+        return {
+            "ux": up[:, 0] - sx,
+            "uy": up[:, 1] - sy,
+            "lx": lo[:, 0] - sx,
+            "ly": lo[:, 1] - sy + 18.0,
+        }
+    return None
+
+
 def _unique_corner_edges(mesh):
     seen = set()
     unique = []
@@ -135,25 +156,39 @@ def style_axes(ax, label, box=None):
     )
 
 
-def plot_single_mesh(ax, segments, title, box=None, lw=0.8):
+def plot_single_mesh(ax, mesh, segments, title, box=None, lw=0.8, blade_ref=None):
     for seg in segments:
         ax.plot(seg[:, 0], seg[:, 1], color="black", linewidth=lw)
+    if blade_ref is not None:
+        ax.plot(blade_ref["ux"], blade_ref["uy"], color="red", linestyle="--", linewidth=1.0, alpha=0.8)
+        ax.plot(blade_ref["lx"], blade_ref["ly"], color="red", linestyle="--", linewidth=1.0, alpha=0.8)
+    mesh_wall_nodes = wall_nodes(mesh)
+    ax.scatter(
+        mesh_wall_nodes[:, 0],
+        mesh_wall_nodes[:, 1],
+        s=18,
+        color="magenta",
+        edgecolors="none",
+        zorder=5,
+    )
     style_axes(ax, title, box=box)
 
 
-def save_single_mesh_figure(mesh_path, label, box, outpath, samples_per_edge=25, keep_open=False):
+def save_single_mesh_figure(mesh_path, label, box, outpath, samples_per_edge=25,
+                            keep_open=False, blade_ref=None):
     mesh = read_gri_mesh(str(mesh_path))
     segments = build_edge_segments(mesh, samples_per_edge=samples_per_edge)
 
     fig, ax = plt.subplots(1, 1, figsize=(4.5, 4.5))
-    plot_single_mesh(ax, segments, label, box=box)
+    plot_single_mesh(ax, mesh, segments, label, box=box, blade_ref=blade_ref)
     fig.tight_layout()
     fig.savefig(outpath, dpi=300, bbox_inches="tight")
     if not keep_open:
         plt.close(fig)
 
 
-def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25, keep_open=False):
+def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25,
+                      keep_open=False, blade_ref=None):
     meshes = [read_gri_mesh(str(p)) for p in mesh_paths]
     segments = [build_edge_segments(mesh, samples_per_edge=samples_per_edge) for mesh in meshes]
 
@@ -161,8 +196,8 @@ def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25, kee
     if len(meshes) == 1:
         axes = [axes]
 
-    for ax, segs, label in zip(axes, segments, labels):
-        plot_single_mesh(ax, segs, label, box=box)
+    for ax, mesh, segs, label in zip(axes, meshes, segments, labels):
+        plot_single_mesh(ax, mesh, segs, label, box=box, blade_ref=blade_ref)
 
     fig.tight_layout()
     fig.savefig(outpath, dpi=300, bbox_inches="tight")
@@ -182,6 +217,7 @@ def main():
         default=["full", "leading", "trailing"],
         help="Which views to generate",
     )
+    parser.add_argument("--show-blade", action="store_true", help="Overlay the blade spline reference if available")
     parser.add_argument("--samples-per-edge", type=int, default=31, help="Geometry samples per edge")
     parser.add_argument("--no-show", action="store_true", help="Save figures without opening interactive windows")
     args = parser.parse_args()
@@ -196,6 +232,7 @@ def main():
 
     reference_mesh = read_gri_mesh(str(mesh_paths[0]))
     zoom_boxes = infer_zoom_boxes(reference_mesh)
+    blade_ref = load_blade_reference() if args.show_blade else None
 
     for view in args.views:
         for mesh_path, label in zip(mesh_paths, labels):
@@ -215,6 +252,7 @@ def main():
                 outpath,
                 samples_per_edge=args.samples_per_edge,
                 keep_open=not args.no_show,
+                blade_ref=blade_ref,
             )
             print(f"Saved {outpath}")
 

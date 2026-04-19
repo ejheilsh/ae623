@@ -255,6 +255,19 @@ double triangleSignedArea(const Element &elem, const std::vector<Vec2> &verts) {
   return 0.5 * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
 }
 
+bool pointInTriangleStrict(const Vec2 &p, const Vec2 &a, const Vec2 &b, const Vec2 &c,
+                           double tol = 1e-12) {
+  const auto orient = [](const Vec2 &u, const Vec2 &v, const Vec2 &w) {
+    return (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
+  };
+  const double o1 = orient(a, b, p);
+  const double o2 = orient(b, c, p);
+  const double o3 = orient(c, a, p);
+  const bool has_pos = (o1 > tol) || (o2 > tol) || (o3 > tol);
+  const bool has_neg = (o1 < -tol) || (o2 < -tol) || (o3 < -tol);
+  return !(has_pos && has_neg);
+}
+
 double angleDegBetween(const Vec2 &u, const Vec2 &v) {
   const double nu = u.norm();
   const double nv = v.norm();
@@ -862,11 +875,15 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   std::vector<bool> marked = marked_in;
 
   std::map<std::pair<int,int>, std::vector<int>> edge_to_elem;
+  std::vector<std::set<int>> vertex_neighbors(mesh.V.size());
   for (int e = 0; e < old_Ne; ++e) {
     const int *v = mesh.E[e].v;
     edge_to_elem[{std::min(v[0], v[1]), std::max(v[0], v[1])}].push_back(e);
     edge_to_elem[{std::min(v[1], v[2]), std::max(v[1], v[2])}].push_back(e);
     edge_to_elem[{std::min(v[2], v[0]), std::max(v[2], v[0])}].push_back(e);
+    vertex_neighbors[v[0]].insert(v[1]); vertex_neighbors[v[0]].insert(v[2]);
+    vertex_neighbors[v[1]].insert(v[0]); vertex_neighbors[v[1]].insert(v[2]);
+    vertex_neighbors[v[2]].insert(v[0]); vertex_neighbors[v[2]].insert(v[1]);
   }
 
   auto getLE = [&](int e) -> std::pair<int,int> {
@@ -890,54 +907,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   };
 
   std::set<std::pair<int,int>> e2b;
-  int expanded_wall_neighbors = 0;
-  for (int e = 0; e < old_Ne; ++e) {
-    if (!marked[e]) continue;
-    const int *v = mesh.E[e].v;
-    std::pair<int,int> ee[3] = {
-      {std::min(v[0], v[1]), std::max(v[0], v[1])},
-      {std::min(v[1], v[2]), std::max(v[1], v[2])},
-      {std::min(v[2], v[0]), std::max(v[2], v[0])},
-    };
-    bool touches_wall = false;
-    for (int i = 0; i < 3; ++i) touches_wall = touches_wall || isWallEdge(ee[i]);
-    if (!touches_wall) continue;
-    for (int i = 0; i < 3; ++i) {
-      if (isWallEdge(ee[i])) continue;
-      auto it = edge_to_elem.find(ee[i]);
-      if (it == edge_to_elem.end()) continue;
-      for (int nbr : it->second) {
-        if (nbr == e || marked[nbr]) continue;
-        marked[nbr] = true;
-        expanded_wall_neighbors++;
-      }
-    }
-  }
-  if (expanded_wall_neighbors > 0) {
-    std::cerr << "    expanded wall-adjacent refinement by "
-              << expanded_wall_neighbors
-              << " neighboring elements" << std::endl;
-  }
   for(int e=0; e<old_Ne; e++) if(marked[e]) e2b.insert(getLE(e));
-
-  if (meshSmoothingConfig().wall_geom_tol > 0.0) {
-    int forced_wall_edges = 0;
-    for (const auto &be : mesh.BE) {
-      auto key = std::make_pair(std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1]));
-      if (!isWallEdge(key)) continue;
-      Vec2 mid = 0.5 * (mesh.V[be.v[0]] + mesh.V[be.v[1]]);
-      Vec2 snapped_mid = projectToBladeSpline(mid);
-      double geom_err = (snapped_mid - mid).norm();
-      if (geom_err > meshSmoothingConfig().wall_geom_tol) {
-        if (!e2b.count(key)) forced_wall_edges++;
-        e2b.insert(key);
-      }
-    }
-    if (forced_wall_edges > 0) {
-      std::cerr << "    forcing " << forced_wall_edges
-                << " wall-edge splits due to blade geometry under-resolution" << std::endl;
-    }
-  }
 
   std::map<std::pair<int,int>, std::pair<int,int>> ppartner;
   for (const auto &ie : mesh.IE) {
@@ -963,9 +933,35 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     int vm = (int)mesh.V.size(); Vec2 mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
     if (old_boundary_edge.count(key)) {
       int g = old_boundary_edge[key];
-      // Keep new wall midpoints straight initially. They are reprojected later
-      // by the wall-only snap pass, which applies local validity checks and
-      // backtracking before accepting any move toward the blade spline.
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        mid = projectToBladeSpline(mid);
+        auto eit = edge_to_elem.find(key);
+        if (eit != edge_to_elem.end()) {
+          for (int eadj : eit->second) {
+            const int *ev = mesh.E[eadj].v;
+            int vopp = -1;
+            for (int k = 0; k < 3; ++k) {
+              if (ev[k] != va && ev[k] != vb) {
+                vopp = ev[k];
+                break;
+              }
+            }
+            if (vopp < 0) continue;
+            if (!pointInTriangleStrict(mid, mesh.V[va], mesh.V[vb], mesh.V[vopp])) continue;
+
+            Vec2 avg{0.0, 0.0};
+            int ncount = 0;
+            for (int nbr : vertex_neighbors[vopp]) {
+              avg += mesh.V[nbr];
+              ncount++;
+            }
+            if (ncount > 0) {
+              mesh.V[vopp] = avg / static_cast<double>(ncount);
+            }
+          }
+        }
+      }
       old_boundary_edge[{std::min(va,vm), std::max(va,vm)}] = g;
       old_boundary_edge[{std::min(vb,vm), std::max(vb,vm)}] = g;
     }
@@ -1035,28 +1031,6 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
       if(t == -1) continue;
 
       int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb);
-      int wall_edge_idx = -1;
-      for (int i = 0; i < 3; ++i) {
-        if (isWallEdge(ee[i])) {
-          wall_edge_idx = i;
-          break;
-        }
-      }
-      if (wall_edge_idx >= 0 && wall_edge_idx != t) {
-        int w0 = v[wall_edge_idx];
-        int w1 = v[(wall_edge_idx + 1) % 3];
-        Vec2 wall_mid = 0.5 * (mesh.V[w0] + mesh.V[w1]);
-        BladeProjection wall_proj = projectToBladeSplineDetailed(wall_mid);
-        if (wall_proj.valid) {
-          Vec2 candidate = mesh.V[vm];
-          BladeProjection candidate_proj =
-              projectToBladeBranchDetailed(candidate, wall_proj.branch);
-          if (candidate_proj.valid && !pointIsOnFluidSide(candidate, candidate_proj)) {
-            double eps_push = 0.05 * (mesh.V[w1] - mesh.V[w0]).norm();
-            mesh.V[vm] = movePointToFluidSide(candidate, candidate_proj, eps_push);
-          }
-        }
-      }
       int parent = rmap.child_to_parent[e];
       const int parent_q_order = mesh.E[e].q_order;
       if (parent_q_order == 2) {
@@ -1110,7 +1084,6 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   }
 
   mesh.appendPeriodicToIE();
-  snapWallVerticesToBladeSplineConsistent(mesh);
   mesh.has_curved_elements = false;
   mesh.q_order_global = 1;
   for (const auto &e : mesh.E) {

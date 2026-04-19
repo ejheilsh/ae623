@@ -539,9 +539,6 @@ int main(int argc, char **argv) {
       solver.solveUnsteady(itercap, t_end);
     } else if (adjoint_adapt) {
       // ── ADJOINT-BASED h-ADAPTATION LOOP ──────────────────────────
-      const int refine_cooldown_cycles = 2;
-      const double cooldown_override_factor = 3.0;
-      std::vector<int> refine_cooldown(solver.mesh.E.size(), 0);
       for (int cycle = 0; cycle < adapt_max_cycles; ++cycle) {
         std::cerr << "=== Adaptation cycle " << cycle << " ===" << std::endl;
         std::cerr << "  Mesh: " << solver.mesh.E.size() << " elements" << std::endl;
@@ -698,23 +695,8 @@ int main(int argc, char **argv) {
 
         // Step 6: Mark and refine
         std::vector<bool> marked(indicators.size(), false);
-        int n_cooldown_blocked = 0;
-        double mark_threshold = std::numeric_limits<double>::infinity();
         if (total_error >= adjoint_tol) {
           marked = markByIndicator(indicators, adapt_fraction);
-          if (!indicators.empty() && adapt_fraction > 0.0) {
-            std::vector<double> sorted_ind = indicators;
-            std::sort(sorted_ind.rbegin(), sorted_ind.rend());
-            mark_threshold = sorted_ind[std::clamp((int)(adapt_fraction * indicators.size()), 1,
-                                                   (int)indicators.size()) - 1];
-          }
-          for (size_t e = 0; e < marked.size(); ++e) {
-            if (!marked[e]) continue;
-            if (e >= refine_cooldown.size() || refine_cooldown[e] <= 0) continue;
-            if (indicators[e] >= cooldown_override_factor * mark_threshold) continue;
-            marked[e] = false;
-            n_cooldown_blocked++;
-          }
         }
         int n_marked = 0;
         for (bool m : marked) if (m) n_marked++;
@@ -724,27 +706,30 @@ int main(int argc, char **argv) {
         int n_total_marked = 0;
         for (bool m : marked) if (m) n_total_marked++;
         std::cerr << "  Marking " << n_marked << " adjoint elements";
-        if (n_cooldown_blocked > 0)
-          std::cerr << " (" << n_cooldown_blocked << " blocked by cooldown)";
         if (final_ar_cleanup > 0.0)
           std::cerr << " + " << n_ar_marked << " AR-cleanup elements";
         std::cerr << " => " << n_total_marked << " total" << std::endl;
+
+        {
+          std::string marked_file = output_dir + "/" + file_prefix
+              + "adjoint_marked_cycle" + std::to_string(cycle) + ".bin";
+          std::ofstream marked_out(marked_file, std::ios::binary);
+          int Ne_marked = static_cast<int>(marked.size());
+          marked_out.write((char*)&Ne_marked, sizeof(int));
+          for (bool m : marked) {
+            unsigned char flag = m ? 1 : 0;
+            marked_out.write((char*)&flag, sizeof(unsigned char));
+          }
+          marked_out.close();
+          std::cerr << "  Final refinement marks saved to " << marked_file << std::endl;
+        }
+
         if (n_total_marked == 0) {
           std::cerr << "  No elements marked for refinement." << std::endl;
           break;
         }
 
         auto rmap = bisectMarkedElements(solver.mesh, marked);
-        std::vector<int> next_refine_cooldown(rmap.child_to_parent.size(), 0);
-        for (size_t e = 0; e < rmap.child_to_parent.size(); ++e) {
-          int parent = rmap.child_to_parent[e];
-          if (parent >= 0 && parent < static_cast<int>(marked.size()) && marked[parent]) {
-            next_refine_cooldown[e] = refine_cooldown_cycles;
-          } else if (parent >= 0 && parent < static_cast<int>(refine_cooldown.size())) {
-            next_refine_cooldown[e] = std::max(refine_cooldown[parent] - 1, 0);
-          }
-        }
-        refine_cooldown.swap(next_refine_cooldown);
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
 
