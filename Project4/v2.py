@@ -80,8 +80,8 @@ class mesh_class():
         height = self.domain_height
         u = self.surface_upper
         l = self.surface_lower
-        n = 5 # arbitrary, controls fineness of initial unrefined mesh
-        # n = 8 # arbitrary, controls fineness of initial unrefined mesh
+        # n = 15 # arbitrary, controls fineness of initial unrefined mesh
+        n = 20 # arbitrary, controls fineness of initial unrefined mesh
 
         # array of points to the left of the LE
         idx_LE = np.argmin(u[:, 0])

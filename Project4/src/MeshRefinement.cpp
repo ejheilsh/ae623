@@ -122,32 +122,109 @@ Vec2 evaluateBladeBranch(BladeBranch branch, double s) {
   return {0.0, 0.0};
 }
 
+double bladeBranchArcLength(BladeBranch branch) {
+  BladeSplineReference &ref = bladeSplineReference();
+  switch (branch) {
+    case BladeBranch::upper:
+    case BladeBranch::upper_shifted:
+      return ref.s_total_upper;
+    case BladeBranch::lower:
+    case BladeBranch::lower_shifted:
+      return ref.s_total_lower;
+    case BladeBranch::none:
+      return 0.0;
+  }
+  return 0.0;
+}
+
+double bladeBranchOffsetY(BladeBranch branch) {
+  switch (branch) {
+    case BladeBranch::upper: return 0.0;
+    case BladeBranch::lower: return 0.0;
+    case BladeBranch::upper_shifted: return 18.0;
+    case BladeBranch::lower_shifted: return -18.0;
+    case BladeBranch::none: return 0.0;
+  }
+  return 0.0;
+}
+
+const tk::spline &bladeBranchSplineX(BladeBranch branch) {
+  BladeSplineReference &ref = bladeSplineReference();
+  switch (branch) {
+    case BladeBranch::upper:
+    case BladeBranch::upper_shifted:
+      return ref.upper_x;
+    case BladeBranch::lower:
+    case BladeBranch::lower_shifted:
+      return ref.lower_x;
+    case BladeBranch::none:
+      return ref.upper_x;
+  }
+  return ref.upper_x;
+}
+
+const tk::spline &bladeBranchSplineY(BladeBranch branch) {
+  BladeSplineReference &ref = bladeSplineReference();
+  switch (branch) {
+    case BladeBranch::upper:
+    case BladeBranch::upper_shifted:
+      return ref.upper_y;
+    case BladeBranch::lower:
+    case BladeBranch::lower_shifted:
+      return ref.lower_y;
+    case BladeBranch::none:
+      return ref.upper_y;
+  }
+  return ref.upper_y;
+}
+
+BladeProjection projectToBladeBranchDetailed(const Vec2 &p, BladeBranch branch) {
+  BladeSplineReference &ref = bladeSplineReference();
+  if (!ref.loaded || branch == BladeBranch::none) return {};
+
+  const tk::spline &sx = bladeBranchSplineX(branch);
+  const tk::spline &sy = bladeBranchSplineY(branch);
+  const double s_total = bladeBranchArcLength(branch);
+  const double offset_y = bladeBranchOffsetY(branch);
+  auto f = [&](double s) {
+    const double dx = sx(s) - p.x;
+    const double dy = (sy(s) + offset_y) - p.y;
+    return dx * dx + dy * dy;
+  };
+
+  int ns = 20;
+  double best_s = 0.0;
+  double best_obj = std::numeric_limits<double>::infinity();
+  for (int i = 0; i <= ns; ++i) {
+    const double s = s_total * i / ns;
+    const double obj = f(s);
+    if (obj < best_obj) {
+      best_obj = obj;
+      best_s = s;
+    }
+  }
+  const double ds = (ns > 0) ? (s_total / ns) : s_total;
+  best_s = goldenSectionArgmin(f, std::max(0.0, best_s - ds), std::min(s_total, best_s + ds));
+  BladeProjection proj;
+  proj.valid = std::sqrt(f(best_s)) <= ref.snap_distance_tol;
+  proj.d2 = f(best_s);
+  proj.s = best_s;
+  proj.s_total = s_total;
+  proj.offset_y = offset_y;
+  proj.pt = {sx(best_s), sy(best_s) + offset_y};
+  proj.branch = branch;
+  return proj.valid ? proj : BladeProjection{};
+}
+
 BladeProjection projectToBladeSplineDetailed(const Vec2 &p) {
   BladeSplineReference &ref = bladeSplineReference();
   if (!ref.loaded) return {};
-  auto f_obj = [&](const tk::spline &sx, const tk::spline &sy, double oy) {
-    return [=, &sx, &sy](double s) { double dx=sx(s)-p.x, dy=(sy(s)+oy)-p.y; return dx*dx+dy*dy; };
-  };
   std::vector<BladeProjection> cands;
-  auto add_c = [&](const tk::spline &sx, const tk::spline &sy, double st, double oy, BladeBranch branch) {
-    auto f = f_obj(sx, sy, oy);
-    int ns = 20; double bs = 0, bo = 1e300;
-    for (int i=0; i<=ns; i++) { double s=st*i/ns, o=f(s); if(o<bo){bo=o; bs=s;}}
-    double sb = goldenSectionArgmin(f, std::max(0.0, bs-st/ns), std::min(st, bs+st/ns));
-    BladeProjection proj;
-    proj.valid = true;
-    proj.d2 = f(sb);
-    proj.s = sb;
-    proj.s_total = st;
-    proj.offset_y = oy;
-    proj.pt = {sx(sb), sy(sb)+oy};
-    proj.branch = branch;
-    cands.push_back(proj);
-  };
-  add_c(ref.upper_x, ref.upper_y, ref.s_total_upper, 0.0, BladeBranch::upper);
-  add_c(ref.lower_x, ref.lower_y, ref.s_total_lower, 0.0, BladeBranch::lower);
-  add_c(ref.upper_x, ref.upper_y, ref.s_total_upper, 18.0, BladeBranch::upper_shifted);
-  add_c(ref.lower_x, ref.lower_y, ref.s_total_lower, -18.0, BladeBranch::lower_shifted);
+  for (BladeBranch branch : {BladeBranch::upper, BladeBranch::lower,
+                             BladeBranch::upper_shifted, BladeBranch::lower_shifted}) {
+    BladeProjection proj = projectToBladeBranchDetailed(p, branch);
+    if (proj.valid) cands.push_back(proj);
+  }
   auto b = std::min_element(cands.begin(), cands.end(), [](const BladeProjection &a, const BladeProjection &b){return a.d2 < b.d2;});
   if (b == cands.end() || std::sqrt(b->d2) > ref.snap_distance_tol) return {};
   return *b;
@@ -195,6 +272,56 @@ double triangleMinAngleDeg(const Element &elem, const std::vector<Vec2> &verts) 
   const double ang_b = angleDegBetween(a - b, c - b);
   const double ang_c = angleDegBetween(a - c, b - c);
   return std::min(ang_a, std::min(ang_b, ang_c));
+}
+
+Vec2 branchTangent(BladeBranch branch, double s) {
+  const double s_total = bladeBranchArcLength(branch);
+  if (s_total <= 0.0) return {1.0, 0.0};
+  const double ds = std::max(1e-6, 1e-3 * s_total);
+  const double s0 = std::max(0.0, s - ds);
+  const double s1 = std::min(s_total, s + ds);
+  Vec2 x0 = evaluateBladeBranch(branch, s0);
+  Vec2 x1 = evaluateBladeBranch(branch, s1);
+  Vec2 t = x1 - x0;
+  const double tn = t.norm();
+  if (tn <= 1e-14) return {1.0, 0.0};
+  return t / tn;
+}
+
+bool branchFluidIsAbove(BladeBranch branch) {
+  switch (branch) {
+    case BladeBranch::upper:
+    case BladeBranch::upper_shifted:
+      return true;
+    case BladeBranch::lower:
+    case BladeBranch::lower_shifted:
+      return false;
+    case BladeBranch::none:
+      return true;
+  }
+  return true;
+}
+
+Vec2 branchFluidNormal(BladeBranch branch, double s) {
+  Vec2 t_hat = branchTangent(branch, s);
+  Vec2 n_hat{-t_hat.y, t_hat.x};
+  const double desired_sign_y = branchFluidIsAbove(branch) ? 1.0 : -1.0;
+  if (n_hat.y * desired_sign_y < 0.0) n_hat = -1.0 * n_hat;
+  const double nn = n_hat.norm();
+  if (nn <= 1e-14) return {0.0, desired_sign_y};
+  return n_hat / nn;
+}
+
+bool pointIsOnFluidSide(const Vec2 &p, const BladeProjection &proj, double tol = 1e-10) {
+  if (!proj.valid) return true;
+  if (branchFluidIsAbove(proj.branch)) return p.y >= proj.pt.y - tol;
+  return p.y <= proj.pt.y + tol;
+}
+
+Vec2 movePointToFluidSide(const Vec2 &p, const BladeProjection &proj, double push_dist) {
+  if (!proj.valid) return p;
+  Vec2 n_hat = branchFluidNormal(proj.branch, proj.s);
+  return proj.pt + std::max(push_dist, 1e-6) * n_hat;
 }
 
 double orient2d(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
@@ -350,6 +477,99 @@ std::vector<bool> snapWallVerticesToBladeSpline(Mesh &mesh) {
               << " due to local consistency checks" << std::endl;
   }
   return rejected_elem_marks;
+}
+
+void snapWallVerticesToBladeSplineConsistent(Mesh &mesh) {
+  std::vector<std::set<int>> wall_adj(mesh.V.size());
+  for (const auto &be : mesh.BE) {
+    if (be.bIndex < 0 || be.bIndex >= static_cast<int>(mesh.Bname.size())) continue;
+    if (lowerCopy(mesh.Bname[be.bIndex]) != "wall") continue;
+    wall_adj[be.v[0]].insert(be.v[1]);
+    wall_adj[be.v[1]].insert(be.v[0]);
+  }
+
+  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    node_to_elem[mesh.E[e].v[0]].push_back(e);
+    node_to_elem[mesh.E[e].v[1]].push_back(e);
+    node_to_elem[mesh.E[e].v[2]].push_back(e);
+  }
+
+  int accepted = 0;
+  int rejected = 0;
+  std::vector<bool> visited(mesh.V.size(), false);
+  std::vector<Vec2> trial = mesh.V;
+  for (int start = 0; start < static_cast<int>(mesh.V.size()); ++start) {
+    if (visited[start] || wall_adj[start].empty()) continue;
+
+    std::vector<int> component;
+    std::vector<int> stack{start};
+    visited[start] = true;
+    while (!stack.empty()) {
+      int v = stack.back();
+      stack.pop_back();
+      component.push_back(v);
+      for (int nbr : wall_adj[v]) {
+        if (!visited[nbr]) {
+          visited[nbr] = true;
+          stack.push_back(nbr);
+        }
+      }
+    }
+
+    BladeBranch best_branch = BladeBranch::none;
+    double best_cost = std::numeric_limits<double>::infinity();
+    std::map<int, BladeProjection> best_proj_by_vid;
+    for (BladeBranch branch : {BladeBranch::upper, BladeBranch::lower,
+                               BladeBranch::upper_shifted, BladeBranch::lower_shifted}) {
+      double total_cost = 0.0;
+      std::map<int, BladeProjection> proj_by_vid;
+      bool ok = true;
+      for (int vid : component) {
+        BladeProjection proj = projectToBladeBranchDetailed(mesh.V[vid], branch);
+        if (!proj.valid) {
+          ok = false;
+          break;
+        }
+        total_cost += proj.d2;
+        proj_by_vid[vid] = proj;
+      }
+      if (ok && total_cost < best_cost) {
+        best_cost = total_cost;
+        best_branch = branch;
+        best_proj_by_vid = std::move(proj_by_vid);
+      }
+    }
+    if (best_branch == BladeBranch::none) continue;
+
+    for (int vid : component) {
+      const Vec2 original = mesh.V[vid];
+      const Vec2 snapped = best_proj_by_vid[vid].pt;
+      if ((snapped - original).normSq() <= 1e-24) continue;
+
+      bool moved = false;
+      for (int backtrack = 0; backtrack < 8 && !moved; ++backtrack) {
+        const double step = std::ldexp(1.0, -backtrack);
+        const Vec2 candidate = original + step * (snapped - original);
+        if (localMovePreservesMesh(mesh, vid, node_to_elem, mesh.V, trial, candidate)) {
+          mesh.V[vid] = candidate;
+          trial[vid] = candidate;
+          accepted++;
+          moved = true;
+        }
+      }
+      if (!moved) {
+        trial[vid] = mesh.V[vid];
+        rejected++;
+      }
+    }
+  }
+
+  if (accepted > 0 || rejected > 0) {
+    std::cerr << "    consistent wall snapping accepted " << accepted
+              << " moves, rejected " << rejected
+              << " due to local consistency checks" << std::endl;
+  }
 }
 
 void redistributeWallVerticesAlongBlade(Mesh &mesh, int iterations = 20, double omega = 0.35) {
@@ -638,6 +858,15 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   std::map<std::pair<int,int>, int> edge_midpoint;
   std::map<std::pair<int,int>, int> old_boundary_edge;
   for (const auto &be : mesh.BE) old_boundary_edge[{std::min(be.v[0],be.v[1]), std::max(be.v[0],be.v[1])}] = be.bIndex;
+  std::vector<bool> marked = marked_in;
+
+  std::map<std::pair<int,int>, std::vector<int>> edge_to_elem;
+  for (int e = 0; e < old_Ne; ++e) {
+    const int *v = mesh.E[e].v;
+    edge_to_elem[{std::min(v[0], v[1]), std::max(v[0], v[1])}].push_back(e);
+    edge_to_elem[{std::min(v[1], v[2]), std::max(v[1], v[2])}].push_back(e);
+    edge_to_elem[{std::min(v[2], v[0]), std::max(v[2], v[0])}].push_back(e);
+  }
 
   auto getLE = [&](int e) -> std::pair<int,int> {
     int v[3] = {mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]};
@@ -660,7 +889,35 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   };
 
   std::set<std::pair<int,int>> e2b;
-  for(int e=0; e<old_Ne; e++) if(marked_in[e]) e2b.insert(getLE(e));
+  int expanded_wall_neighbors = 0;
+  for (int e = 0; e < old_Ne; ++e) {
+    if (!marked[e]) continue;
+    const int *v = mesh.E[e].v;
+    std::pair<int,int> ee[3] = {
+      {std::min(v[0], v[1]), std::max(v[0], v[1])},
+      {std::min(v[1], v[2]), std::max(v[1], v[2])},
+      {std::min(v[2], v[0]), std::max(v[2], v[0])},
+    };
+    bool touches_wall = false;
+    for (int i = 0; i < 3; ++i) touches_wall = touches_wall || isWallEdge(ee[i]);
+    if (!touches_wall) continue;
+    for (int i = 0; i < 3; ++i) {
+      if (isWallEdge(ee[i])) continue;
+      auto it = edge_to_elem.find(ee[i]);
+      if (it == edge_to_elem.end()) continue;
+      for (int nbr : it->second) {
+        if (nbr == e || marked[nbr]) continue;
+        marked[nbr] = true;
+        expanded_wall_neighbors++;
+      }
+    }
+  }
+  if (expanded_wall_neighbors > 0) {
+    std::cerr << "    expanded wall-adjacent refinement by "
+              << expanded_wall_neighbors
+              << " neighboring elements" << std::endl;
+  }
+  for(int e=0; e<old_Ne; e++) if(marked[e]) e2b.insert(getLE(e));
 
   if (meshSmoothingConfig().wall_geom_tol > 0.0) {
     int forced_wall_edges = 0;
@@ -705,6 +962,9 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     int vm = (int)mesh.V.size(); Vec2 mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
     if (old_boundary_edge.count(key)) {
       int g = old_boundary_edge[key];
+      // Keep new wall midpoints straight initially. They are reprojected later
+      // by the wall-only snap pass, which applies local validity checks and
+      // backtracking before accepting any move toward the blade spline.
       old_boundary_edge[{std::min(va,vm), std::max(va,vm)}] = g;
       old_boundary_edge[{std::min(vb,vm), std::max(vb,vm)}] = g;
     }
@@ -741,14 +1001,29 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
       }
       if(t == -1) continue;
 
-      for (int i = 0; i < 3; i++) {
-        if (e2b.count(ee[i]) && isWallEdge(ee[i])) {
-          t = i;
+      int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb);
+      int wall_edge_idx = -1;
+      for (int i = 0; i < 3; ++i) {
+        if (isWallEdge(ee[i])) {
+          wall_edge_idx = i;
           break;
         }
       }
-
-      int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb);
+      if (wall_edge_idx >= 0 && wall_edge_idx != t) {
+        int w0 = v[wall_edge_idx];
+        int w1 = v[(wall_edge_idx + 1) % 3];
+        Vec2 wall_mid = 0.5 * (mesh.V[w0] + mesh.V[w1]);
+        BladeProjection wall_proj = projectToBladeSplineDetailed(wall_mid);
+        if (wall_proj.valid) {
+          Vec2 candidate = mesh.V[vm];
+          BladeProjection candidate_proj =
+              projectToBladeBranchDetailed(candidate, wall_proj.branch);
+          if (candidate_proj.valid && !pointIsOnFluidSide(candidate, candidate_proj)) {
+            double eps_push = 0.05 * (mesh.V[w1] - mesh.V[w0]).norm();
+            mesh.V[vm] = movePointToFluidSide(candidate, candidate_proj, eps_push);
+          }
+        }
+      }
       int parent = rmap.child_to_parent[e];
       mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
       Element c2; c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
@@ -790,32 +1065,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   }
 
   mesh.appendPeriodicToIE();
-
-  // Existing wall vertices can remain off-surface from the starting mesh; reproject
-  // the full wall chain so inherited points do not preserve kinks across cycles.
-  auto rejected_elem_marks = snapWallVerticesToBladeSpline(mesh);
-  int n_retry_marked = 0;
-  for (bool m : rejected_elem_marks) if (m) n_retry_marked++;
-  if (n_retry_marked > 0 && retry_depth > 0) {
-    std::cerr << "    triggering extra local refinement around "
-              << n_retry_marked
-              << " wall-adjacent elements due to rejected blade snaps" << std::endl;
-    RefinementMap extra = bisectMarkedElementsImpl(mesh, rejected_elem_marks, retry_depth - 1);
-    RefinementMap composed;
-    composed.child_to_parent.resize(extra.child_to_parent.size());
-    for (int i = 0; i < static_cast<int>(extra.child_to_parent.size()); ++i) {
-      composed.child_to_parent[i] = rmap.child_to_parent[extra.child_to_parent[i]];
-    }
-    composed.new_vertex_edges = rmap.new_vertex_edges;
-    composed.new_vertex_edges.insert(composed.new_vertex_edges.end(),
-                                     extra.new_vertex_edges.begin(),
-                                     extra.new_vertex_edges.end());
-    return composed;
-  }
-
-  redistributeWallVerticesAlongBlade(mesh);
-  relocateSkinnyTriangleApexes(mesh);
-  smoothInteriorVertices(mesh, meshSmoothingConfig().iterations);
+  snapWallVerticesToBladeSplineConsistent(mesh);
   mesh.has_curved_elements = false; mesh.q_order_global = 1;
   for (auto &e : mesh.E) { e.q_order = 1; e.ho_nodes.clear(); }
   mesh.computeGeometry();
