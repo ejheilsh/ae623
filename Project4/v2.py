@@ -73,6 +73,30 @@ class mesh_class():
         xs = np.hstack([u[:, 0], l[:, 0]])
         self.spline_bounds = (np.min(xs), np.max(xs))
 
+    def sample_spline_equal_arclength(self, spline, x_start, x_end, npts, nsample=2000):
+        xs_dense = np.linspace(x_start, x_end, nsample)
+        ys_dense = spline(xs_dense)
+        ds = np.hypot(np.diff(xs_dense), np.diff(ys_dense))
+        s = np.concatenate([[0.0], np.cumsum(ds)])
+        if s[-1] <= 1e-14 or npts <= 1:
+            return np.column_stack([xs_dense[[0, -1]], ys_dense[[0, -1]]]) if npts > 1 else np.array([[xs_dense[0], ys_dense[0]]])
+        s_target = np.linspace(0.0, s[-1], npts)
+        xs = np.interp(s_target, s, xs_dense)
+        ys = np.interp(s_target, s, ys_dense)
+        return np.column_stack([xs, ys])
+
+    def unique_points_preserve_order(self, pts, tol=1e-12):
+        kept = []
+        keys = set()
+        scale = 1.0 / max(tol, 1e-15)
+        for p in pts:
+            key = tuple(np.round(np.asarray(p) * scale).astype(int))
+            if key in keys:
+                continue
+            keys.add(key)
+            kept.append(np.asarray(p, dtype=float))
+        return np.vstack(kept)
+
 
     def init_domain_pts(self):
         # parameters from project description
@@ -81,7 +105,7 @@ class mesh_class():
         u = self.surface_upper
         l = self.surface_lower
         # n = 15 # arbitrary, controls fineness of initial unrefined mesh
-        n = 20 # arbitrary, controls fineness of initial unrefined mesh
+        n = 5 # arbitrary, controls fineness of initial unrefined mesh
 
         # array of points to the left of the LE
         idx_LE = np.argmin(u[:, 0])
@@ -115,8 +139,9 @@ class mesh_class():
         pts_blades = np.column_stack([X.ravel(), Y.ravel()])
         # mask w/ splines of foils
 
-        u_on_mesh = np.column_stack([xs, self.cs_upper(xs)])
-        l_on_mesh = np.column_stack([xs, self.cs_lower(xs)])
+        n_blade_pts = max(8, int((x_TE - x_LE) / (width / n)) + 1)
+        u_on_mesh = self.sample_spline_equal_arclength(self.cs_upper, x_LE, x_TE, n_blade_pts)
+        l_on_mesh = self.sample_spline_equal_arclength(self.cs_lower, x_LE, x_TE, n_blade_pts)
 
         y_upper = self.cs_upper(pts_blades[:, 0])
         y_lower = self.cs_lower(pts_blades[:, 0])
@@ -124,6 +149,7 @@ class mesh_class():
         pts_blades = pts_blades[mask]
 
         pts = np.vstack([pts_left, pts_blades, pts_right, u_on_mesh, l_on_mesh])
+        pts = self.unique_points_preserve_order(pts)
         # pts = np.vstack([pts_left, pts_blades, pts_right, u, l])
 
         # quick plot to check coords
@@ -176,10 +202,11 @@ class mesh_class():
         self.V = self.pts
 
         # plot initial coarse mesh 
-        plt.triplot(self.V[:,0], self.V[:,1], self.E2N-1) # -1 is because E2N is 1-indexed
-        plt.plot(self.surface_upper[:, 0], self.surface_upper[:, 1])
-        plt.plot(self.surface_lower[:, 0], self.surface_lower[:, 1])
-        plt.show()
+        if False:
+            plt.triplot(self.V[:,0], self.V[:,1], self.E2N-1) # -1 is because E2N is 1-indexed
+            plt.plot(self.surface_upper[:, 0], self.surface_upper[:, 1])
+            plt.plot(self.surface_lower[:, 0], self.surface_lower[:, 1])
+            plt.show()
 
         
     def edgehash(self, plor_edges=None):
@@ -638,7 +665,8 @@ class mesh_class():
                 mask = boundaries == bg
                 n = np.sum(mask)
                 f.write(f"{n} {n_dims} {bg}\n")
-                bnodes = self.B2E[mask][:, :2]
+                # GRI boundary groups should store node pairs, not (elem, local_face).
+                bnodes = self.BE[mask][:, :2]
                 for bnode_pair in bnodes:
                     f.write(" ".join(map(str, bnode_pair)) + "\n")
 
@@ -1039,7 +1067,7 @@ class mesh_class():
         fig, ax = plt.subplots(figsize=(12, 8))
         sns.despine()
 
-        blade_color = "red" if color_by is None or color_by is "projections" else "k"
+        blade_color = "red" if color_by is None or color_by == "projections" else "k"
         
 
         # plot spline of self.surface_upper and self.surface_lower as red curves
@@ -1140,54 +1168,63 @@ class mesh_class():
 
 def main():
     t_start = time.perf_counter()
+    coarse_smooth_iterations = 80
+    coarse_smooth_omega = 0.15
 
     # initialize
-    m = mesh_class(label="base", h_bounds=(0.67, 4.15))
+    m = mesh_class(label="test", h_bounds=(0.67, 4.15))
     print(f"\nThere are {len(m.E2N)} cells in the base mesh")
 
+    if coarse_smooth_iterations > 0:
+        m.smooth_cells(iterations=coarse_smooth_iterations, omega=coarse_smooth_omega)
+        m.edgehash()
+        m.correct_edgehash_for_periodic_boundaries(plot_mode="revised")
+        m.populate_geom_matrices()
+        print(f"Applied coarse-mesh smoothing: iters={coarse_smooth_iterations}, omega={coarse_smooth_omega}")
+
     m.write_gri()
-    m.label = "test"
+    # m.label = "test2"
 
-    m.mesh_verification()
-
-    # m.visual_mesh(fname="mesh0")
-
-    # refine locally
-    for _ in range(7): # 7 for report
-        m.refinement_local()
-        # m.plot_by_distance(vmin=0, vmax=2)
-    print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
-    t_end = time.perf_counter()
-    print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
-    # m.visual_mesh(fname="mesh1")
-    # m.visual_mesh(fname="mesh1_edge_length", color_by="edge_length")
-    # m.plot_by_distance()
-    # m.visual_mesh(fname="mesh1_projection", color_by="projections")
-    print(f"\n local refinement: {len(m.E2N)} cells")
     # m.mesh_verification()
-    m.write_gri()
-    # m.label = "8k"
 
-    # # # refine globally afterwards
-    # for i in range(3): # 3
-    #     m.refinement_global()
-    #     # m.plot_by_distance()
-    #     t_end = time.perf_counter()
-    #     print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
-    #     m.write_gri()
-    #     if i == 0:
-    #         m.label = "32k"
-    #     if i == 1:
-    #         m.label = "128k"
-    #     # m.visual_mesh(fname=f"mesh{2 + i}")
-    #     # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
-    #     # if i == 2: # 2
-    #     #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
+    # # m.visual_mesh(fname="mesh0")
 
-    #     print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
+    # # refine locally
+    # for _ in range(7): # 7 for report
+    #     m.refinement_local()
+    #     # m.plot_by_distance(vmin=0, vmax=2)
+    # print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
+    # t_end = time.perf_counter()
+    # print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
+    # # m.visual_mesh(fname="mesh1")
+    # # m.visual_mesh(fname="mesh1_edge_length", color_by="edge_length")
+    # # m.plot_by_distance()
+    # # m.visual_mesh(fname="mesh1_projection", color_by="projections")
+    # print(f"\n local refinement: {len(m.E2N)} cells")
+    # # m.mesh_verification()
+    # m.write_gri()
+    # # m.label = "8k"
+
+    # # # # refine globally afterwards
+    # # for i in range(3): # 3
+    # #     m.refinement_global()
+    # #     # m.plot_by_distance()
+    # #     t_end = time.perf_counter()
+    # #     print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
+    # #     m.write_gri()
+    # #     if i == 0:
+    # #         m.label = "32k"
+    # #     if i == 1:
+    # #         m.label = "128k"
+    # #     # m.visual_mesh(fname=f"mesh{2 + i}")
+    # #     # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
+    # #     # if i == 2: # 2
+    # #     #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
+
+    # #     print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
 
 
-    #     # m.mesh_verification()
+    # #     # m.mesh_verification()
 
 
 
