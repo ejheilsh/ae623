@@ -25,6 +25,7 @@ std::vector<bool> markByAspectRatio(const Mesh &mesh,
 
 // Configure the post-refinement smoother.
 void setMeshSmoothingIterations(int iterations);
+void setWallGeometryTolerance(double tolerance);
 
 // Bisect each marked triangle at its longest edge.
 // Modifies `mesh` in place and returns the parent-child mapping.

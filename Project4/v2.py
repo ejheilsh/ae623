@@ -80,8 +80,8 @@ class mesh_class():
         height = self.domain_height
         u = self.surface_upper
         l = self.surface_lower
-        # n = 15 # arbitrary, controls fineness of initial unrefined mesh
         n = 5 # arbitrary, controls fineness of initial unrefined mesh
+        # n = 8 # arbitrary, controls fineness of initial unrefined mesh
 
         # array of points to the left of the LE
         idx_LE = np.argmin(u[:, 0])
@@ -176,10 +176,10 @@ class mesh_class():
         self.V = self.pts
 
         # plot initial coarse mesh 
-        # plt.triplot(self.V[:,0], self.V[:,1], self.E2N-1) # -1 is because E2N is 1-indexed
-        # plt.plot(self.surface_upper[:, 0], self.surface_upper[:, 1])
-        # plt.plot(self.surface_lower[:, 0], self.surface_lower[:, 1])
-        # plt.show()
+        plt.triplot(self.V[:,0], self.V[:,1], self.E2N-1) # -1 is because E2N is 1-indexed
+        plt.plot(self.surface_upper[:, 0], self.surface_upper[:, 1])
+        plt.plot(self.surface_lower[:, 0], self.surface_lower[:, 1])
+        plt.show()
 
         
     def edgehash(self, plor_edges=None):
@@ -617,7 +617,7 @@ class mesh_class():
         n_elem = len(self.E2N)
         n_dims = self.V.shape[1]
 
-        fname_gri = dir_base.joinpath(f"output/{self.label}.gri")
+        fname_gri = dir_base.joinpath(f"grids/{self.label}.gri")
         fname_gri.parent.mkdir(parents=True, exist_ok=True)
 
         with open(fname_gri, "w") as f:
@@ -1146,16 +1146,16 @@ def main():
     print(f"\nThere are {len(m.E2N)} cells in the base mesh")
 
     m.write_gri()
-    m.label = "2k"
+    m.label = "test"
 
-    # m.mesh_verification()
+    m.mesh_verification()
 
     # m.visual_mesh(fname="mesh0")
 
     # refine locally
     for _ in range(7): # 7 for report
         m.refinement_local()
-        m.plot_by_distance(vmin=0, vmax=2)
+        # m.plot_by_distance(vmin=0, vmax=2)
     print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
     t_end = time.perf_counter()
     print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
@@ -1166,28 +1166,28 @@ def main():
     print(f"\n local refinement: {len(m.E2N)} cells")
     # m.mesh_verification()
     m.write_gri()
-    m.label = "8k"
+    # m.label = "8k"
 
-    # # refine globally afterwards
-    for i in range(3): # 3
-        m.refinement_global()
-        # m.plot_by_distance()
-        t_end = time.perf_counter()
-        print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
-        m.write_gri()
-        if i == 0:
-            m.label = "32k"
-        if i == 1:
-            m.label = "128k"
-        # m.visual_mesh(fname=f"mesh{2 + i}")
-        # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
-        # if i == 2: # 2
-        #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
+    # # # refine globally afterwards
+    # for i in range(3): # 3
+    #     m.refinement_global()
+    #     # m.plot_by_distance()
+    #     t_end = time.perf_counter()
+    #     print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
+    #     m.write_gri()
+    #     if i == 0:
+    #         m.label = "32k"
+    #     if i == 1:
+    #         m.label = "128k"
+    #     # m.visual_mesh(fname=f"mesh{2 + i}")
+    #     # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
+    #     # if i == 2: # 2
+    #     #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
 
-        print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
+    #     print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
 
 
-        # m.mesh_verification()
+    #     # m.mesh_verification()
 
 
 

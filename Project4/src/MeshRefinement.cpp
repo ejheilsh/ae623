@@ -49,6 +49,7 @@ struct BladeSplineReference {
 
 struct MeshSmoothingConfig {
   int iterations = 120;
+  double wall_geom_tol = 0.15;
 };
 
 MeshSmoothingConfig &meshSmoothingConfig() {
@@ -91,27 +92,70 @@ BladeSplineReference &bladeSplineReference() {
   return ref;
 }
 
-Vec2 projectToBladeSpline(const Vec2 &p) {
+enum class BladeBranch {
+  upper,
+  lower,
+  upper_shifted,
+  lower_shifted,
+  none,
+};
+
+struct BladeProjection {
+  bool valid = false;
+  double d2 = std::numeric_limits<double>::infinity();
+  double s = 0.0;
+  double s_total = 0.0;
+  double offset_y = 0.0;
+  Vec2 pt{0.0, 0.0};
+  BladeBranch branch = BladeBranch::none;
+};
+
+Vec2 evaluateBladeBranch(BladeBranch branch, double s) {
   BladeSplineReference &ref = bladeSplineReference();
-  if (!ref.loaded) return p;
+  switch (branch) {
+    case BladeBranch::upper: return {ref.upper_x(s), ref.upper_y(s)};
+    case BladeBranch::lower: return {ref.lower_x(s), ref.lower_y(s)};
+    case BladeBranch::upper_shifted: return {ref.upper_x(s), ref.upper_y(s) + 18.0};
+    case BladeBranch::lower_shifted: return {ref.lower_x(s), ref.lower_y(s) - 18.0};
+    case BladeBranch::none: return {0.0, 0.0};
+  }
+  return {0.0, 0.0};
+}
+
+BladeProjection projectToBladeSplineDetailed(const Vec2 &p) {
+  BladeSplineReference &ref = bladeSplineReference();
+  if (!ref.loaded) return {};
   auto f_obj = [&](const tk::spline &sx, const tk::spline &sy, double oy) {
     return [=, &sx, &sy](double s) { double dx=sx(s)-p.x, dy=(sy(s)+oy)-p.y; return dx*dx+dy*dy; };
   };
-  struct Cand { double d2; Vec2 pt; };
-  std::vector<Cand> cands;
-  auto add_c = [&](const tk::spline &sx, const tk::spline &sy, double st, double oy) {
+  std::vector<BladeProjection> cands;
+  auto add_c = [&](const tk::spline &sx, const tk::spline &sy, double st, double oy, BladeBranch branch) {
     auto f = f_obj(sx, sy, oy);
     int ns = 20; double bs = 0, bo = 1e300;
     for (int i=0; i<=ns; i++) { double s=st*i/ns, o=f(s); if(o<bo){bo=o; bs=s;}}
     double sb = goldenSectionArgmin(f, std::max(0.0, bs-st/ns), std::min(st, bs+st/ns));
-    cands.push_back({f(sb), {sx(sb), sy(sb)+oy}});
+    BladeProjection proj;
+    proj.valid = true;
+    proj.d2 = f(sb);
+    proj.s = sb;
+    proj.s_total = st;
+    proj.offset_y = oy;
+    proj.pt = {sx(sb), sy(sb)+oy};
+    proj.branch = branch;
+    cands.push_back(proj);
   };
-  add_c(ref.upper_x, ref.upper_y, ref.s_total_upper, 0.0);
-  add_c(ref.lower_x, ref.lower_y, ref.s_total_lower, 0.0);
-  add_c(ref.upper_x, ref.upper_y, ref.s_total_upper, 18.0);
-  add_c(ref.lower_x, ref.lower_y, ref.s_total_lower, -18.0);
-  auto b = std::min_element(cands.begin(), cands.end(), [](const Cand &a, const Cand &b){return a.d2 < b.d2;});
-  return (sqrt(b->d2) > ref.snap_distance_tol) ? p : b->pt;
+  add_c(ref.upper_x, ref.upper_y, ref.s_total_upper, 0.0, BladeBranch::upper);
+  add_c(ref.lower_x, ref.lower_y, ref.s_total_lower, 0.0, BladeBranch::lower);
+  add_c(ref.upper_x, ref.upper_y, ref.s_total_upper, 18.0, BladeBranch::upper_shifted);
+  add_c(ref.lower_x, ref.lower_y, ref.s_total_lower, -18.0, BladeBranch::lower_shifted);
+  auto b = std::min_element(cands.begin(), cands.end(), [](const BladeProjection &a, const BladeProjection &b){return a.d2 < b.d2;});
+  if (b == cands.end() || std::sqrt(b->d2) > ref.snap_distance_tol) return {};
+  return *b;
+}
+
+Vec2 projectToBladeSpline(const Vec2 &p) {
+  BladeProjection proj = projectToBladeSplineDetailed(p);
+  return proj.valid ? proj.pt : p;
 }
 
 double triangleQuality(const Element &elem, const std::vector<Vec2> &verts) {
@@ -153,6 +197,74 @@ double triangleMinAngleDeg(const Element &elem, const std::vector<Vec2> &verts) 
   return std::min(ang_a, std::min(ang_b, ang_c));
 }
 
+double orient2d(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+bool onSegment(const Vec2 &a, const Vec2 &b, const Vec2 &p, double tol = 1e-12) {
+  return std::min(a.x, b.x) - tol <= p.x && p.x <= std::max(a.x, b.x) + tol &&
+         std::min(a.y, b.y) - tol <= p.y && p.y <= std::max(a.y, b.y) + tol;
+}
+
+bool segmentsIntersect(const Vec2 &a, const Vec2 &b,
+                       const Vec2 &c, const Vec2 &d,
+                       double tol = 1e-12) {
+  const double o1 = orient2d(a, b, c);
+  const double o2 = orient2d(a, b, d);
+  const double o3 = orient2d(c, d, a);
+  const double o4 = orient2d(c, d, b);
+
+  const bool proper = ((o1 > tol && o2 < -tol) || (o1 < -tol && o2 > tol)) &&
+                      ((o3 > tol && o4 < -tol) || (o3 < -tol && o4 > tol));
+  if (proper) return true;
+
+  if (std::abs(o1) <= tol && onSegment(a, b, c, tol)) return true;
+  if (std::abs(o2) <= tol && onSegment(a, b, d, tol)) return true;
+  if (std::abs(o3) <= tol && onSegment(c, d, a, tol)) return true;
+  if (std::abs(o4) <= tol && onSegment(c, d, b, tol)) return true;
+  return false;
+}
+
+bool localEdgesSelfIntersect(const Mesh &mesh,
+                             int vid,
+                             const std::vector<std::vector<int>> &node_to_elem,
+                             const std::vector<Vec2> &verts) {
+  std::set<int> local_nodes;
+  std::set<int> local_elems;
+  local_nodes.insert(vid);
+  for (int e : node_to_elem[vid]) {
+    local_elems.insert(e);
+    local_nodes.insert(mesh.E[e].v[0]);
+    local_nodes.insert(mesh.E[e].v[1]);
+    local_nodes.insert(mesh.E[e].v[2]);
+  }
+  std::vector<int> ring_nodes(local_nodes.begin(), local_nodes.end());
+  for (int n : ring_nodes) {
+    for (int e : node_to_elem[n]) local_elems.insert(e);
+  }
+
+  std::set<std::pair<int, int>> edge_set;
+  for (int e : local_elems) {
+    const auto &elem = mesh.E[e];
+    edge_set.insert({std::min(elem.v[0], elem.v[1]), std::max(elem.v[0], elem.v[1])});
+    edge_set.insert({std::min(elem.v[1], elem.v[2]), std::max(elem.v[1], elem.v[2])});
+    edge_set.insert({std::min(elem.v[2], elem.v[0]), std::max(elem.v[2], elem.v[0])});
+  }
+
+  std::vector<std::pair<int, int>> edges(edge_set.begin(), edge_set.end());
+  for (size_t i = 0; i < edges.size(); ++i) {
+    const int a0 = edges[i].first;
+    const int a1 = edges[i].second;
+    for (size_t j = i + 1; j < edges.size(); ++j) {
+      const int b0 = edges[j].first;
+      const int b1 = edges[j].second;
+      if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
+      if (segmentsIntersect(verts[a0], verts[a1], verts[b0], verts[b1])) return true;
+    }
+  }
+  return false;
+}
+
 bool localMovePreservesMesh(const Mesh &mesh,
                             int vid,
                             const std::vector<std::vector<int>> &node_to_elem,
@@ -179,10 +291,11 @@ bool localMovePreservesMesh(const Mesh &mesh,
   if (new_min_area < 0.2 * orig_min_area) return false;
   if (new_min_angle < 2.0) return false;
   if (new_min_angle < std::min(orig_min_angle - 0.25, 0.75 * orig_min_angle)) return false;
+  if (localEdgesSelfIntersect(mesh, vid, node_to_elem, verts_trial)) return false;
   return true;
 }
 
-void snapWallVerticesToBladeSpline(Mesh &mesh) {
+std::vector<bool> snapWallVerticesToBladeSpline(Mesh &mesh) {
   std::set<int> wall_vertices;
   for (const auto &be : mesh.BE) {
     if (be.bIndex < 0 || be.bIndex >= static_cast<int>(mesh.Bname.size())) continue;
@@ -200,6 +313,7 @@ void snapWallVerticesToBladeSpline(Mesh &mesh) {
 
   int rejected = 0;
   int accepted = 0;
+  std::vector<bool> rejected_elem_marks(mesh.E.size(), false);
   std::vector<Vec2> trial = mesh.V;
   for (int vid : wall_vertices) {
     const Vec2 original = mesh.V[vid];
@@ -220,6 +334,13 @@ void snapWallVerticesToBladeSpline(Mesh &mesh) {
     if (!moved) {
       trial[vid] = mesh.V[vid];
       rejected++;
+      for (int e : node_to_elem[vid]) {
+        rejected_elem_marks[e] = true;
+        const auto &elem = mesh.E[e];
+        for (int n : {elem.v[0], elem.v[1], elem.v[2]}) {
+          for (int ee : node_to_elem[n]) rejected_elem_marks[ee] = true;
+        }
+      }
     }
   }
 
@@ -227,6 +348,174 @@ void snapWallVerticesToBladeSpline(Mesh &mesh) {
     std::cerr << "    wall snapping accepted " << accepted
               << " moves, rejected " << rejected
               << " due to local consistency checks" << std::endl;
+  }
+  return rejected_elem_marks;
+}
+
+void redistributeWallVerticesAlongBlade(Mesh &mesh, int iterations = 20, double omega = 0.35) {
+  std::vector<std::set<int>> wall_adj(mesh.V.size());
+  for (const auto &be : mesh.BE) {
+    if (be.bIndex < 0 || be.bIndex >= static_cast<int>(mesh.Bname.size())) continue;
+    if (lowerCopy(mesh.Bname[be.bIndex]) != "wall") continue;
+    wall_adj[be.v[0]].insert(be.v[1]);
+    wall_adj[be.v[1]].insert(be.v[0]);
+  }
+
+  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    node_to_elem[mesh.E[e].v[0]].push_back(e);
+    node_to_elem[mesh.E[e].v[1]].push_back(e);
+    node_to_elem[mesh.E[e].v[2]].push_back(e);
+  }
+
+  std::vector<bool> visited(mesh.V.size(), false);
+  for (int start = 0; start < static_cast<int>(mesh.V.size()); ++start) {
+    if (visited[start] || wall_adj[start].empty()) continue;
+
+    std::vector<int> component;
+    std::vector<int> stack{start};
+    visited[start] = true;
+    while (!stack.empty()) {
+      int v = stack.back();
+      stack.pop_back();
+      component.push_back(v);
+      for (int nbr : wall_adj[v]) {
+        if (!visited[nbr]) {
+          visited[nbr] = true;
+          stack.push_back(nbr);
+        }
+      }
+    }
+
+    int path_start = component.front();
+    for (int v : component) {
+      if (wall_adj[v].size() == 1) {
+        path_start = v;
+        break;
+      }
+    }
+
+    std::vector<int> path;
+    std::set<int> seen;
+    int prev = -1;
+    int cur = path_start;
+    while (cur >= 0 && !seen.count(cur)) {
+      path.push_back(cur);
+      seen.insert(cur);
+      int next = -1;
+      for (int nbr : wall_adj[cur]) {
+        if (nbr != prev) {
+          next = nbr;
+          break;
+        }
+      }
+      prev = cur;
+      cur = next;
+    }
+    if (path.size() < 3) continue;
+
+    std::vector<BladeProjection> proj(path.size());
+    bool compatible = true;
+    for (size_t i = 0; i < path.size(); ++i) {
+      proj[i] = projectToBladeSplineDetailed(mesh.V[path[i]]);
+      if (!proj[i].valid) { compatible = false; break; }
+      if (i > 0 && proj[i].branch != proj[0].branch) { compatible = false; break; }
+    }
+    if (!compatible) continue;
+
+    const double sign = (proj.back().s >= proj.front().s) ? 1.0 : -1.0;
+    std::vector<double> u(path.size());
+    for (size_t i = 0; i < path.size(); ++i) u[i] = sign * proj[i].s;
+    const double min_sep = 0.05 * std::abs(u.back() - u.front()) / std::max<int>(1, path.size() - 1);
+
+    std::vector<Vec2> trial = mesh.V;
+    for (int iter = 0; iter < iterations; ++iter) {
+      int moved = 0;
+      for (size_t i = 1; i + 1 < path.size(); ++i) {
+        const double target_u = (1.0 - omega) * u[i] + 0.5 * omega * (u[i - 1] + u[i + 1]);
+        const double lo = u[i - 1] + min_sep;
+        const double hi = u[i + 1] - min_sep;
+        if (lo >= hi) continue;
+        const double new_u = std::max(lo, std::min(hi, target_u));
+        const double new_s = sign * new_u;
+        const Vec2 candidate = evaluateBladeBranch(proj[i].branch, new_s);
+        if (localMovePreservesMesh(mesh, path[i], node_to_elem, mesh.V, trial, candidate)) {
+          mesh.V[path[i]] = candidate;
+          trial[path[i]] = candidate;
+          u[i] = new_u;
+          moved++;
+        }
+      }
+      if (moved == 0) break;
+    }
+  }
+}
+
+void relocateSkinnyTriangleApexes(Mesh &mesh,
+                                  double quality_trigger = 0.10,
+                                  double omega = 0.35,
+                                  int passes = 2) {
+  if (mesh.E.empty()) return;
+
+  std::vector<bool> frozen(mesh.V.size(), false);
+  for (const auto &be : mesh.BE) {
+    frozen[be.v[0]] = true;
+    frozen[be.v[1]] = true;
+  }
+  for (const auto &pg : mesh.periodicGroups) {
+    for (const auto &pair : pg.pairs) {
+      frozen[pair.first] = true;
+      frozen[pair.second] = true;
+    }
+  }
+
+  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    node_to_elem[mesh.E[e].v[0]].push_back(e);
+    node_to_elem[mesh.E[e].v[1]].push_back(e);
+    node_to_elem[mesh.E[e].v[2]].push_back(e);
+  }
+
+  std::vector<Vec2> trial = mesh.V;
+  for (int pass = 0; pass < passes; ++pass) {
+    int moved = 0;
+    for (const auto &elem : mesh.E) {
+      const double q = triangleQuality(elem, mesh.V);
+      if (q >= quality_trigger) continue;
+
+      const int v[3] = {elem.v[0], elem.v[1], elem.v[2]};
+      const double l2[3] = {
+          (mesh.V[v[1]] - mesh.V[v[0]]).normSq(),
+          (mesh.V[v[2]] - mesh.V[v[1]]).normSq(),
+          (mesh.V[v[0]] - mesh.V[v[2]]).normSq(),
+      };
+      int shortest = 0;
+      if (l2[1] < l2[shortest]) shortest = 1;
+      if (l2[2] < l2[shortest]) shortest = 2;
+
+      const int apex = v[(shortest + 2) % 3];
+      const int b0 = v[shortest];
+      const int b1 = v[(shortest + 1) % 3];
+      if (frozen[apex]) continue;
+
+      const Vec2 base_mid = 0.5 * (mesh.V[b0] + mesh.V[b1]);
+      const Vec2 base = mesh.V[b1] - mesh.V[b0];
+      const double base_len = base.norm();
+      if (base_len <= 1e-12) continue;
+
+      Vec2 n{-base.y / base_len, base.x / base_len};
+      const double orient = orient2d(mesh.V[b0], mesh.V[b1], mesh.V[apex]);
+      if (orient < 0.0) n = -1.0 * n;
+
+      const Vec2 ideal = base_mid + n * (0.8660254037844386 * base_len);
+      const Vec2 candidate = (1.0 - omega) * mesh.V[apex] + omega * ideal;
+      if (localMovePreservesMesh(mesh, apex, node_to_elem, mesh.V, trial, candidate)) {
+        mesh.V[apex] = candidate;
+        trial[apex] = candidate;
+        moved++;
+      }
+    }
+    if (moved == 0) break;
   }
 }
 
@@ -342,48 +631,8 @@ void smoothInteriorVertices(Mesh &mesh, int iterations,
   }
 }
 
-} // namespace
-
-std::vector<bool> markByIndicator(const std::vector<double> &eps, double f) {
-  int Ne = eps.size(); std::vector<bool> m(Ne, false); if (f <= 0.0) return m;
-  std::vector<double> s = eps; std::sort(s.rbegin(), s.rend());
-  double thr = s[std::clamp((int)(f * Ne), 1, Ne) - 1];
-  for (int e = 0; e < Ne; e++) if (eps[e] >= thr) m[e] = true;
-  return m;
-}
-
-std::vector<bool> markByAspectRatio(const Mesh &mesh, double max_aspect_ratio) {
-  const int Ne = static_cast<int>(mesh.E.size());
-  std::vector<bool> marked(Ne, false);
-  if (max_aspect_ratio <= 0.0) return marked;
-
-  for (int e = 0; e < Ne; ++e) {
-    const auto &elem = mesh.E[e];
-    const Vec2 &a = mesh.V[elem.v[0]];
-    const Vec2 &b = mesh.V[elem.v[1]];
-    const Vec2 &c = mesh.V[elem.v[2]];
-    const double l0 = (b - a).norm();
-    const double l1 = (c - b).norm();
-    const double l2 = (a - c).norm();
-    const double lmax = std::max({l0, l1, l2});
-    const double twice_area = std::abs((b.x - a.x) * (c.y - a.y) -
-                                       (b.y - a.y) * (c.x - a.x));
-    if (twice_area <= 1e-14) {
-      marked[e] = true;
-      continue;
-    }
-    const double shortest_altitude = twice_area / std::max(lmax, 1e-14);
-    const double aspect_ratio = lmax / std::max(shortest_altitude, 1e-14);
-    if (aspect_ratio > max_aspect_ratio) marked[e] = true;
-  }
-  return marked;
-}
-
-void setMeshSmoothingIterations(int iterations) {
-  meshSmoothingConfig().iterations = std::max(0, iterations);
-}
-
-RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in) {
+RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &marked_in,
+                                       int retry_depth) {
   RefinementMap rmap;
   int old_Ne = mesh.E.size();
   std::map<std::pair<int,int>, int> edge_midpoint;
@@ -402,8 +651,35 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     return d.x * d.x + d.y * d.y;
   };
 
+  auto isWallEdge = [&](const std::pair<int, int> &key) {
+    auto it = old_boundary_edge.find(key);
+    if (it == old_boundary_edge.end()) return false;
+    int g = it->second;
+    return g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+           lowerCopy(mesh.Bname[g]) == "wall";
+  };
+
   std::set<std::pair<int,int>> e2b;
   for(int e=0; e<old_Ne; e++) if(marked_in[e]) e2b.insert(getLE(e));
+
+  if (meshSmoothingConfig().wall_geom_tol > 0.0) {
+    int forced_wall_edges = 0;
+    for (const auto &be : mesh.BE) {
+      auto key = std::make_pair(std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1]));
+      if (!isWallEdge(key)) continue;
+      Vec2 mid = 0.5 * (mesh.V[be.v[0]] + mesh.V[be.v[1]]);
+      Vec2 snapped_mid = projectToBladeSpline(mid);
+      double geom_err = (snapped_mid - mid).norm();
+      if (geom_err > meshSmoothingConfig().wall_geom_tol) {
+        if (!e2b.count(key)) forced_wall_edges++;
+        e2b.insert(key);
+      }
+    }
+    if (forced_wall_edges > 0) {
+      std::cerr << "    forcing " << forced_wall_edges
+                << " wall-edge splits due to blade geometry under-resolution" << std::endl;
+    }
+  }
 
   std::map<std::pair<int,int>, std::pair<int,int>> ppartner;
   for (const auto &ie : mesh.IE) {
@@ -465,6 +741,13 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
       }
       if(t == -1) continue;
 
+      for (int i = 0; i < 3; i++) {
+        if (e2b.count(ee[i]) && isWallEdge(ee[i])) {
+          t = i;
+          break;
+        }
+      }
+
       int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb);
       int parent = rmap.child_to_parent[e];
       mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
@@ -506,15 +789,86 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
     }
   }
 
+  mesh.appendPeriodicToIE();
+
   // Existing wall vertices can remain off-surface from the starting mesh; reproject
   // the full wall chain so inherited points do not preserve kinks across cycles.
-  snapWallVerticesToBladeSpline(mesh);
+  auto rejected_elem_marks = snapWallVerticesToBladeSpline(mesh);
+  int n_retry_marked = 0;
+  for (bool m : rejected_elem_marks) if (m) n_retry_marked++;
+  if (n_retry_marked > 0 && retry_depth > 0) {
+    std::cerr << "    triggering extra local refinement around "
+              << n_retry_marked
+              << " wall-adjacent elements due to rejected blade snaps" << std::endl;
+    RefinementMap extra = bisectMarkedElementsImpl(mesh, rejected_elem_marks, retry_depth - 1);
+    RefinementMap composed;
+    composed.child_to_parent.resize(extra.child_to_parent.size());
+    for (int i = 0; i < static_cast<int>(extra.child_to_parent.size()); ++i) {
+      composed.child_to_parent[i] = rmap.child_to_parent[extra.child_to_parent[i]];
+    }
+    composed.new_vertex_edges = rmap.new_vertex_edges;
+    composed.new_vertex_edges.insert(composed.new_vertex_edges.end(),
+                                     extra.new_vertex_edges.begin(),
+                                     extra.new_vertex_edges.end());
+    return composed;
+  }
+
+  redistributeWallVerticesAlongBlade(mesh);
+  relocateSkinnyTriangleApexes(mesh);
   smoothInteriorVertices(mesh, meshSmoothingConfig().iterations);
-  mesh.appendPeriodicToIE();
   mesh.has_curved_elements = false; mesh.q_order_global = 1;
   for (auto &e : mesh.E) { e.q_order = 1; e.ho_nodes.clear(); }
   mesh.computeGeometry();
   return rmap;
+}
+
+} // namespace
+
+std::vector<bool> markByIndicator(const std::vector<double> &eps, double f) {
+  int Ne = eps.size(); std::vector<bool> m(Ne, false); if (f <= 0.0) return m;
+  std::vector<double> s = eps; std::sort(s.rbegin(), s.rend());
+  double thr = s[std::clamp((int)(f * Ne), 1, Ne) - 1];
+  for (int e = 0; e < Ne; e++) if (eps[e] >= thr) m[e] = true;
+  return m;
+}
+
+std::vector<bool> markByAspectRatio(const Mesh &mesh, double max_aspect_ratio) {
+  const int Ne = static_cast<int>(mesh.E.size());
+  std::vector<bool> marked(Ne, false);
+  if (max_aspect_ratio <= 0.0) return marked;
+
+  for (int e = 0; e < Ne; ++e) {
+    const auto &elem = mesh.E[e];
+    const Vec2 &a = mesh.V[elem.v[0]];
+    const Vec2 &b = mesh.V[elem.v[1]];
+    const Vec2 &c = mesh.V[elem.v[2]];
+    const double l0 = (b - a).norm();
+    const double l1 = (c - b).norm();
+    const double l2 = (a - c).norm();
+    const double lmax = std::max({l0, l1, l2});
+    const double twice_area = std::abs((b.x - a.x) * (c.y - a.y) -
+                                       (b.y - a.y) * (c.x - a.x));
+    if (twice_area <= 1e-14) {
+      marked[e] = true;
+      continue;
+    }
+    const double shortest_altitude = twice_area / std::max(lmax, 1e-14);
+    const double aspect_ratio = lmax / std::max(shortest_altitude, 1e-14);
+    if (aspect_ratio > max_aspect_ratio) marked[e] = true;
+  }
+  return marked;
+}
+
+void setMeshSmoothingIterations(int iterations) {
+  meshSmoothingConfig().iterations = std::max(0, iterations);
+}
+
+void setWallGeometryTolerance(double tolerance) {
+  meshSmoothingConfig().wall_geom_tol = std::max(0.0, tolerance);
+}
+
+RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in) {
+  return bisectMarkedElementsImpl(mesh, marked_in, 2);
 }
 
 std::vector<std::vector<Vec4>> interpolateSolution(const std::vector<std::vector<Vec4>> &U_old, const RefinementMap &rmap, int ndof) {

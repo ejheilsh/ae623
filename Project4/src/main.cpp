@@ -181,6 +181,7 @@ int main(int argc, char **argv) {
               << "\n  --map-ic      : Load IC from coarser mesh (optional)"
               << "\n  --final-ar-cleanup : After adjoint adaptation, do one extra refinement pass for cells above a max aspect ratio and re-solve"
               << "\n  --smooth-iters : Set post-refinement mesh smoothing iterations"
+              << "\n  --wall-geom-tol : Force wall-edge refinement when blade chord error exceeds this tolerance"
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
               << "\n  - Output files tagged by order: steady_<mesh>_p<order>_results.bin"
@@ -212,6 +213,7 @@ int main(int argc, char **argv) {
   double adapt_fraction = 0.25;
   double final_ar_cleanup = 0.0;
   int smooth_iters = 120;
+  double wall_geom_tol = 0.15;
 
   auto is_flag_token = [](const char *s) {
     return std::string(s).rfind("--", 0) == 0;
@@ -331,6 +333,13 @@ int main(int argc, char **argv) {
       }
       smooth_iters = std::stoi(argv[i + 1]);
       i += 1;
+    } else if (arg == "--wall-geom-tol") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --wall-geom-tol requires <tolerance>" << std::endl;
+        return 1;
+      }
+      wall_geom_tol = std::stod(argv[i + 1]);
+      i += 1;
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
       return 1;
@@ -339,6 +348,7 @@ int main(int argc, char **argv) {
 
   try {
     setMeshSmoothingIterations(smooth_iters);
+    setWallGeometryTolerance(wall_geom_tol);
     FiniteVolumeSolver solver(meshfile);
 
     // Extract grid name from mesh file path (needed for auto-chaining filenames)
