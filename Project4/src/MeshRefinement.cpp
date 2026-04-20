@@ -938,6 +938,23 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
 
 std::vector<std::vector<Vec4>> interpolateSolution(const std::vector<std::vector<Vec4>> &U_old, const RefinementMap &rmap, int ndof) {
   std::vector<std::vector<Vec4>> U_new(rmap.child_to_parent.size(), std::vector<Vec4>(ndof));
-  for (int i=0; i<(int)U_new.size(); i++) U_new[i] = U_old[rmap.child_to_parent[i]];
+  for (int i=0; i<(int)U_new.size(); i++) {
+    const auto &parent_dofs = U_old[rmap.child_to_parent[i]];
+    int parent_ndof = (int)parent_dofs.size();
+    // Compute parent cell average: for nodal Lagrange basis on reference triangle,
+    // the cell average is the equal-weight mean of all nodal DOFs.
+    // This is exact for p=0 (1 DOF) and p=1 (3 vertex DOFs with weight 1/3 each).
+    // For p=2, corner DOFs integrate to zero and edge DOFs carry weight 1/3 each,
+    // but using equal-weight mean is a reasonable approximation for an IC.
+    Vec4 avg = {0,0,0,0};
+    for (int j = 0; j < parent_ndof; ++j)
+      avg += parent_dofs[j];
+    avg = avg * (1.0 / parent_ndof);
+    // Set all child DOFs to the cell average (constant projection).
+    // For a nodal Lagrange basis, setting all nodes to the same value
+    // gives a constant polynomial equal to that value everywhere.
+    for (int j = 0; j < ndof; ++j)
+      U_new[i][j] = avg;
+  }
   return U_new;
 }

@@ -142,16 +142,16 @@ find_resume_ic() {
 # # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "================================================================"
-echo "  SECTION 3: Adjoint-adapted refinement — p=0 on base.gri"
+echo "  SECTION 3: Adjoint-adapted refinement — p=0 on 2k_q3.gri"
 echo "================================================================"
 
-ADAPT_MARKER="${OUTDIR}/steady_base_p0_adjoint_indicators_cycle0.bin"
+ADAPT_MARKER="${OUTDIR}/steady_2k_q3_p0_adjoint_indicators_cycle0.bin"
 if should_skip "$ADAPT_MARKER"; then
   echo "  Adjoint adapt data already exists"
 else
-  echo "--- Running adjoint-adapt on base.gri (9 cycles, 25% fraction) ---"
-  $SOLVER grids/base.gri 0 1.0 $FLUX 200000 steady \
-    --adjoint-adapt 1e-4 9 0.25 \
+  echo "--- Running adjoint-adapt on 2k_q3.gri (5 cycles, 25% fraction) ---"
+  $SOLVER grids/2k_q3.gri 1 1.0 $FLUX 200000 steady \
+    --adjoint-adapt 1e-4 5 0.25 \
     2>&1 | tee "${OUTDIR}/adapt_run.log"
   echo ""
 fi

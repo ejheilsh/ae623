@@ -548,8 +548,36 @@ int main(int argc, char **argv) {
 
         // Step 1: Converge the primal at current p_order
         if (cycle == 0) {
-          solver.initializeDG();
-          solver.setInitialCondition();
+          if (p_order > 0) {
+            // Auto-chain: converge p=0 first, then use as IC for p>0
+            int saved_order = solver.p_order;
+            solver.p_order = 0;
+            solver.initializeDG();
+            solver.setInitialCondition();
+            solver.CFL = 1.0;
+            std::cerr << "  Auto-chaining: converging p=0 seed for adaptation cycle 0..." << std::endl;
+            solver.solveSteady(itercap);
+            if (!solver.last_steady_converged) {
+              std::cerr << "  p=0 seed failed to converge — stopping adaptation." << std::endl;
+              break;
+            }
+            // Save p=0 cell averages, then re-init at target order
+            std::vector<Vec4> U_p0 = solver.U;
+            solver.p_order = saved_order;
+            solver.initializeDG();
+            solver.CFL = cfl;
+            solver.res_history.clear();
+            // Load p=0 averages as constant IC for each p>0 element
+            for (int e = 0; e < (int)U_p0.size(); ++e) {
+              for (int j = 0; j < solver.ndof_per_elem; ++j)
+                solver.U_dg[e][j] = U_p0[e];
+              solver.U[e] = U_p0[e];
+            }
+            std::cerr << "  p=0 seed converged. Loaded as IC for p=" << saved_order << std::endl;
+          } else {
+            solver.initializeDG();
+            solver.setInitialCondition();
+          }
         } else {
           // Restored interpolation mapping for all p_orders
           auto U_dg_save = solver.U_dg;
