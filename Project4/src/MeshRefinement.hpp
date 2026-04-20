@@ -31,6 +31,19 @@ void setWallGeometryTolerance(double tolerance);
 // Modifies `mesh` in place and returns the parent-child mapping.
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in);
 
+// Same as above, but with in-loop fallback: if fewer than target_adj_splits
+// adjoint-marked cells are refined (due to geometry rejections), candidates from
+// fallback_priority (sorted by descending indicator) are tried automatically.
+// Only one call to the connectivity rebuild ever happens.
+RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in,
+                                   const std::vector<int> &fallback_priority,
+                                   int target_adj_splits);
+
+// Print centroid/status diagnostics for wall-adjacent elements in the current mesh.
+// Intended for debugging why large blade-surface cells are not being split.
+void printWallRefinementDiagnostics(const Mesh &mesh,
+                                    const std::vector<bool> &marked_in);
+
 // Transfer the DG solution from the old mesh to the refined mesh.
 // For an element that was not refined, the DOFs are copied directly.
 // For a child of a split element, the parent DOFs are copied (constant injection).

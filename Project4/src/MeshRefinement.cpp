@@ -319,15 +319,15 @@ void rebuildMeshEdgeConnectivity(
   }
 }
 
-bool localWallSplitPatchValid(const Mesh &mesh,
-                              int va, int vb, int vopp,
-                              const Vec2 &mid,
-                              const Vec2 &vopp_pos,
-                              const std::vector<std::vector<int>> &node_to_elem,
-                              double area_tol = 1e-12,
-                              double min_angle_tol = 8.0,
-                              double min_quality_tol = 0.18,
-                              double area_ratio_tol = 0.10) {
+std::string localWallSplitPatchFailureReason(const Mesh &mesh,
+                                             int va, int vb, int vopp,
+                                             const Vec2 &mid,
+                                             const Vec2 &vopp_pos,
+                                             const std::vector<std::vector<int>> &node_to_elem,
+                                             double area_tol = 1e-12,
+                                             double min_angle_tol = 8.0,
+                                             double min_quality_tol = 0.18,
+                                             double area_ratio_tol = 0.10) {
   std::vector<Vec2> verts = mesh.V;
   verts[vopp] = vopp_pos;
 
@@ -336,26 +336,26 @@ bool localWallSplitPatchValid(const Mesh &mesh,
   for (int e : node_to_elem[vb]) local_elems.insert(e);
   for (int e : node_to_elem[vopp]) local_elems.insert(e);
 
-  double orig_local_min_area = std::numeric_limits<double>::infinity();
   double orig_local_min_quality = std::numeric_limits<double>::infinity();
+  double orig_local_min_area = std::numeric_limits<double>::infinity();
   double orig_local_min_angle = std::numeric_limits<double>::infinity();
   for (int e : local_elems) {
     orig_local_min_area = std::min(orig_local_min_area, triangleSignedArea(mesh.E[e], mesh.V));
     orig_local_min_quality = std::min(orig_local_min_quality, triangleQuality(mesh.E[e], mesh.V));
     orig_local_min_angle = std::min(orig_local_min_angle, triangleMinAngleDeg(mesh.E[e], mesh.V));
   }
-  if (!std::isfinite(orig_local_min_area)) return false;
+  if (!std::isfinite(orig_local_min_area)) return "local patch unavailable";
 
   const double a1 = triangleSignedAreaPts(vopp_pos, verts[va], mid);
   const double a2 = triangleSignedAreaPts(vopp_pos, mid, verts[vb]);
-  if (!(a1 > area_tol) || !(a2 > area_tol)) return false;
+  if (!(a1 > area_tol) || !(a2 > area_tol)) return "child area non-positive";
   if (a1 < area_ratio_tol * orig_local_min_area || a2 < area_ratio_tol * orig_local_min_area) {
-    return false;
+    return "child area ratio below floor";
   }
 
   const double ang1 = triangleMinAngleDegPts(vopp_pos, verts[va], mid);
   const double ang2 = triangleMinAngleDegPts(vopp_pos, mid, verts[vb]);
-  if (ang1 < min_angle_tol || ang2 < min_angle_tol) return false;
+  if (ang1 < min_angle_tol || ang2 < min_angle_tol) return "child angle below floor";
 
   const double q1 = std::abs(2.0 * std::sqrt(3.0) *
                              ((verts[va] - vopp_pos).x * (mid - vopp_pos).y -
@@ -371,7 +371,7 @@ bool localWallSplitPatchValid(const Mesh &mesh,
                                  (verts[vb] - mid).normSq() +
                                  (vopp_pos - verts[vb]).normSq(),
                              1e-16);
-  if (q1 < min_quality_tol || q2 < min_quality_tol) return false;
+  if (q1 < min_quality_tol || q2 < min_quality_tol) return "child quality below floor";
 
   for (int e : node_to_elem[vopp]) {
     const auto &elem = mesh.E[e];
@@ -379,14 +379,14 @@ bool localWallSplitPatchValid(const Mesh &mesh,
         (elem.v[0] == vb || elem.v[1] == vb || elem.v[2] == vb)) {
       continue;
     }
-    if (!(triangleSignedArea(elem, verts) > area_tol)) return false;
-    if (triangleMinAngleDeg(elem, verts) < min_angle_tol) return false;
+    if (!(triangleSignedArea(elem, verts) > area_tol)) return "neighbor area non-positive";
+    if (triangleMinAngleDeg(elem, verts) < min_angle_tol) return "neighbor angle below floor";
     const double local_quality_floor =
         (orig_local_min_quality > 0.0)
             ? std::max(min_quality_tol, 0.5 * orig_local_min_quality)
             : min_quality_tol;
     if (triangleQuality(elem, verts) < local_quality_floor) {
-      return false;
+      return "neighbor quality below floor";
     }
   }
 
@@ -405,7 +405,7 @@ bool localWallSplitPatchValid(const Mesh &mesh,
   for (const auto &[e0, e1] : new_edges) {
     const Vec2 edge_mid = 0.5 * (e0 + e1);
     BladeProjection proj = projectToBladeSplineDetailed(edge_mid);
-    if (proj.valid && !pointIsOnFluidSide(edge_mid, proj)) return false;
+    if (proj.valid && !pointIsOnFluidSide(edge_mid, proj)) return "child-edge midpoint outside blade";
   }
   for (const auto &edge : local_edges) {
     const int x = edge.first;
@@ -415,11 +415,26 @@ bool localWallSplitPatchValid(const Mesh &mesh,
       const bool shares_va = (verts[x] - e0).normSq() <= 1e-24 || (verts[y] - e0).normSq() <= 1e-24;
       const bool shares_vb = (verts[x] - e1).normSq() <= 1e-24 || (verts[y] - e1).normSq() <= 1e-24;
       if (shares_va || shares_vb) continue;
-      if (segmentsIntersect(e0, e1, verts[x], verts[y])) return false;
+      if (segmentsIntersect(e0, e1, verts[x], verts[y])) return "new edge intersects local edge";
     }
   }
 
-  return true;
+  return {};
+}
+
+bool localWallSplitPatchValid(const Mesh &mesh,
+                              int va, int vb, int vopp,
+                              const Vec2 &mid,
+                              const Vec2 &vopp_pos,
+                              const std::vector<std::vector<int>> &node_to_elem,
+                              double area_tol = 1e-12,
+                              double min_angle_tol = 8.0,
+                              double min_quality_tol = 0.18,
+                              double area_ratio_tol = 0.10) {
+  return localWallSplitPatchFailureReason(mesh, va, vb, vopp, mid, vopp_pos,
+                                          node_to_elem, area_tol, min_angle_tol,
+                                          min_quality_tol, area_ratio_tol)
+         .empty();
 }
 bool pointInTriangleStrict(const Vec2 &p, const Vec2 &a, const Vec2 &b, const Vec2 &c,
                            double tol = 1e-12) {
@@ -606,7 +621,9 @@ bool localMovePreservesMesh(const Mesh &mesh,
 }
 
 RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &marked_in,
-                                       int retry_depth) {
+                                       int retry_depth,
+                                       const std::vector<int> &fallback_priority = {},
+                                       int target_adj_splits = 0) {
   RefinementMap rmap;
   int old_Ne = mesh.E.size();
   std::map<std::pair<int,int>, int> edge_midpoint;
@@ -658,6 +675,32 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     return cur_vertex_neighbors;
   };
 
+  auto interiorMidpointAllowed = [&](int va, int vb) {
+    const Vec2 straight_mid = (mesh.V[va] + mesh.V[vb]) * 0.5;
+    BladeProjection proj = projectToBladeSplineDetailed(straight_mid);
+    if (proj.valid && !pointIsOnFluidSide(straight_mid, proj)) return false;
+
+    auto key = std::make_pair(std::min(va, vb), std::max(va, vb));
+    auto eit = edge_to_elem.find(key);
+    if (eit != edge_to_elem.end()) {
+      for (int eadj : eit->second) {
+        const int *ev = mesh.E[eadj].v;
+        int vopp = -1;
+        for (int k = 0; k < 3; ++k) {
+          if (ev[k] != va && ev[k] != vb) {
+            vopp = ev[k];
+            break;
+          }
+        }
+        if (vopp < 0) continue;
+        const Vec2 bisector_mid = (straight_mid + mesh.V[vopp]) * 0.5;
+        BladeProjection bproj = projectToBladeSplineDetailed(bisector_mid);
+        if (bproj.valid && !pointIsOnFluidSide(bisector_mid, bproj)) return false;
+      }
+    }
+    return true;
+  };
+
   std::set<std::pair<int,int>> e2b;
   for(int e=0; e<old_Ne; e++) if(marked[e]) e2b.insert(getLE(e));
 
@@ -694,6 +737,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
         const auto cur_node_to_elem = buildCurrentNodeToElem();
         const auto cur_vertex_neighbors = buildCurrentVertexNeighbors();
         bool accepted = true;
+        std::string wall_failure_reason;
         std::map<int, Vec2> repaired_positions;
 
         if (eit != edge_to_elem.end()) {
@@ -709,8 +753,9 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
             if (vopp < 0) continue;
 
             Vec2 vopp_pos = repaired_positions.count(vopp) ? repaired_positions[vopp] : mesh.V[vopp];
-            if (localWallSplitPatchValid(mesh, va, vb, vopp, snapped_mid, vopp_pos,
-                                         cur_node_to_elem)) {
+            std::string base_reason = localWallSplitPatchFailureReason(
+                mesh, va, vb, vopp, snapped_mid, vopp_pos, cur_node_to_elem);
+            if (base_reason.empty()) {
               continue;
             }
 
@@ -725,8 +770,11 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
               break;
             }
             avg = avg / static_cast<double>(count);
-            if (!localWallSplitPatchValid(mesh, va, vb, vopp, snapped_mid, avg,
-                                          cur_node_to_elem)) {
+            std::string avg_reason = localWallSplitPatchFailureReason(
+                mesh, va, vb, vopp, snapped_mid, avg, cur_node_to_elem);
+            if (!avg_reason.empty()) {
+              wall_failure_reason = "snap failed: " + base_reason +
+                                    "; opposite-node average failed: " + avg_reason;
               accepted = false;
               break;
             }
@@ -737,7 +785,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
         if (!accepted) {
           std::cerr << "    warning: skipped refinement on wall edge (" << va
                     << ", " << vb
-                    << ") because snap and opposite-node averaging failed"
+                    << ") because " << wall_failure_reason
                     << std::endl;
           ok = false;
           return -1;
@@ -756,6 +804,29 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
                   << std::endl;
         ok = false;
         return -1;
+      }
+      // Check midpoints of the new bisector edges (vm, vopp) for each adjacent
+      // element — these are interior edges that will exist after the split and
+      // their midpoints could cross the blade even when vm itself is valid.
+      auto eit = edge_to_elem.find(key);
+      if (eit != edge_to_elem.end()) {
+        for (int eadj : eit->second) {
+          const int *ev = mesh.E[eadj].v;
+          int vopp = -1;
+          for (int k = 0; k < 3; ++k)
+            if (ev[k] != va && ev[k] != vb) { vopp = ev[k]; break; }
+          if (vopp < 0) continue;
+          const Vec2 bisector_mid = (straight_mid + mesh.V[vopp]) * 0.5;
+          BladeProjection bproj = projectToBladeSplineDetailed(bisector_mid);
+          if (bproj.valid && !pointIsOnFluidSide(bisector_mid, bproj)) {
+            std::cerr << "    warning: skipped refinement on interior edge (" << va
+                      << ", " << vb
+                      << ") because bisector midpoint to opposite vertex "
+                      << vopp << " would lie on wrong side of blade" << std::endl;
+            ok = false;
+            return -1;
+          }
+        }
       }
     }
     mesh.V.push_back(mid); edge_midpoint[key] = vm; rmap.new_vertex_edges.push_back({va, vb});
@@ -795,59 +866,191 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     };
   };
 
-  changed = true;
-  while(changed) {
-    changed = false;
-    int cur_Ne = mesh.E.size();
-    for(int e=0; e<cur_Ne; e++) {
-      int v[3] = {mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]};
-      std::pair<int,int> ee[3] = {{std::min(v[0],v[1]), std::max(v[0],v[1])}, {std::min(v[1],v[2]), std::max(v[1],v[2])}, {std::min(v[2],v[0]), std::max(v[2],v[0])}};
-      int t = -1;
-      double best_len2 = -1.0;
-      for (int i = 0; i < 3; i++) {
-        if (!e2b.count(ee[i])) continue;
-        double len2 = edgeLength2(v[i], v[(i + 1) % 3]);
-        if (len2 > best_len2) {
-          best_len2 = len2;
-          t = i;
-        }
+  auto elementTouchesWall = [&](int a, int b, int c) {
+    const std::pair<int, int> edges[3] = {
+      {std::min(a, b), std::max(a, b)},
+      {std::min(b, c), std::max(b, c)},
+      {std::min(c, a), std::max(c, a)}
+    };
+    for (const auto &edge : edges) {
+      auto it = old_boundary_edge.find(edge);
+      if (it == old_boundary_edge.end()) continue;
+      int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        return true;
       }
-      if (t == -1) {
+    }
+    return false;
+  };
+
+  auto elementAspectRatio = [&](int a, int b, int c) {
+    const Vec2 &va = mesh.V[a];
+    const Vec2 &vb = mesh.V[b];
+    const Vec2 &vc = mesh.V[c];
+    const double l0 = (vb - va).norm();
+    const double l1 = (vc - vb).norm();
+    const double l2 = (va - vc).norm();
+    const double lmax = std::max({l0, l1, l2});
+    const double twice_area = std::abs((vb.x - va.x) * (vc.y - va.y) -
+                                       (vb.y - va.y) * (vc.x - va.x));
+    if (twice_area <= 1e-14) return std::numeric_limits<double>::infinity();
+    const double shortest_altitude = twice_area / std::max(lmax, 1e-14);
+    return lmax / std::max(shortest_altitude, 1e-14);
+  };
+
+  std::vector<bool> old_elem_touches_wall(old_Ne, false);
+  for (int e = 0; e < old_Ne; ++e) {
+    old_elem_touches_wall[e] =
+        elementTouchesWall(mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]);
+  };
+
+  std::set<std::pair<int, int>> rejected_edges;
+
+  // Track which original cells are "included" (initially marked + any fallback cells
+  // added later). Used to count adjoint-driven splits for the fallback stopping criterion.
+  std::vector<bool> included(old_Ne, false);
+  for (int e = 0; e < old_Ne; e++) if (marked[e]) included[e] = true;
+  int fb_cursor = 0;
+
+  // Outer loop: run the refinement, then add fallback cells if the target wasn't met.
+  for (;;) {
+    changed = true;
+    while(changed) {
+      changed = false;
+      int cur_Ne = mesh.E.size();
+      for(int e=0; e<cur_Ne; e++) {
+        int v[3] = {mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]};
+        std::pair<int,int> ee[3] = {{std::min(v[0],v[1]), std::max(v[0],v[1])}, {std::min(v[1],v[2]), std::max(v[1],v[2])}, {std::min(v[2],v[0]), std::max(v[2],v[0])}};
+        const bool touches_wall = elementTouchesWall(v[0], v[1], v[2]);
+        const double aspect_ratio = elementAspectRatio(v[0], v[1], v[2]);
+        std::vector<std::pair<double, int>> candidates;
+        bool has_requested_candidate = false;
         for (int i = 0; i < 3; i++) {
-          if (!edge_midpoint.count(ee[i])) continue;
-          double len2 = edgeLength2(v[i], v[(i + 1) % 3]);
-          if (len2 > best_len2) {
-            best_len2 = len2;
-            t = i;
+          if (e2b.count(ee[i])) {
+            has_requested_candidate = true;
           }
         }
-      }
-      if(t == -1) continue;
+        if (aspect_ratio > 5.0 && (has_requested_candidate || edge_midpoint.count(ee[0]) ||
+                                   edge_midpoint.count(ee[1]) || edge_midpoint.count(ee[2]))) {
+          for (int i = 0; i < 3; ++i) {
+            e2b.erase(ee[i]);
+            rejected_edges.insert(ee[i]);
+            if (ppartner.count(ee[i])) {
+              e2b.erase(ppartner[ee[i]]);
+              rejected_edges.insert(ppartner[ee[i]]);
+            }
+          }
+          continue;
+        }
+        if (has_requested_candidate) {
+          for (int i = 0; i < 3; i++) {
+            candidates.push_back({edgeLength2(v[i], v[(i + 1) % 3]), i});
+          }
+        } else {
+          bool has_conformity_candidate = false;
+          for (int i = 0; i < 3; i++) {
+            if (edge_midpoint.count(ee[i])) {
+              has_conformity_candidate = true;
+            }
+          }
+          if (has_conformity_candidate) {
+            for (int i = 0; i < 3; i++) {
+              candidates.push_back({edgeLength2(v[i], v[(i + 1) % 3]), i});
+            }
+          }
+        }
+        if(candidates.empty()) continue;
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const auto &a, const auto &b) { return a.first > b.first; });
 
-      bool mid_ok = false;
-      int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb, mid_ok);
-      if (!mid_ok) {
-        e2b.erase(ee[t]);
-        continue;
+        bool split_done = false;
+        for (const auto &[len2, t] : candidates) {
+          (void)len2;
+          if (rejected_edges.count(ee[t])) continue;
+          const int parent = rmap.child_to_parent[e];
+          const bool marked_wall_candidate =
+              touches_wall && has_requested_candidate &&
+              parent >= 0 && parent < old_Ne && marked[parent];
+
+          if (ppartner.count(ee[t]) && !edge_midpoint.count(ppartner[ee[t]])) {
+            const auto partner = ppartner[ee[t]];
+            if (!interiorMidpointAllowed(ee[t].first, ee[t].second) ||
+                !interiorMidpointAllowed(partner.first, partner.second)) {
+              e2b.erase(ee[t]);
+              e2b.erase(partner);
+              rejected_edges.insert(ee[t]);
+              rejected_edges.insert(partner);
+              if (touches_wall) break;
+              continue;
+            }
+          }
+
+          bool mid_ok = false;
+          int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb, mid_ok);
+          if (!mid_ok) {
+            e2b.erase(ee[t]);
+            rejected_edges.insert(ee[t]);
+            if (ppartner.count(ee[t])) {
+              e2b.erase(ppartner[ee[t]]);
+              rejected_edges.insert(ppartner[ee[t]]);
+            }
+            if (touches_wall) break;
+            continue;
+          }
+          const int parent_q_order = mesh.E[e].q_order;
+          if (parent_q_order == 2) {
+            assignQ2Child(mesh.E[e], vc, va, vm);
+          } else {
+            mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
+            mesh.E[e].q_order = 1;
+            mesh.E[e].ho_nodes.clear();
+          }
+          Element c2;
+          if (parent_q_order == 2) {
+            assignQ2Child(c2, vc, vm, vb);
+          } else {
+            c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
+          }
+          mesh.E.push_back(c2); rmap.child_to_parent.push_back(parent);
+          e2b.erase(ee[t]);
+          changed = true;
+          split_done = true;
+          break;
+        }
+        if (!split_done) continue;
       }
-      int parent = rmap.child_to_parent[e];
-      const int parent_q_order = mesh.E[e].q_order;
-      if (parent_q_order == 2) {
-        assignQ2Child(mesh.E[e], vc, va, vm);
-      } else {
-        mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
-        mesh.E[e].q_order = 1;
-        mesh.E[e].ho_nodes.clear();
-      }
-      Element c2;
-      if (parent_q_order == 2) {
-        assignQ2Child(c2, vc, vm, vb);
-      } else {
-        c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
-      }
-      mesh.E.push_back(c2); rmap.child_to_parent.push_back(parent);
-      e2b.erase(ee[t]); changed = true;
     }
+
+    // e2b is exhausted. Check if fallback is needed and available.
+    if (fallback_priority.empty() || target_adj_splits <= 0) break;
+    int adj_splits = 0;
+    for (int c = old_Ne; c < (int)mesh.E.size(); c++) {
+      int p = rmap.child_to_parent[c];
+      if (p < old_Ne && included[p]) ++adj_splits;
+    }
+    if (adj_splits >= target_adj_splits || fb_cursor >= (int)fallback_priority.size()) break;
+
+    // Add the next batch of fallback candidates to e2b.
+    int need = target_adj_splits - adj_splits;
+    bool added = false;
+    while (fb_cursor < (int)fallback_priority.size() && need > 0) {
+      int fe = fallback_priority[fb_cursor++];
+      if (fe >= old_Ne || included[fe]) continue;
+      included[fe] = true;
+      auto fb_edge = getLE(fe);
+      std::cerr << "    fallback candidate e=" << fe
+                << " edge=(" << fb_edge.first << ", " << fb_edge.second << ")"
+                << " wall_adjacent=" << (old_elem_touches_wall[fe] ? "yes" : "no")
+                << std::endl;
+      if (!edge_midpoint.count(fb_edge)) {
+        e2b.insert(fb_edge);
+        if (ppartner.count(fb_edge)) e2b.insert(ppartner[fb_edge]);
+        added = true;
+      }
+      --need;
+    }
+    if (!added) break;
   }
 
   for (auto const& [edge, vm] : edge_midpoint) {
@@ -921,6 +1124,191 @@ void setWallGeometryTolerance(double tolerance) {
 
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in) {
   return bisectMarkedElementsImpl(mesh, marked_in, 2);
+}
+
+RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in,
+                                   const std::vector<int> &fallback_priority,
+                                   int target_adj_splits) {
+  return bisectMarkedElementsImpl(mesh, marked_in, 2, fallback_priority, target_adj_splits);
+}
+
+void printWallRefinementDiagnostics(const Mesh &mesh,
+                                    const std::vector<bool> &marked_in) {
+  std::map<std::pair<int,int>, int> boundary_edge_groups;
+  for (const auto &be : mesh.BE) {
+    boundary_edge_groups[{std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1])}] = be.bIndex;
+  }
+
+  std::map<std::pair<int,int>, std::vector<int>> edge_to_elem;
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    const int *v = mesh.E[e].v;
+    edge_to_elem[{std::min(v[0], v[1]), std::max(v[0], v[1])}].push_back(e);
+    edge_to_elem[{std::min(v[1], v[2]), std::max(v[1], v[2])}].push_back(e);
+    edge_to_elem[{std::min(v[2], v[0]), std::max(v[2], v[0])}].push_back(e);
+  }
+
+  auto buildNodeToElem = [&]() {
+    std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+    for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+      for (int k = 0; k < 3; ++k) node_to_elem[mesh.E[e].v[k]].push_back(e);
+    }
+    return node_to_elem;
+  };
+
+  auto buildVertexNeighbors = [&]() {
+    std::vector<std::set<int>> vertex_neighbors(mesh.V.size());
+    for (const auto &elem : mesh.E) {
+      vertex_neighbors[elem.v[0]].insert(elem.v[1]);
+      vertex_neighbors[elem.v[0]].insert(elem.v[2]);
+      vertex_neighbors[elem.v[1]].insert(elem.v[0]);
+      vertex_neighbors[elem.v[1]].insert(elem.v[2]);
+      vertex_neighbors[elem.v[2]].insert(elem.v[0]);
+      vertex_neighbors[elem.v[2]].insert(elem.v[1]);
+    }
+    return vertex_neighbors;
+  };
+
+  const auto node_to_elem = buildNodeToElem();
+  const auto vertex_neighbors = buildVertexNeighbors();
+
+  auto edgeLength2 = [&](int a, int b) {
+    return (mesh.V[a] - mesh.V[b]).normSq();
+  };
+
+  auto elementTouchesWall = [&](int e) {
+    const int *v = mesh.E[e].v;
+    const std::pair<int, int> edges[3] = {
+      {std::min(v[0], v[1]), std::max(v[0], v[1])},
+      {std::min(v[1], v[2]), std::max(v[1], v[2])},
+      {std::min(v[2], v[0]), std::max(v[2], v[0])}
+    };
+    for (const auto &edge : edges) {
+      auto it = boundary_edge_groups.find(edge);
+      if (it == boundary_edge_groups.end()) continue;
+      int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") return true;
+    }
+    return false;
+  };
+
+  auto centroid = [&](int e) {
+    const int *v = mesh.E[e].v;
+    return (mesh.V[v[0]] + mesh.V[v[1]] + mesh.V[v[2]]) / 3.0;
+  };
+
+  std::cerr << "  Wall refinement diagnostics:" << std::endl;
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    if (!elementTouchesWall(e)) continue;
+
+    const int *v = mesh.E[e].v;
+    int best_t = 0;
+    double best_len2 = edgeLength2(v[0], v[1]);
+    for (int t = 1; t < 3; ++t) {
+      const double len2 = edgeLength2(v[t], v[(t + 1) % 3]);
+      if (len2 > best_len2) {
+        best_len2 = len2;
+        best_t = t;
+      }
+    }
+
+    const int va = v[best_t];
+    const int vb = v[(best_t + 1) % 3];
+    const int vopp = v[(best_t + 2) % 3];
+    const auto key = std::make_pair(std::min(va, vb), std::max(va, vb));
+    const Vec2 c = centroid(e);
+
+    std::string status;
+    if (e >= static_cast<int>(marked_in.size()) || !marked_in[e]) {
+      status = "not marked";
+    } else if (boundary_edge_groups.count(key) &&
+               boundary_edge_groups.at(key) >= 0 &&
+               boundary_edge_groups.at(key) < static_cast<int>(mesh.Bname.size()) &&
+               lowerCopy(mesh.Bname[boundary_edge_groups.at(key)]) == "wall") {
+      const Vec2 straight_mid = 0.5 * (mesh.V[va] + mesh.V[vb]);
+      const Vec2 snapped_mid = projectToBladeSpline(straight_mid);
+      Vec2 avg{0.0, 0.0};
+      int count = 0;
+      for (int nbr : vertex_neighbors[vopp]) {
+        avg = avg + mesh.V[nbr];
+        count++;
+      }
+      if (count > 0) avg = avg / static_cast<double>(count);
+
+      bool accepted = true;
+      std::string wall_reason;
+      auto eit = edge_to_elem.find(key);
+      if (eit != edge_to_elem.end()) {
+        for (int eadj : eit->second) {
+          const int *ev = mesh.E[eadj].v;
+          int local_opp = -1;
+          for (int k = 0; k < 3; ++k) {
+            if (ev[k] != va && ev[k] != vb) {
+              local_opp = ev[k];
+              break;
+            }
+          }
+          if (local_opp < 0) continue;
+          std::string base_reason = localWallSplitPatchFailureReason(
+              mesh, va, vb, local_opp, snapped_mid, mesh.V[local_opp], node_to_elem);
+          if (base_reason.empty()) {
+            continue;
+          }
+          if (count == 0) {
+            wall_reason = "snap failed: " + base_reason + "; no opposite-node neighbors";
+            accepted = false;
+            break;
+          }
+          std::string avg_reason = localWallSplitPatchFailureReason(
+              mesh, va, vb, local_opp, snapped_mid, avg, node_to_elem);
+          if (!avg_reason.empty()) {
+            wall_reason = "snap failed: " + base_reason +
+                          "; opposite-node average failed: " + avg_reason;
+            accepted = false;
+            break;
+          }
+        }
+      }
+      status = accepted ? "eligible: wall-edge split passes" :
+                          "blocked: " + wall_reason;
+    } else {
+      const Vec2 straight_mid = 0.5 * (mesh.V[va] + mesh.V[vb]);
+      BladeProjection proj = projectToBladeSplineDetailed(straight_mid);
+      if (proj.valid && !pointIsOnFluidSide(straight_mid, proj)) {
+        status = "blocked: longest-edge midpoint outside blade";
+      } else {
+        bool bisector_bad = false;
+        auto eit = edge_to_elem.find(key);
+        if (eit != edge_to_elem.end()) {
+          for (int eadj : eit->second) {
+            const int *ev = mesh.E[eadj].v;
+            int local_opp = -1;
+            for (int k = 0; k < 3; ++k) {
+              if (ev[k] != va && ev[k] != vb) {
+                local_opp = ev[k];
+                break;
+              }
+            }
+            if (local_opp < 0) continue;
+            const Vec2 bisector_mid = 0.5 * (straight_mid + mesh.V[local_opp]);
+            BladeProjection bproj = projectToBladeSplineDetailed(bisector_mid);
+            if (bproj.valid && !pointIsOnFluidSide(bisector_mid, bproj)) {
+              bisector_bad = true;
+              break;
+            }
+          }
+        }
+        status = bisector_bad ? "blocked: bisector midpoint outside blade" :
+                                "eligible: interior-edge split passes";
+      }
+    }
+
+    std::cerr << "    e=" << e
+              << " centroid=(" << c.x << ", " << c.y << ")"
+              << " longest=(" << va << ", " << vb << ")"
+              << " opp=" << vopp
+              << " status=" << status << std::endl;
+  }
 }
 
 std::vector<std::vector<Vec4>> interpolateSolution(const std::vector<std::vector<Vec4>> &U_old, const RefinementMap &rmap, int ndof) {

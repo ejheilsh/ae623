@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -29,6 +30,12 @@ struct MeshValidationReport {
   int orphan_edge_count = 0;
   double min_angle_deg = 180.0;
   double worst_quality = std::numeric_limits<double>::max();
+  int worst_quality_elem = -1;
+  Vec2 worst_quality_centroid{0.0, 0.0};
+  int min_angle_elem = -1;
+  Vec2 min_angle_centroid{0.0, 0.0};
+  std::vector<std::pair<int, Vec2>> nonpositive_area_samples;
+  std::vector<std::pair<int, Vec2>> tiny_area_samples;
 };
 
 constexpr std::uint32_t kCompanionMeshHoMagic = 0x484f3031u; // "HO01"
@@ -120,6 +127,7 @@ double angleDegBetween(const Vec2 &u, const Vec2 &v) {
 
 MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
   MeshValidationReport report;
+  constexpr int kMaxValidationSamples = 5;
 
   std::map<std::pair<int, int>, int> elem_edge_counts;
   for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
@@ -127,26 +135,45 @@ MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
     const Vec2 &a = mesh.V[elem.v[0]];
     const Vec2 &b = mesh.V[elem.v[1]];
     const Vec2 &c = mesh.V[elem.v[2]];
+    const Vec2 centroid = (a + b + c) / 3.0;
 
     double sarea = triangleSignedArea(a, b, c);
     report.min_signed_area = std::min(report.min_signed_area, sarea);
     report.max_signed_area = std::max(report.max_signed_area, sarea);
-    if (!(sarea > 0.0)) report.nonpositive_area_count++;
-    if (std::abs(sarea) < 1e-12) report.tiny_area_count++;
+    if (!(sarea > 0.0)) {
+      report.nonpositive_area_count++;
+      if (static_cast<int>(report.nonpositive_area_samples.size()) < kMaxValidationSamples) {
+        report.nonpositive_area_samples.push_back({e, centroid});
+      }
+    }
+    if (std::abs(sarea) < 1e-12) {
+      report.tiny_area_count++;
+      if (static_cast<int>(report.tiny_area_samples.size()) < kMaxValidationSamples) {
+        report.tiny_area_samples.push_back({e, centroid});
+      }
+    }
 
     Vec2 ab = b - a, bc = c - b, ca = a - c;
     double lab = ab.norm(), lbc = bc.norm(), lca = ca.norm();
     double l2sum = lab * lab + lbc * lbc + lca * lca;
     if (l2sum > 0.0) {
       double quality = 4.0 * std::sqrt(3.0) * std::abs(sarea) / l2sum;
-      report.worst_quality = std::min(report.worst_quality, quality);
+      if (quality < report.worst_quality) {
+        report.worst_quality = quality;
+        report.worst_quality_elem = e;
+        report.worst_quality_centroid = centroid;
+      }
     }
 
     double ang_a = angleDegBetween(b - a, c - a);
     double ang_b = angleDegBetween(a - b, c - b);
     double ang_c = angleDegBetween(a - c, b - c);
-    report.min_angle_deg = std::min(report.min_angle_deg,
-                                    std::min(ang_a, std::min(ang_b, ang_c)));
+    double min_elem_angle = std::min(ang_a, std::min(ang_b, ang_c));
+    if (min_elem_angle < report.min_angle_deg) {
+      report.min_angle_deg = min_elem_angle;
+      report.min_angle_elem = e;
+      report.min_angle_centroid = centroid;
+    }
 
     elem_edge_counts[sortedEdgeKey(elem.v[0], elem.v[1])]++;
     elem_edge_counts[sortedEdgeKey(elem.v[1], elem.v[2])]++;
@@ -212,6 +239,30 @@ void printMeshValidationReport(const MeshValidationReport &r) {
             << " | tiny-area elements = " << r.tiny_area_count << std::endl;
   std::cerr << "    min angle = " << r.min_angle_deg
             << " deg | worst quality = " << r.worst_quality << std::endl;
+  if (r.min_angle_elem >= 0) {
+    std::cerr << "    min-angle element = " << r.min_angle_elem
+              << " @ centroid=(" << r.min_angle_centroid.x << ", "
+              << r.min_angle_centroid.y << ")" << std::endl;
+  }
+  if (r.worst_quality_elem >= 0) {
+    std::cerr << "    worst-quality element = " << r.worst_quality_elem
+              << " @ centroid=(" << r.worst_quality_centroid.x << ", "
+              << r.worst_quality_centroid.y << ")" << std::endl;
+  }
+  if (!r.nonpositive_area_samples.empty()) {
+    std::cerr << "    non-positive area samples:";
+    for (const auto &[e, c] : r.nonpositive_area_samples) {
+      std::cerr << " e=" << e << "@(" << c.x << ", " << c.y << ")";
+    }
+    std::cerr << std::endl;
+  }
+  if (!r.tiny_area_samples.empty()) {
+    std::cerr << "    tiny-area samples:";
+    for (const auto &[e, c] : r.tiny_area_samples) {
+      std::cerr << " e=" << e << "@(" << c.x << ", " << c.y << ")";
+    }
+    std::cerr << std::endl;
+  }
   std::cerr << "    bad edge ownership = " << r.bad_edge_owner_count
             << " | nonmanifold edges = " << r.nonmanifold_edge_count
             << " | orphan edges = " << r.orphan_edge_count << std::endl;
@@ -693,16 +744,28 @@ int main(int argc, char **argv) {
           break;
         }
 
-        // Step 6: Mark and refine
-        std::vector<bool> marked(indicators.size(), false);
+        // Step 6: Mark and refine with in-loop fallback to lower-priority cells.
+        // Fallback logic runs inside a single bisectMarkedElements call so that
+        // rebuildMeshEdgeConnectivity and appendPeriodicToIE fire exactly once,
+        // avoiding periodic boundary corruption from multiple calls.
+        const int Ne_orig = static_cast<int>(indicators.size());
+        std::vector<int> sorted_cells(Ne_orig);
+        std::iota(sorted_cells.begin(), sorted_cells.end(), 0);
+        if (total_error >= adjoint_tol)
+          std::sort(sorted_cells.begin(), sorted_cells.end(),
+                    [&](int a, int b){ return indicators[a] > indicators[b]; });
+
+        const int target_splits = std::max(1, (int)(adapt_fraction * Ne_orig));
+
+        // Initial top-N% marks.
+        std::vector<bool> marked(Ne_orig, false);
+        int n_marked = 0;
         if (total_error >= adjoint_tol) {
           marked = markByIndicator(indicators, adapt_fraction);
+          for (bool m : marked) if (m) n_marked++;
         }
-        int n_marked = 0;
-        for (bool m : marked) if (m) n_marked++;
-        if (!ar_marked.empty()) {
+        if (!ar_marked.empty())
           for (size_t e = 0; e < marked.size(); ++e) marked[e] = marked[e] || ar_marked[e];
-        }
         int n_total_marked = 0;
         for (bool m : marked) if (m) n_total_marked++;
         std::cerr << "  Marking " << n_marked << " adjoint elements";
@@ -729,7 +792,26 @@ int main(int argc, char **argv) {
           break;
         }
 
-        auto rmap = bisectMarkedElements(solver.mesh, marked);
+        if (const char *env = std::getenv("AMR_DEBUG_WALL_DIAGNOSTICS")) {
+          if (std::string(env) != "0") {
+            printWallRefinementDiagnostics(solver.mesh, marked);
+          }
+        }
+
+        // Build fallback priority: all non-marked cells in descending indicator
+        // order. Passed to bisectMarkedElements so that if top-N% cells are
+        // rejected by geometry constraints the next-best cells are tried
+        // automatically — all within one connectivity-rebuild call.
+        std::vector<int> fallback_priority;
+        if (total_error >= adjoint_tol) {
+          fallback_priority.reserve(Ne_orig);
+          for (int i = 0; i < Ne_orig; ++i) {
+            int e = sorted_cells[i];
+            if (!marked[e]) fallback_priority.push_back(e);
+          }
+        }
+
+        auto rmap = bisectMarkedElements(solver.mesh, marked, fallback_priority, target_splits);
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
 
