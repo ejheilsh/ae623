@@ -1,5 +1,9 @@
 import sys
 
+from mpl_setup import configure_matplotlib
+
+configure_matplotlib(use_agg="--no-show" in sys.argv[1:])
+
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 import numpy as np

@@ -13,8 +13,13 @@ struct RefinementMap {
   // For each new vertex added at an edge midpoint:
   //   new_vertex_edges[i] = {v0, v1}  the two OLD vertices whose midpoint it is
   std::vector<std::pair<int,int>> new_vertex_edges;
-  // Edge ids whose splits were accepted in the refinement pass.
-  std::vector<std::pair<int,int>> accepted_split_edges;
+};
+
+struct CurvedElementDetJMinimum {
+  bool exact = false;
+  double detJ = 0.0;
+  Vec2 ref{0.0, 0.0};
+  Vec2 x{0.0, 0.0};
 };
 
 // Given element-wise error indicators, mark the top `fraction` for refinement.
@@ -40,13 +45,26 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
 // Only one call to the connectivity rebuild ever happens.
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in,
                                    const std::vector<int> &fallback_priority,
-                                   int target_adj_splits,
-                                   const std::set<std::pair<int,int>> &split_edge_blacklist);
+                                   int target_adj_splits);
 
 // Print centroid/status diagnostics for wall-adjacent elements in the current mesh.
 // Intended for debugging why large blade-surface cells are not being split.
 void printWallRefinementDiagnostics(const Mesh &mesh,
                                     const std::vector<bool> &marked_in);
+
+// Compute the exact minimum Jacobian determinant for a q=2 curved triangle.
+// Returns false for non-q2 elements.
+bool exactQ2DetJMinimum(const Mesh &mesh, int elem_idx,
+                        CurvedElementDetJMinimum &out);
+
+// Try a localized high-order patch repair around an invalid curved element.
+// Intended to rescue a small q2 wall-adjacent region before rejecting a pass.
+bool repairInvalidCurvedPatch(Mesh &mesh, int elem_idx);
+
+// Try a localized patch-quality repair around a valid but poorly conditioned
+// element. Intended for thin first-layer patches that pass detJ checks but
+// still destabilize the next primal solve.
+bool repairLowQualityCurvedPatch(Mesh &mesh, int elem_idx);
 
 // Transfer the DG solution from the old mesh to the refined mesh.
 // For an element that was not refined, the DOFs are copied directly.

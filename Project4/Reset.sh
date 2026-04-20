@@ -13,7 +13,15 @@
 # ============================================================================
 set -euo pipefail
 
-MESH_INPUT="${1:-test}"
+# Keep plotting/font caches inside writable locations when running under the
+# desktop sandbox or other restricted environments.
+CACHE_ROOT="${TMPDIR:-/tmp}/ae623_reset_cache"
+export MPLCONFIGDIR="${CACHE_ROOT}/matplotlib"
+export XDG_CACHE_HOME="${CACHE_ROOT}/xdg-cache"
+export MPLBACKEND="Agg"
+mkdir -p "$MPLCONFIGDIR" "${XDG_CACHE_HOME}/fontconfig"
+
+MESH_INPUT="${1:-test_q2}"
 P_ORDER="${2:-0}"
 PREVIEW=false
 
@@ -75,7 +83,12 @@ if $PREVIEW; then
 fi
 
 echo "=== Exporting newest adapted mesh snapshot for ${MESH_NAME} ==="
-LATEST_MESH="$(ls -t "${OUTDIR}/steady_${MESH_NAME}_p${P_ORDER}_adjoint_mesh_cycle"*.bin | head -n 1)"
+LATEST_ACCEPTED="${OUTDIR}/steady_${MESH_NAME}_p${P_ORDER}_adjoint_mesh_latest_accepted.bin"
+if [[ -f "$LATEST_ACCEPTED" ]]; then
+  LATEST_MESH="$LATEST_ACCEPTED"
+else
+  LATEST_MESH="$(ls -t "${OUTDIR}/steady_${MESH_NAME}_p${P_ORDER}_adjoint_mesh_cycle"[0-9]*.bin | head -n 1)"
+fi
 python3 postproc/export_adapted_mesh_gri.py "$LATEST_MESH" "$LATEST_GRI"
 
 echo "=== Running exported adapted mesh ==="
@@ -86,4 +99,5 @@ python3 postproc/plot_results.py \
   "grids/${LATEST_NAME}.gri" \
   "${OUTDIR}/steady_${LATEST_NAME}_p${P_ORDER}_results.bin" \
   "${OUTDIR}/steady_${LATEST_NAME}_p${P_ORDER}_residual.bin" \
-  "${OUTDIR}/steady_${LATEST_NAME}_p${P_ORDER}_cell_res.bin"
+  "${OUTDIR}/steady_${LATEST_NAME}_p${P_ORDER}_cell_res.bin" \
+  --no-show

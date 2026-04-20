@@ -23,6 +23,9 @@ struct MeshValidationReport {
   double max_signed_area = -std::numeric_limits<double>::max();
   int nonpositive_area_count = 0;
   int tiny_area_count = 0;
+  double min_sampled_detJ = std::numeric_limits<double>::max();
+  int nonpositive_sampled_detJ_count = 0;
+  int tiny_sampled_detJ_count = 0;
   int duplicate_boundary_edge_count = 0;
   int invalid_boundary_owner_count = 0;
   int invalid_interior_owner_count = 0;
@@ -35,8 +38,14 @@ struct MeshValidationReport {
   Vec2 worst_quality_centroid{0.0, 0.0};
   int min_angle_elem = -1;
   Vec2 min_angle_centroid{0.0, 0.0};
+  int min_sampled_detJ_elem = -1;
+  bool min_sampled_detJ_exact = false;
+  Vec2 min_sampled_detJ_centroid{0.0, 0.0};
+  Vec2 min_sampled_detJ_ref{0.0, 0.0};
+  Vec2 min_sampled_detJ_phys{0.0, 0.0};
   std::vector<std::pair<int, Vec2>> nonpositive_area_samples;
   std::vector<std::pair<int, Vec2>> tiny_area_samples;
+  std::vector<std::string> nonpositive_detJ_samples;
   std::vector<std::string> bad_edge_samples;
 };
 
@@ -114,6 +123,60 @@ std::pair<int, int> sortedEdgeKey(int a, int b) {
   return {std::min(a, b), std::max(a, b)};
 }
 
+void printElementGeometryDebug(const Mesh &mesh, int elem_idx,
+                               const std::string &label) {
+  if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) return;
+  const auto &elem = mesh.E[elem_idx];
+  std::cerr << "    " << label << ": e=" << elem_idx
+            << " q=" << elem.q_order
+            << " corners=(" << elem.v[0] << ", " << elem.v[1] << ", " << elem.v[2]
+            << ")";
+  if (!elem.ho_nodes.empty()) {
+    std::cerr << " ho_nodes=(";
+    for (size_t i = 0; i < elem.ho_nodes.size(); ++i) {
+      if (i) std::cerr << ", ";
+      std::cerr << elem.ho_nodes[i];
+    }
+    std::cerr << ")";
+  }
+  std::cerr << std::endl;
+
+  const auto print_node = [&](int vid, const std::string &node_label) {
+    if (vid < 0 || vid >= static_cast<int>(mesh.V.size())) return;
+    const auto &v = mesh.V[vid];
+    std::cerr << "      " << node_label << " " << vid << " = (" << v.x
+              << ", " << v.y << ")" << std::endl;
+  };
+  print_node(elem.v[0], "corner");
+  print_node(elem.v[1], "corner");
+  print_node(elem.v[2], "corner");
+  for (int vid : elem.ho_nodes) {
+    if (vid == elem.v[0] || vid == elem.v[1] || vid == elem.v[2]) continue;
+    print_node(vid, "ho");
+  }
+}
+
+void printElementOneRingDebug(const Mesh &mesh, int elem_idx,
+                              const std::string &label) {
+  if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) return;
+  std::set<int> ring_elems{elem_idx};
+  const auto &elem = mesh.E[elem_idx];
+  std::set<int> ring_nodes{elem.v[0], elem.v[1], elem.v[2]};
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    const auto &other = mesh.E[e];
+    if (ring_nodes.count(other.v[0]) || ring_nodes.count(other.v[1]) ||
+        ring_nodes.count(other.v[2])) {
+      ring_elems.insert(e);
+    }
+  }
+  std::cerr << "    " << label << " one-ring elements:";
+  for (int e : ring_elems) std::cerr << " " << e;
+  std::cerr << std::endl;
+  for (int e : ring_elems) {
+    printElementGeometryDebug(mesh, e, "one-ring");
+  }
+}
+
 double triangleSignedArea(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
   return 0.5 * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
 }
@@ -130,6 +193,7 @@ double angleDegBetween(const Vec2 &u, const Vec2 &v) {
 MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
   MeshValidationReport report;
   constexpr int kMaxValidationSamples = 5;
+  constexpr int kCurvedDetJSampleDenom = 4;
 
   std::map<std::pair<int, int>, int> elem_edge_counts;
   for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
@@ -152,6 +216,69 @@ MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
       report.tiny_area_count++;
       if (static_cast<int>(report.tiny_area_samples.size()) < kMaxValidationSamples) {
         report.tiny_area_samples.push_back({e, centroid});
+      }
+    }
+
+    if (elem.q_order == 2) {
+      const double detJ_scale = std::max(std::abs(2.0 * sarea), 1e-14);
+      CurvedElementDetJMinimum detJ_info;
+      if (exactQ2DetJMinimum(mesh, e, detJ_info)) {
+        if (detJ_info.detJ < report.min_sampled_detJ) {
+          report.min_sampled_detJ = detJ_info.detJ;
+          report.min_sampled_detJ_elem = e;
+          report.min_sampled_detJ_exact = detJ_info.exact;
+          report.min_sampled_detJ_centroid = centroid;
+          report.min_sampled_detJ_ref = detJ_info.ref;
+          report.min_sampled_detJ_phys = detJ_info.x;
+        }
+        if (!(detJ_info.detJ > 0.0)) {
+          report.nonpositive_sampled_detJ_count++;
+          if (static_cast<int>(report.nonpositive_detJ_samples.size()) <
+              kMaxValidationSamples) {
+            report.nonpositive_detJ_samples.push_back(
+                "e=" + std::to_string(e) +
+                " centroid=(" + std::to_string(centroid.x) + ", " +
+                std::to_string(centroid.y) + ")" +
+                " ref=(" + std::to_string(detJ_info.ref.x) + ", " +
+                std::to_string(detJ_info.ref.y) + ")" +
+                " x=(" + std::to_string(detJ_info.x.x) + ", " +
+                std::to_string(detJ_info.x.y) + ")" +
+                " detJ=" + std::to_string(detJ_info.detJ));
+          }
+        } else if (detJ_info.detJ < 1e-3 * detJ_scale) {
+          report.tiny_sampled_detJ_count++;
+        }
+      }
+    } else if (elem.q_order > 1) {
+      const double detJ_scale = std::max(std::abs(2.0 * sarea), 1e-14);
+      for (int i = 0; i <= kCurvedDetJSampleDenom; ++i) {
+        for (int j = 0; j <= kCurvedDetJSampleDenom - i; ++j) {
+          const double xi = static_cast<double>(i) / kCurvedDetJSampleDenom;
+          const double eta = static_cast<double>(j) / kCurvedDetJSampleDenom;
+          const ElementGeomEval geom = mesh.evaluateElementGeometry(e, xi, eta);
+          if (geom.detJ < report.min_sampled_detJ) {
+            report.min_sampled_detJ = geom.detJ;
+            report.min_sampled_detJ_elem = e;
+            report.min_sampled_detJ_centroid = centroid;
+            report.min_sampled_detJ_ref = {xi, eta};
+            report.min_sampled_detJ_phys = geom.x;
+          }
+          if (!(geom.detJ > 0.0)) {
+            report.nonpositive_sampled_detJ_count++;
+            if (static_cast<int>(report.nonpositive_detJ_samples.size()) <
+                kMaxValidationSamples) {
+              report.nonpositive_detJ_samples.push_back(
+                  "e=" + std::to_string(e) +
+                  " centroid=(" + std::to_string(centroid.x) + ", " +
+                  std::to_string(centroid.y) + ")" +
+                  " ref=(" + std::to_string(xi) + ", " + std::to_string(eta) + ")" +
+                  " x=(" + std::to_string(geom.x.x) + ", " + std::to_string(geom.x.y) + ")" +
+                  " detJ=" + std::to_string(geom.detJ));
+            }
+          } else if (geom.detJ < 1e-3 * detJ_scale) {
+            report.tiny_sampled_detJ_count++;
+          }
+        }
       }
     }
 
@@ -247,8 +374,12 @@ MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
     report.max_signed_area = 0.0;
     report.min_angle_deg = 0.0;
     report.worst_quality = 0.0;
+    report.min_sampled_detJ = 0.0;
   } else if (report.worst_quality == std::numeric_limits<double>::max()) {
     report.worst_quality = 0.0;
+  }
+  if (report.min_sampled_detJ == std::numeric_limits<double>::max()) {
+    report.min_sampled_detJ = 0.0;
   }
 
   return report;
@@ -262,6 +393,22 @@ void printMeshValidationReport(const MeshValidationReport &r) {
             << " | tiny-area elements = " << r.tiny_area_count << std::endl;
   std::cerr << "    min angle = " << r.min_angle_deg
             << " deg | worst quality = " << r.worst_quality << std::endl;
+  if (r.min_sampled_detJ_elem >= 0) {
+    std::cerr << "    min "
+              << (r.min_sampled_detJ_exact ? "exact q2 detJ" : "sampled detJ")
+              << " = " << r.min_sampled_detJ
+              << " on curved elem " << r.min_sampled_detJ_elem
+              << " @ centroid=(" << r.min_sampled_detJ_centroid.x << ", "
+              << r.min_sampled_detJ_centroid.y << ")"
+              << " @ ref=(" << r.min_sampled_detJ_ref.x << ", "
+              << r.min_sampled_detJ_ref.y << ")"
+              << " x=(" << r.min_sampled_detJ_phys.x << ", "
+              << r.min_sampled_detJ_phys.y << ")"
+              << " | non-positive sampled detJ = "
+              << r.nonpositive_sampled_detJ_count
+              << " | tiny sampled detJ = " << r.tiny_sampled_detJ_count
+              << std::endl;
+  }
   if (r.min_angle_elem >= 0) {
     std::cerr << "    min-angle element = " << r.min_angle_elem
               << " @ centroid=(" << r.min_angle_centroid.x << ", "
@@ -283,6 +430,13 @@ void printMeshValidationReport(const MeshValidationReport &r) {
     std::cerr << "    tiny-area samples:";
     for (const auto &[e, c] : r.tiny_area_samples) {
       std::cerr << " e=" << e << "@(" << c.x << ", " << c.y << ")";
+    }
+    std::cerr << std::endl;
+  }
+  if (!r.nonpositive_detJ_samples.empty()) {
+    std::cerr << "    non-positive detJ samples:";
+    for (const auto &sample : r.nonpositive_detJ_samples) {
+      std::cerr << " [" << sample << "]";
     }
     std::cerr << std::endl;
   }
@@ -362,7 +516,7 @@ int main(int argc, char **argv) {
   int adapt_max_cycles = 10;
   double adapt_fraction = 0.25;
   double final_ar_cleanup = 0.0;
-  int smooth_iters = 120;
+  int smooth_iters = 0;
   double wall_geom_tol = 0.15;
 
   auto is_flag_token = [](const char *s) {
@@ -618,46 +772,10 @@ int main(int argc, char **argv) {
       solver.solveUnsteady(itercap, t_end);
     } else if (adjoint_adapt) {
       // ── ADJOINT-BASED h-ADAPTATION LOOP ──────────────────────────
-      std::set<std::pair<int, int>> split_edge_blacklist;
-      int no_growth_cycles = 0;
       Mesh pending_rollback_mesh;
       std::vector<Vec4> pending_rollback_U;
       std::vector<std::vector<Vec4>> pending_rollback_U_dg;
-      std::vector<std::pair<int, int>> pending_rollback_edges;
       bool have_pending_rollback = false;
-
-      auto blacklistSplitEdges =
-          [&](const std::vector<std::pair<int, int>> &edges,
-              const std::string &label) {
-            int new_blacklisted = 0;
-            if (edges.empty()) return new_blacklisted;
-            std::cerr << "    " << label << ":";
-            for (const auto &edge : edges) {
-              if (split_edge_blacklist.insert(edge).second) new_blacklisted++;
-              std::cerr << " (" << edge.first << ", " << edge.second << ")";
-            }
-            std::cerr << std::endl;
-            return new_blacklisted;
-          };
-
-      auto handleNoGrowth = [&](int new_blacklisted_edges) {
-        if (new_blacklisted_edges > 0) {
-          no_growth_cycles = 0;
-          std::cerr << "  No cells added this cycle, but blacklisted "
-                    << new_blacklisted_edges
-                    << " new split edges; retrying." << std::endl;
-          return false;
-        }
-        no_growth_cycles++;
-        std::cerr << "  No cells added this cycle (" << no_growth_cycles
-                  << "/2 consecutive no-growth cycles)." << std::endl;
-        if (no_growth_cycles >= 2) {
-          std::cerr << "  Stopping adaptation: mesh size unchanged for two"
-                    << " consecutive cycles." << std::endl;
-          return true;
-        }
-        return false;
-      };
 
       for (int cycle = 0; cycle < adapt_max_cycles; ++cycle) {
         std::cerr << "=== Adaptation cycle " << cycle << " ===" << std::endl;
@@ -703,20 +821,93 @@ int main(int argc, char **argv) {
         // including cases where the RK4 hit a non-physical state and restored the
         // last valid solution.
         if (!solver.last_steady_converged) {
-          if (!have_pending_rollback) {
-            std::cerr << "  Primal failed (itercap exceeded without stagnation) — stopping adaptation." << std::endl;
+          bool repaired_and_recovered = false;
+          if (have_pending_rollback) {
+            auto failure_report = validateRefinedMesh(solver.mesh);
+            std::vector<int> repair_seeds;
+            if (failure_report.worst_quality_elem >= 0)
+              repair_seeds.push_back(failure_report.worst_quality_elem);
+            if (failure_report.min_angle_elem >= 0 &&
+                failure_report.min_angle_elem != failure_report.worst_quality_elem)
+              repair_seeds.push_back(failure_report.min_angle_elem);
+            if (failure_report.min_sampled_detJ_elem >= 0 &&
+                failure_report.min_sampled_detJ_elem != failure_report.worst_quality_elem &&
+                failure_report.min_sampled_detJ_elem != failure_report.min_angle_elem)
+              repair_seeds.push_back(failure_report.min_sampled_detJ_elem);
+
+            for (int seed_elem : repair_seeds) {
+              if (seed_elem < 0) continue;
+              std::cerr << "  Primal failed on refined mesh — attempting local"
+                        << " curved-patch repair around elem " << seed_elem
+                        << " and retrying once." << std::endl;
+              const Mesh mesh_retry = solver.mesh;
+              const auto U_retry = solver.U;
+              const auto U_dg_retry = solver.U_dg;
+              bool repaired = repairLowQualityCurvedPatch(solver.mesh, seed_elem);
+              if (!repaired) {
+                repaired = repairInvalidCurvedPatch(solver.mesh, seed_elem);
+              }
+              if (!repaired) continue;
+
+              auto repaired_report = validateRefinedMesh(solver.mesh);
+              std::cerr << "  Revalidated mesh after primal-failure repair:"
+                        << std::endl;
+              printMeshValidationReport(repaired_report);
+              bool repaired_invalid =
+                  repaired_report.nonpositive_area_count > 0 ||
+                  repaired_report.nonpositive_sampled_detJ_count > 0 ||
+                  repaired_report.nonmanifold_edge_count > 0 ||
+                  repaired_report.duplicate_boundary_edge_count > 0 ||
+                  repaired_report.invalid_boundary_owner_count > 0 ||
+                  repaired_report.invalid_interior_owner_count > 0;
+              if (repaired_invalid) {
+                std::cerr << "  Local repair produced an invalid mesh —"
+                          << " ignoring retry." << std::endl;
+                solver.mesh = mesh_retry;
+                solver.U = U_retry;
+                solver.U_dg = U_dg_retry;
+                continue;
+              }
+
+              auto U_dg_save = solver.U_dg;
+              solver.initializeDG();
+              if ((int)U_dg_save.size() == (int)solver.mesh.E.size()) {
+                solver.U_dg = U_dg_save;
+              }
+              solver.U.resize(solver.mesh.E.size());
+              for (size_t e = 0; e < solver.mesh.E.size(); ++e)
+                solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+
+              solver.solveSteady(itercap);
+              if (solver.last_steady_converged) {
+                std::cerr << "  Local curved-patch repair recovered the refined"
+                          << " primal solve." << std::endl;
+                repaired_and_recovered = true;
+                break;
+              }
+
+              std::cerr << "  Retry after local curved-patch repair still failed."
+                        << std::endl;
+              solver.mesh = mesh_retry;
+              solver.U = U_retry;
+              solver.U_dg = U_dg_retry;
+            }
+          }
+          if (!repaired_and_recovered) {
+            if (have_pending_rollback) {
+              solver.mesh = pending_rollback_mesh;
+              solver.U = pending_rollback_U;
+              solver.U_dg = pending_rollback_U_dg;
+              have_pending_rollback = false;
+              std::cerr << "  Primal failed on the newly refined mesh — restored"
+                        << " the previous accepted mesh and stopping adaptation."
+                        << std::endl;
+            } else {
+              std::cerr << "  Primal failed (itercap exceeded without stagnation) —"
+                        << " stopping adaptation." << std::endl;
+            }
             break;
           }
-          std::cerr << "  Primal failed on the newly refined mesh — rolling back"
-                    << " the last accepted refinement." << std::endl;
-          int new_blacklisted = blacklistSplitEdges(
-              pending_rollback_edges, "blacklisting accepted split edges");
-          solver.mesh = pending_rollback_mesh;
-          solver.U = pending_rollback_U;
-          solver.U_dg = pending_rollback_U_dg;
-          have_pending_rollback = false;
-          if (handleNoGrowth(new_blacklisted)) break;
-          continue;
         }
         have_pending_rollback = false;
 
@@ -896,52 +1087,77 @@ int main(int argc, char **argv) {
         const Mesh mesh_before_refine = solver.mesh;
         const auto U_before_refine = solver.U;
         const auto U_dg_before_refine = solver.U_dg;
-        auto baseline_report = validateRefinedMesh(mesh_before_refine);
         auto rmap = bisectMarkedElements(solver.mesh, marked, fallback_priority,
-                                         target_splits, split_edge_blacklist);
+                                         target_splits);
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
 
-        const int max_bad_edge_owners =
-            std::max(20, baseline_report.bad_edge_owner_count + 4);
-        const int max_orphan_edges =
-            std::max(50, baseline_report.orphan_edge_count + 6);
-        const bool reject_refined_pass =
-            mesh_report.bad_edge_owner_count > max_bad_edge_owners ||
-            mesh_report.orphan_edge_count > max_orphan_edges ||
-            mesh_report.min_angle_deg < 4.0 ||
+        bool invalid_refined_pass =
             mesh_report.nonpositive_area_count > 0 ||
+            mesh_report.nonpositive_sampled_detJ_count > 0 ||
             mesh_report.nonmanifold_edge_count > 0 ||
             mesh_report.duplicate_boundary_edge_count > 0 ||
             mesh_report.invalid_boundary_owner_count > 0 ||
             mesh_report.invalid_interior_owner_count > 0;
-        if (reject_refined_pass) {
-          std::cerr << "  Rejecting refinement pass: mesh quality/connectivity exceeded"
-                    << " rollback thresholds." << std::endl;
-          std::cerr << "    thresholds: bad_edge_owners<=" << max_bad_edge_owners
-                    << ", orphan_edges<=" << max_orphan_edges
-                    << ", min_angle>=4 deg"
+        if (invalid_refined_pass &&
+            mesh_report.nonpositive_sampled_detJ_count > 0 &&
+            mesh_report.min_sampled_detJ_elem >= 0) {
+          std::cerr << "  Attempting local curved-patch repair on elem "
+                    << mesh_report.min_sampled_detJ_elem << "..."
                     << std::endl;
-          int new_blacklisted = blacklistSplitEdges(
-              rmap.accepted_split_edges, "blacklisting accepted split edges");
+          if (repairInvalidCurvedPatch(solver.mesh,
+                                       mesh_report.min_sampled_detJ_elem)) {
+            mesh_report = validateRefinedMesh(solver.mesh);
+            std::cerr << "  Revalidated mesh after local curved repair:"
+                      << std::endl;
+            printMeshValidationReport(mesh_report);
+            invalid_refined_pass =
+                mesh_report.nonpositive_area_count > 0 ||
+                mesh_report.nonpositive_sampled_detJ_count > 0 ||
+                mesh_report.nonmanifold_edge_count > 0 ||
+                mesh_report.duplicate_boundary_edge_count > 0 ||
+                mesh_report.invalid_boundary_owner_count > 0 ||
+                mesh_report.invalid_interior_owner_count > 0;
+          }
+        }
+        if (invalid_refined_pass) {
+          {
+            std::string rejected_mesh_file = output_dir + "/" + file_prefix
+                + "adjoint_mesh_cycle" + std::to_string(cycle + 1)
+                + "_rejected.bin";
+            writeCompanionMeshSnapshot(solver.mesh, rejected_mesh_file);
+            std::cerr << "  Rejected refined mesh snapshot saved to "
+                      << rejected_mesh_file << std::endl;
+          }
+          if (mesh_report.nonpositive_sampled_detJ_count > 0 &&
+              mesh_report.min_sampled_detJ_elem >= 0) {
+            std::cerr << "  Curved-element debug for invalid refinement:"
+                      << std::endl;
+            printElementGeometryDebug(
+                solver.mesh, mesh_report.min_sampled_detJ_elem,
+                "min-detJ element");
+            printElementOneRingDebug(
+                solver.mesh, mesh_report.min_sampled_detJ_elem,
+                "min-detJ");
+          }
+          std::cerr << "  Rejecting refinement pass: refined mesh became invalid."
+                    << std::endl;
           solver.mesh = mesh_before_refine;
           solver.U = U_before_refine;
           solver.U_dg = U_dg_before_refine;
-          std::cerr << "  Restored pre-refinement mesh/state and continuing adaptation."
+          std::cerr << "  Restored pre-refinement mesh/state and stopping adaptation."
                     << std::endl;
-          if (handleNoGrowth(new_blacklisted)) break;
-          continue;
+          break;
         }
 
         if (solver.mesh.E.size() == mesh_before_refine.E.size()) {
-          if (handleNoGrowth(0)) break;
-          continue;
+          std::cerr << "  No cells added this cycle — stopping adaptation."
+                    << std::endl;
+          break;
         }
-        no_growth_cycles = 0;
         pending_rollback_mesh = mesh_before_refine;
         pending_rollback_U = U_before_refine;
         pending_rollback_U_dg = U_dg_before_refine;
-        pending_rollback_edges = rmap.accepted_split_edges;
         have_pending_rollback = true;
 
         // Save the newly refined mesh immediately so it can be inspected even
@@ -963,6 +1179,14 @@ int main(int argc, char **argv) {
       solver.solveSteady(itercap);
       std::cerr << "  Cl = " << std::setprecision(6) << solver.integrateCl()
                 << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
+    }
+
+    if (adjoint_adapt) {
+      std::string accepted_mesh_file = output_dir + "/" + file_prefix
+          + "adjoint_mesh_latest_accepted.bin";
+      writeCompanionMeshSnapshot(solver.mesh, accepted_mesh_file);
+      std::cerr << "Latest accepted adapted mesh saved to "
+                << accepted_mesh_file << std::endl;
     }
 
     // Save results to a simple binary or text format for Python to read

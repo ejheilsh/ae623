@@ -18,8 +18,10 @@ import glob
 import os
 import struct
 import numpy as np
-import matplotlib
-matplotlib.use('Agg') # Use non-interactive backend for reliability
+from mpl_setup import configure_matplotlib
+
+configure_matplotlib(use_agg=True)
+
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.collections import PolyCollection, LineCollection

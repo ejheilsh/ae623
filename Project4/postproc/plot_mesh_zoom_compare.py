@@ -23,7 +23,24 @@ import numpy as np
 from dg_utils import map_to_physical, read_gri_mesh
 
 
-def load_blade_reference():
+def _polyline_point_distances(points, polyline):
+    dmin = np.full(points.shape[0], np.inf)
+    for i in range(len(polyline) - 1):
+        a = polyline[i]
+        b = polyline[i + 1]
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom <= 1e-16:
+            cand = np.linalg.norm(points - a, axis=1)
+        else:
+            t = np.clip(((points - a) @ ab) / denom, 0.0, 1.0)
+            proj = a + t[:, None] * ab
+            cand = np.linalg.norm(points - proj, axis=1)
+        dmin = np.minimum(dmin, cand)
+    return dmin
+
+
+def load_blade_reference(mesh=None):
     candidates = [
         (Path("data/bladeupper.txt"), Path("data/bladelower.txt")),
         (Path("../Project1/data/bladeupper.txt"), Path("../Project1/data/bladelower.txt")),
@@ -35,11 +52,29 @@ def load_blade_reference():
         lo = np.loadtxt(lo_path)
         le_idx = np.argmin(up[:, 0])
         sx, sy = up[le_idx, 0], up[le_idx, 1]
+        upper = np.column_stack((up[:, 0] - sx, up[:, 1] - sy))
+        lower = np.column_stack((lo[:, 0] - sx, lo[:, 1] - sy + 18.0))
+        branches = {
+            "upper": upper,
+            "upper_shifted": upper + np.array([0.0, 18.0]),
+            "lower": lower,
+            "lower_shifted": lower - np.array([0.0, 18.0]),
+        }
+        selected_names = ["upper", "upper_shifted"]
+        if mesh is not None:
+            wall_pts = wall_nodes(mesh)
+            names = list(branches.keys())
+            dmat = np.vstack([_polyline_point_distances(wall_pts, branches[name]) for name in names])
+            closest = np.argmin(dmat, axis=0)
+            counts = np.bincount(closest, minlength=len(names))
+            ranked = sorted(
+                range(len(names)),
+                key=lambda idx: (-counts[idx], float(np.mean(dmat[idx]))),
+            )
+            selected_names = [names[idx] for idx in ranked[:2]]
         return {
-            "ux": up[:, 0] - sx,
-            "uy": up[:, 1] - sy,
-            "lx": lo[:, 0] - sx,
-            "ly": lo[:, 1] - sy + 18.0,
+            "curves": [branches[name] for name in selected_names],
+            "names": selected_names,
         }
     return None
 
@@ -102,6 +137,24 @@ def wall_nodes(mesh):
     return mesh["nodes"][wall_node_ids]
 
 
+def high_order_nodes(mesh, include_corners=False):
+    node_ids = set()
+    corner_ids = set()
+    for element in mesh["elements"]:
+        row = element["row"]
+        corners = set(element["corners"])
+        corner_ids.update(corners)
+        if element["q"] <= 1:
+            continue
+        for nid in row:
+            node_ids.add(nid)
+    if not include_corners:
+        node_ids.difference_update(corner_ids)
+    if not node_ids:
+        return np.empty((0, 2))
+    return mesh["nodes"][sorted(node_ids)]
+
+
 def infer_zoom_boxes(mesh):
     wnodes = wall_nodes(mesh)
     x_min = float(np.min(wnodes[:, 0]))
@@ -156,12 +209,24 @@ def style_axes(ax, label, box=None):
     )
 
 
-def plot_single_mesh(ax, mesh, segments, title, box=None, lw=0.8, blade_ref=None):
+def plot_single_mesh(ax, mesh, segments, title, box=None, lw=0.8, blade_ref=None,
+                     show_ho_nodes=False, show_ho_corners=False):
     for seg in segments:
         ax.plot(seg[:, 0], seg[:, 1], color="black", linewidth=lw)
     if blade_ref is not None:
-        ax.plot(blade_ref["ux"], blade_ref["uy"], color="red", linestyle="--", linewidth=1.0, alpha=0.8)
-        ax.plot(blade_ref["lx"], blade_ref["ly"], color="red", linestyle="--", linewidth=1.0, alpha=0.8)
+        for curve in blade_ref["curves"]:
+            ax.plot(curve[:, 0], curve[:, 1], color="red", linestyle="--", linewidth=1.0, alpha=0.8)
+    if show_ho_nodes:
+        ho = high_order_nodes(mesh, include_corners=show_ho_corners)
+        if ho.size:
+            ax.scatter(
+                ho[:, 0],
+                ho[:, 1],
+                s=14,
+                color="blue",
+                edgecolors="none",
+                zorder=4,
+            )
     mesh_wall_nodes = wall_nodes(mesh)
     ax.scatter(
         mesh_wall_nodes[:, 0],
@@ -175,12 +240,22 @@ def plot_single_mesh(ax, mesh, segments, title, box=None, lw=0.8, blade_ref=None
 
 
 def save_single_mesh_figure(mesh_path, label, box, outpath, samples_per_edge=25,
-                            keep_open=False, blade_ref=None):
+                            keep_open=False, blade_ref=None,
+                            show_ho_nodes=False, show_ho_corners=False):
     mesh = read_gri_mesh(str(mesh_path))
     segments = build_edge_segments(mesh, samples_per_edge=samples_per_edge)
 
     fig, ax = plt.subplots(1, 1, figsize=(4.5, 4.5))
-    plot_single_mesh(ax, mesh, segments, label, box=box, blade_ref=blade_ref)
+    plot_single_mesh(
+        ax,
+        mesh,
+        segments,
+        label,
+        box=box,
+        blade_ref=blade_ref,
+        show_ho_nodes=show_ho_nodes,
+        show_ho_corners=show_ho_corners,
+    )
     fig.tight_layout()
     fig.savefig(outpath, dpi=300, bbox_inches="tight")
     if not keep_open:
@@ -188,7 +263,8 @@ def save_single_mesh_figure(mesh_path, label, box, outpath, samples_per_edge=25,
 
 
 def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25,
-                      keep_open=False, blade_ref=None):
+                      keep_open=False, blade_ref=None,
+                      show_ho_nodes=False, show_ho_corners=False):
     meshes = [read_gri_mesh(str(p)) for p in mesh_paths]
     segments = [build_edge_segments(mesh, samples_per_edge=samples_per_edge) for mesh in meshes]
 
@@ -197,7 +273,16 @@ def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25,
         axes = [axes]
 
     for ax, mesh, segs, label in zip(axes, meshes, segments, labels):
-        plot_single_mesh(ax, mesh, segs, label, box=box, blade_ref=blade_ref)
+        plot_single_mesh(
+            ax,
+            mesh,
+            segs,
+            label,
+            box=box,
+            blade_ref=blade_ref,
+            show_ho_nodes=show_ho_nodes,
+            show_ho_corners=show_ho_corners,
+        )
 
     fig.tight_layout()
     fig.savefig(outpath, dpi=300, bbox_inches="tight")
@@ -218,6 +303,16 @@ def main():
         help="Which views to generate",
     )
     parser.add_argument("--show-blade", action="store_true", help="Overlay the blade spline reference if available")
+    parser.add_argument(
+        "--show-ho-nodes",
+        action="store_true",
+        help="Overlay high-order geometry nodes (e.g. q=2 midside nodes)",
+    )
+    parser.add_argument(
+        "--show-ho-corners",
+        action="store_true",
+        help="When used with --show-ho-nodes, include corner nodes too",
+    )
     parser.add_argument("--samples-per-edge", type=int, default=31, help="Geometry samples per edge")
     parser.add_argument("--no-show", action="store_true", help="Save figures without opening interactive windows")
     args = parser.parse_args()
@@ -232,7 +327,7 @@ def main():
 
     reference_mesh = read_gri_mesh(str(mesh_paths[0]))
     zoom_boxes = infer_zoom_boxes(reference_mesh)
-    blade_ref = load_blade_reference() if args.show_blade else None
+    blade_ref = load_blade_reference(reference_mesh) if args.show_blade else None
 
     for view in args.views:
         for mesh_path, label in zip(mesh_paths, labels):
@@ -253,6 +348,8 @@ def main():
                 samples_per_edge=args.samples_per_edge,
                 keep_open=not args.no_show,
                 blade_ref=blade_ref,
+                show_ho_nodes=args.show_ho_nodes,
+                show_ho_corners=args.show_ho_corners,
             )
             print(f"Saved {outpath}")
 

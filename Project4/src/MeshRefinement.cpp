@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <set>
 #include <vector>
 #include <string>
@@ -14,6 +15,10 @@
 #include <array>
 
 namespace {
+
+double oppositeAngleDeg(const Vec2 &a, const Vec2 &b, const Vec2 &p);
+bool diametralLensEncroached(const Vec2 &a, const Vec2 &b, const Vec2 &p,
+                             double min_angle_deg = 30.0);
 
 std::string lowerCopy(std::string s) {
   for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -58,8 +63,17 @@ MeshSmoothingConfig &meshSmoothingConfig() {
   return cfg;
 }
 
-bool localRefinementCleanupEnabled() {
-  const char *env = std::getenv("AMR_ENABLE_LOCAL_CLEANUP");
+bool curvedRefinementSmoothingEnabled() {
+  return meshSmoothingConfig().iterations > 0;
+}
+
+bool trueBladeWallSubdivisionEnabled() {
+  const char *env = std::getenv("AMR_TRUE_BLADE_WALL_SUBDIVISION");
+  return env != nullptr && std::string(env) != "0";
+}
+
+[[maybe_unused]] bool bezierWallPatchOptimizationEnabled() {
+  const char *env = std::getenv("AMR_ENABLE_BEZIER_PATCH_OPT");
   return env != nullptr && std::string(env) != "0";
 }
 
@@ -241,6 +255,49 @@ Vec2 projectToBladeSpline(const Vec2 &p) {
   return proj.valid ? proj.pt : p;
 }
 
+bool bladeEdgeArcMidpoint(const Vec2 &a, const Vec2 &b, Vec2 &mid) {
+  BladeProjection pa = projectToBladeSplineDetailed(a);
+  BladeProjection pb = projectToBladeSplineDetailed(b);
+  if (!pa.valid || !pb.valid) return false;
+  if (pa.branch != pb.branch) return false;
+
+  const double s_mid = 0.5 * (pa.s + pb.s);
+  mid = evaluateBladeBranch(pa.branch, s_mid);
+  return true;
+}
+
+bool curvedParentEdgeMidpoint(const Mesh &mesh,
+                              const std::map<std::pair<int, int>, std::vector<int>> &edge_to_elem,
+                              int va, int vb, Vec2 &mid) {
+  const auto key = std::make_pair(std::min(va, vb), std::max(va, vb));
+  auto eit = edge_to_elem.find(key);
+  if (eit == edge_to_elem.end()) return false;
+
+  const std::array<Vec2, 3> ref_corner = {{
+      {0.0, 0.0},
+      {1.0, 0.0},
+      {0.0, 1.0},
+  }};
+  for (int eadj : eit->second) {
+    if (eadj < 0 || eadj >= static_cast<int>(mesh.E.size())) continue;
+    const auto &elem = mesh.E[eadj];
+    if (elem.q_order <= 1) continue;
+
+    int ia = -1;
+    int ib = -1;
+    for (int k = 0; k < 3; ++k) {
+      if (elem.v[k] == va) ia = k;
+      if (elem.v[k] == vb) ib = k;
+    }
+    if (ia < 0 || ib < 0) continue;
+
+    const Vec2 rm = 0.5 * (ref_corner[ia] + ref_corner[ib]);
+    mid = mesh.evaluateElementGeometry(eadj, rm.x, rm.y).x;
+    return true;
+  }
+  return false;
+}
+
 double triangleMinAngleDeg(const Element &elem, const std::vector<Vec2> &verts);
 double triangleSignedAreaPts(const Vec2 &a, const Vec2 &b, const Vec2 &c);
 double triangleMinAngleDegPts(const Vec2 &a, const Vec2 &b, const Vec2 &c);
@@ -334,6 +391,9 @@ std::string localWallSplitPatchFailureReason(const Mesh &mesh,
                                              double min_angle_tol = 8.0,
                                              double min_quality_tol = 0.18,
                                              double area_ratio_tol = 0.10) {
+  (void)min_angle_tol;
+  (void)min_quality_tol;
+  (void)area_ratio_tol;
   std::vector<Vec2> verts = mesh.V;
   verts[vopp] = vopp_pos;
 
@@ -341,43 +401,21 @@ std::string localWallSplitPatchFailureReason(const Mesh &mesh,
   for (int e : node_to_elem[va]) local_elems.insert(e);
   for (int e : node_to_elem[vb]) local_elems.insert(e);
   for (int e : node_to_elem[vopp]) local_elems.insert(e);
-
-  double orig_local_min_quality = std::numeric_limits<double>::infinity();
-  double orig_local_min_area = std::numeric_limits<double>::infinity();
-  double orig_local_min_angle = std::numeric_limits<double>::infinity();
-  for (int e : local_elems) {
-    orig_local_min_area = std::min(orig_local_min_area, triangleSignedArea(mesh.E[e], mesh.V));
-    orig_local_min_quality = std::min(orig_local_min_quality, triangleQuality(mesh.E[e], mesh.V));
-    orig_local_min_angle = std::min(orig_local_min_angle, triangleMinAngleDeg(mesh.E[e], mesh.V));
+  bool curved_wall_edge = false;
+  for (int e : node_to_elem[va]) {
+    const auto &elem = mesh.E[e];
+    if ((elem.v[0] == va || elem.v[1] == va || elem.v[2] == va) &&
+        (elem.v[0] == vb || elem.v[1] == vb || elem.v[2] == vb) &&
+        elem.q_order > 1) {
+      curved_wall_edge = true;
+      break;
+    }
   }
-  if (!std::isfinite(orig_local_min_area)) return "local patch unavailable";
+  if (local_elems.empty()) return "local patch unavailable";
 
   const double a1 = triangleSignedAreaPts(vopp_pos, verts[va], mid);
   const double a2 = triangleSignedAreaPts(vopp_pos, mid, verts[vb]);
   if (!(a1 > area_tol) || !(a2 > area_tol)) return "child area non-positive";
-  if (a1 < area_ratio_tol * orig_local_min_area || a2 < area_ratio_tol * orig_local_min_area) {
-    return "child area ratio below floor";
-  }
-
-  const double ang1 = triangleMinAngleDegPts(vopp_pos, verts[va], mid);
-  const double ang2 = triangleMinAngleDegPts(vopp_pos, mid, verts[vb]);
-  if (ang1 < min_angle_tol || ang2 < min_angle_tol) return "child angle below floor";
-
-  const double q1 = std::abs(2.0 * std::sqrt(3.0) *
-                             ((verts[va] - vopp_pos).x * (mid - vopp_pos).y -
-                              (verts[va] - vopp_pos).y * (mid - vopp_pos).x)) /
-                    std::max((verts[va] - vopp_pos).normSq() +
-                                 (mid - verts[va]).normSq() +
-                                 (vopp_pos - mid).normSq(),
-                             1e-16);
-  const double q2 = std::abs(2.0 * std::sqrt(3.0) *
-                             ((mid - vopp_pos).x * (verts[vb] - vopp_pos).y -
-                              (mid - vopp_pos).y * (verts[vb] - vopp_pos).x)) /
-                    std::max((mid - vopp_pos).normSq() +
-                                 (verts[vb] - mid).normSq() +
-                                 (vopp_pos - verts[vb]).normSq(),
-                             1e-16);
-  if (q1 < min_quality_tol || q2 < min_quality_tol) return "child quality below floor";
 
   for (int e : node_to_elem[vopp]) {
     const auto &elem = mesh.E[e];
@@ -386,14 +424,6 @@ std::string localWallSplitPatchFailureReason(const Mesh &mesh,
       continue;
     }
     if (!(triangleSignedArea(elem, verts) > area_tol)) return "neighbor area non-positive";
-    if (triangleMinAngleDeg(elem, verts) < min_angle_tol) return "neighbor angle below floor";
-    const double local_quality_floor =
-        (orig_local_min_quality > 0.0)
-            ? std::max(min_quality_tol, 0.5 * orig_local_min_quality)
-            : min_quality_tol;
-    if (triangleQuality(elem, verts) < local_quality_floor) {
-      return "neighbor quality below floor";
-    }
   }
 
   std::set<std::pair<int, int>> local_edges;
@@ -408,7 +438,9 @@ std::string localWallSplitPatchFailureReason(const Mesh &mesh,
       {mid, verts[vb]},
       {mid, vopp_pos},
   };
-  for (const auto &[e0, e1] : new_edges) {
+  for (size_t edge_idx = 0; edge_idx < new_edges.size(); ++edge_idx) {
+    const auto &[e0, e1] = new_edges[edge_idx];
+    if (curved_wall_edge && edge_idx < 2) continue;
     const Vec2 edge_mid = 0.5 * (e0 + e1);
     BladeProjection proj = projectToBladeSplineDetailed(edge_mid);
     if (proj.valid && !pointIsOnFluidSide(edge_mid, proj)) return "child-edge midpoint outside blade";
@@ -417,7 +449,9 @@ std::string localWallSplitPatchFailureReason(const Mesh &mesh,
     const int x = edge.first;
     const int y = edge.second;
     if ((x == va && y == vb) || (x == vb && y == va)) continue;
-    for (const auto &[e0, e1] : new_edges) {
+    for (size_t edge_idx = 0; edge_idx < new_edges.size(); ++edge_idx) {
+      const auto &[e0, e1] = new_edges[edge_idx];
+      if (curved_wall_edge && edge_idx < 2) continue;
       const bool shares_va = (verts[x] - e0).normSq() <= 1e-24 || (verts[y] - e0).normSq() <= 1e-24;
       const bool shares_vb = (verts[x] - e1).normSq() <= 1e-24 || (verts[y] - e1).normSq() <= 1e-24;
       if (shares_va || shares_vb) continue;
@@ -426,48 +460,6 @@ std::string localWallSplitPatchFailureReason(const Mesh &mesh,
   }
 
   return {};
-}
-
-bool localWallSplitPatchValid(const Mesh &mesh,
-                              int va, int vb, int vopp,
-                              const Vec2 &mid,
-                              const Vec2 &vopp_pos,
-                              const std::vector<std::vector<int>> &node_to_elem,
-                              double area_tol = 1e-12,
-                              double min_angle_tol = 8.0,
-                              double min_quality_tol = 0.18,
-                              double area_ratio_tol = 0.10) {
-  return localWallSplitPatchFailureReason(mesh, va, vb, vopp, mid, vopp_pos,
-                                          node_to_elem, area_tol, min_angle_tol,
-                                          min_quality_tol, area_ratio_tol)
-         .empty();
-}
-bool pointInTriangleStrict(const Vec2 &p, const Vec2 &a, const Vec2 &b, const Vec2 &c,
-                           double tol = 1e-12) {
-  const auto orient = [](const Vec2 &u, const Vec2 &v, const Vec2 &w) {
-    return (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
-  };
-  const double o1 = orient(a, b, p);
-  const double o2 = orient(b, c, p);
-  const double o3 = orient(c, a, p);
-  const bool has_pos = (o1 > tol) || (o2 > tol) || (o3 > tol);
-  const bool has_neg = (o1 < -tol) || (o2 < -tol) || (o3 < -tol);
-  return !(has_pos && has_neg);
-}
-
-double triangleMinAngleDeg(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
-  auto angleDegBetween = [](const Vec2 &u, const Vec2 &v) {
-    double nu = u.norm();
-    double nv = v.norm();
-    if (nu <= 0.0 || nv <= 0.0) return 0.0;
-    double cang = (u.x * v.x + u.y * v.y) / (nu * nv);
-    cang = std::max(-1.0, std::min(1.0, cang));
-    return std::acos(cang) * 180.0 / M_PI;
-  };
-  double ang_a = angleDegBetween(b - a, c - a);
-  double ang_b = angleDegBetween(a - b, c - b);
-  double ang_c = angleDegBetween(a - c, b - c);
-  return std::min(ang_a, std::min(ang_b, ang_c));
 }
 
 double angleDegBetween(const Vec2 &u, const Vec2 &v) {
@@ -491,6 +483,16 @@ double triangleMinAngleDegPts(const Vec2 &a, const Vec2 &b, const Vec2 &c) {
   const double ang_b = angleDegBetween(a - b, c - b);
   const double ang_c = angleDegBetween(a - c, b - c);
   return std::min(ang_a, std::min(ang_b, ang_c));
+}
+
+double oppositeAngleDeg(const Vec2 &a, const Vec2 &b, const Vec2 &p) {
+  return angleDegBetween(a - p, b - p);
+}
+
+bool diametralLensEncroached(const Vec2 &a, const Vec2 &b, const Vec2 &p,
+                             double min_angle_deg) {
+  const double threshold = 180.0 - 2.0 * min_angle_deg;
+  return oppositeAngleDeg(a, b, p) >= threshold;
 }
 
 Vec2 branchTangent(BladeBranch branch, double s) {
@@ -678,7 +680,9 @@ std::set<int> collectBoundaryVertices(const Mesh &mesh) {
 
 int improveMeshByEdgeSwaps(Mesh &mesh,
                            const std::map<std::pair<int, int>, int> &boundary_edge_groups,
-                           int max_swaps) {
+                           int max_swaps,
+                           int first_new_vertex = -1,
+                           int first_new_elem = -1) {
   if (max_swaps <= 0) return 0;
 
   const auto periodic_vertices = collectPeriodicVertices(mesh);
@@ -717,6 +721,16 @@ int improveMeshByEdgeSwaps(Mesh &mesh,
         if (elem1.v[k] != a && elem1.v[k] != b) d = elem1.v[k];
       }
       if (c < 0 || d < 0 || c == d) continue;
+
+      if (first_new_vertex >= 0 || first_new_elem >= 0) {
+        const bool touches_new_vertex =
+            (first_new_vertex >= 0) &&
+            (a >= first_new_vertex || b >= first_new_vertex ||
+             c >= first_new_vertex || d >= first_new_vertex);
+        const bool touches_new_elem =
+            (first_new_elem >= 0) && (e0 >= first_new_elem || e1 >= first_new_elem);
+        if (!touches_new_vertex && !touches_new_elem) continue;
+      }
 
       if (periodic_vertices.count(a) || periodic_vertices.count(b) ||
           periodic_vertices.count(c) || periodic_vertices.count(d) ||
@@ -765,11 +779,16 @@ int improveMeshByEdgeSwaps(Mesh &mesh,
   return swap_count;
 }
 
-int smoothNewInteriorVertices(Mesh &mesh, int first_new_vertex) {
+int smoothNewInteriorVertices(Mesh &mesh, int first_new_vertex,
+                              std::set<int> *moved_patch_elems = nullptr) {
   if (first_new_vertex >= static_cast<int>(mesh.V.size())) return 0;
 
   const auto boundary_vertices = collectBoundaryVertices(mesh);
   const auto periodic_vertices = collectPeriodicVertices(mesh);
+  std::map<std::pair<int, int>, int> boundary_edge_groups;
+  for (const auto &be : mesh.BE) {
+    boundary_edge_groups[{std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1])}] = be.bIndex;
+  }
   std::vector<std::vector<int>> node_to_elem(mesh.V.size());
   std::vector<std::set<int>> vertex_neighbors(mesh.V.size());
   for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
@@ -785,16 +804,44 @@ int smoothNewInteriorVertices(Mesh &mesh, int first_new_vertex) {
     vertex_neighbors[elem.v[2]].insert(elem.v[1]);
   }
 
+  auto elementTouchesWall = [&](int e) {
+    const auto &elem = mesh.E[e];
+    const std::pair<int, int> edges[3] = {
+      {std::min(elem.v[0], elem.v[1]), std::max(elem.v[0], elem.v[1])},
+      {std::min(elem.v[1], elem.v[2]), std::max(elem.v[1], elem.v[2])},
+      {std::min(elem.v[2], elem.v[0]), std::max(elem.v[2], elem.v[0])}
+    };
+    for (const auto &edge : edges) {
+      auto it = boundary_edge_groups.find(edge);
+      if (it == boundary_edge_groups.end()) continue;
+      int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        return true;
+      }
+    }
+    return false;
+  };
+
   std::set<int> candidates;
   for (int vid = first_new_vertex; vid < static_cast<int>(mesh.V.size()); ++vid) {
     if (boundary_vertices.count(vid) || periodic_vertices.count(vid)) continue;
+    bool touches_wall_patch = false;
+    for (int e : node_to_elem[vid]) {
+      if (elementTouchesWall(e)) {
+        touches_wall_patch = true;
+        break;
+      }
+    }
+    if (touches_wall_patch) continue;
     candidates.insert(vid);
   }
   if (candidates.empty()) return 0;
 
-  const int n_iters = std::min(meshSmoothingConfig().iterations, 4);
-  const double omega = 0.35;
+  const int n_iters = std::min(meshSmoothingConfig().iterations, 1);
+  const double omega = 0.15;
   int move_count = 0;
+  std::set<int> moved_vertices;
 
   for (int iter = 0; iter < n_iters; ++iter) {
     const std::vector<Vec2> verts_before = mesh.V;
@@ -822,51 +869,550 @@ int smoothNewInteriorVertices(Mesh &mesh, int first_new_vertex) {
       verts_trial[vid] = candidate;
       iter_changed = true;
       move_count++;
+      moved_vertices.insert(vid);
     }
 
     mesh.V.swap(verts_trial);
     if (!iter_changed) break;
   }
 
+  if (moved_patch_elems != nullptr) {
+    for (int vid : moved_vertices) {
+      for (int e : node_to_elem[vid]) moved_patch_elems->insert(e);
+    }
+  }
+
   return move_count;
 }
 
-void improveRefinedLinearMesh(Mesh &mesh,
-                              const std::map<std::pair<int, int>, int> &boundary_edge_groups,
-                              int first_new_vertex) {
-  if (mesh.E.empty()) return;
-  bool all_linear = true;
+[[maybe_unused]] void refreshQ2GeometryNodes(
+    Mesh &mesh,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups) {
+  std::set<int> updated_mid_nodes;
+  auto edgeMidpoint = [&](int a, int b) {
+    Vec2 mid = 0.5 * (mesh.V[a] + mesh.V[b]);
+    auto it = boundary_edge_groups.find({std::min(a, b), std::max(a, b)});
+    if (it != boundary_edge_groups.end()) {
+      int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        Vec2 arc_mid = mid;
+        if (!bladeEdgeArcMidpoint(mesh.V[a], mesh.V[b], arc_mid)) {
+          arc_mid = projectToBladeSpline(mid);
+        }
+        mid = arc_mid;
+      }
+    }
+    return mid;
+  };
+
+  for (auto &elem : mesh.E) {
+    if (elem.q_order != 2 || elem.ho_nodes.size() != 6) continue;
+    const int a = elem.v[0];
+    const int b = elem.v[1];
+    const int c = elem.v[2];
+
+    const std::array<std::pair<int, std::pair<int, int>>, 3> mids = {{
+        {elem.ho_nodes[1], {a, b}},
+        {elem.ho_nodes[3], {c, a}},
+        {elem.ho_nodes[4], {b, c}},
+    }};
+    for (const auto &[mid_idx, edge] : mids) {
+      if (!updated_mid_nodes.insert(mid_idx).second) continue;
+      mesh.V[mid_idx] = edgeMidpoint(edge.first, edge.second);
+    }
+  }
+}
+
+struct QuadraticDetJPoly {
+  double a = 0.0;
+  double b = 0.0;
+  double c = 0.0;
+  double d = 0.0;
+  double e = 0.0;
+  double f = 0.0;
+
+  double eval(double xi, double eta) const {
+    return a + b * xi + c * eta + d * xi * xi + e * xi * eta + f * eta * eta;
+  }
+};
+
+struct WallSplitAssessment {
+  bool feasible = false;
+  int failing_adjacent = 0;
+  double min_patch_detJ = -std::numeric_limits<double>::infinity();
+  double min_bezier_corner_area = -std::numeric_limits<double>::infinity();
+  double min_child_angle = 0.0;
+  double min_child_quality = 0.0;
+  double score = -std::numeric_limits<double>::infinity();
+};
+
+bool fitQ2DetJPolynomial(const Mesh &mesh, int elem_idx, QuadraticDetJPoly &poly) {
+  if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) return false;
+  if (mesh.E[elem_idx].q_order != 2) return false;
+
+  const double J00 = mesh.evaluateElementGeometry(elem_idx, 0.0, 0.0).detJ;
+  const double J10 = mesh.evaluateElementGeometry(elem_idx, 1.0, 0.0).detJ;
+  const double J01 = mesh.evaluateElementGeometry(elem_idx, 0.0, 1.0).detJ;
+  const double J50 = mesh.evaluateElementGeometry(elem_idx, 0.5, 0.0).detJ;
+  const double J55 = mesh.evaluateElementGeometry(elem_idx, 0.5, 0.5).detJ;
+  const double J05 = mesh.evaluateElementGeometry(elem_idx, 0.0, 0.5).detJ;
+
+  poly.a = J00;
+  const double t_x = J10 - poly.a;
+  const double s_x = J50 - poly.a;
+  const double t_y = J01 - poly.a;
+  const double s_y = J05 - poly.a;
+
+  poly.b = 4.0 * s_x - t_x;
+  poly.d = 2.0 * (t_x - 2.0 * s_x);
+  poly.c = 4.0 * s_y - t_y;
+  poly.f = 2.0 * (t_y - 2.0 * s_y);
+  poly.e = 4.0 * (J55 - poly.a - 0.5 * poly.b - 0.5 * poly.c -
+                  0.25 * poly.d - 0.25 * poly.f);
+  return true;
+}
+
+bool getQ2BasisNodes(const Mesh &mesh, int elem_idx, std::array<Vec2, 6> &xnode) {
+  if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) return false;
+  const auto &el = mesh.E[elem_idx];
+  if (el.q_order != 2 || el.ho_nodes.size() != 6) return false;
+  static const int perm_q2[] = {0, 2, 5, 1, 4, 3};
+  for (int k = 0; k < 6; ++k) xnode[k] = mesh.V[el.ho_nodes[perm_q2[k]]];
+  return true;
+}
+
+double q2BezierMinCornerArea(const Mesh &mesh, int elem_idx) {
+  std::array<Vec2, 6> xnode;
+  if (!getQ2BasisNodes(mesh, elem_idx, xnode)) return 0.0;
+
+  const Vec2 b0 = xnode[0];
+  const Vec2 b1 = xnode[1];
+  const Vec2 b2 = xnode[2];
+  const Vec2 b01 = 2.0 * xnode[3] - 0.5 * (xnode[0] + xnode[1]);
+  const Vec2 b12 = 2.0 * xnode[4] - 0.5 * (xnode[1] + xnode[2]);
+  const Vec2 b20 = 2.0 * xnode[5] - 0.5 * (xnode[2] + xnode[0]);
+
+  const double a0 = triangleSignedAreaPts(b0, b01, b20);
+  const double a1 = triangleSignedAreaPts(b1, b12, b01);
+  const double a2 = triangleSignedAreaPts(b2, b20, b12);
+  return std::min(a0, std::min(a1, a2));
+}
+
+bool refPointInsideTriangle(double xi, double eta, double tol = 1e-12) {
+  return xi >= -tol && eta >= -tol && (xi + eta) <= 1.0 + tol;
+}
+
+void considerExactDetJCandidate(const Mesh &mesh, int elem_idx,
+                                double xi, double eta,
+                                CurvedElementDetJMinimum &best) {
+  if (!refPointInsideTriangle(xi, eta)) return;
+  const ElementGeomEval geom = mesh.evaluateElementGeometry(elem_idx, xi, eta);
+  if (!best.exact || geom.detJ < best.detJ) {
+    best.exact = true;
+    best.detJ = geom.detJ;
+    best.ref = {xi, eta};
+    best.x = geom.x;
+  }
+}
+
+void retunePatchQ2Geometry(
+    Mesh &mesh,
+    const std::set<int> &patch_elems,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups) {
+  std::set<int> updated_mid_nodes;
+  auto edgeMidpoint = [&](int a, int b) {
+    Vec2 mid = 0.5 * (mesh.V[a] + mesh.V[b]);
+    auto it = boundary_edge_groups.find({std::min(a, b), std::max(a, b)});
+    if (it != boundary_edge_groups.end()) {
+      const int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        Vec2 arc_mid = mid;
+        if (!bladeEdgeArcMidpoint(mesh.V[a], mesh.V[b], arc_mid)) {
+          arc_mid = projectToBladeSpline(mid);
+        }
+        mid = arc_mid;
+      }
+    }
+    return mid;
+  };
+
+  for (int e : patch_elems) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    auto &elem = mesh.E[e];
+    if (elem.q_order != 2 || elem.ho_nodes.size() != 6) continue;
+
+    const int a = elem.v[0];
+    const int b = elem.v[1];
+    const int c = elem.v[2];
+    const std::array<std::pair<int, std::pair<int, int>>, 3> mids = {{
+        {elem.ho_nodes[1], {a, b}},
+        {elem.ho_nodes[3], {c, a}},
+        {elem.ho_nodes[4], {b, c}},
+    }};
+    for (const auto &[mid_idx, edge] : mids) {
+      if (!updated_mid_nodes.insert(mid_idx).second) continue;
+      mesh.V[mid_idx] = edgeMidpoint(edge.first, edge.second);
+    }
+  }
+}
+
+[[maybe_unused]] void retuneWallPatchQ2Geometry(
+    Mesh &mesh,
+    const std::set<int> &patch_elems,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups) {
+  std::set<int> updated_mid_nodes;
+  for (int e : patch_elems) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    auto &elem = mesh.E[e];
+    if (elem.q_order != 2 || elem.ho_nodes.size() != 6) continue;
+
+    const int a = elem.v[0];
+    const int b = elem.v[1];
+    const int c = elem.v[2];
+    const std::array<std::pair<int, std::pair<int, int>>, 3> mids = {{
+        {elem.ho_nodes[1], {a, b}},
+        {elem.ho_nodes[3], {c, a}},
+        {elem.ho_nodes[4], {b, c}},
+    }};
+    for (const auto &[mid_idx, edge] : mids) {
+      if (!updated_mid_nodes.insert(mid_idx).second) continue;
+      auto it = boundary_edge_groups.find({std::min(edge.first, edge.second),
+                                           std::max(edge.first, edge.second)});
+      if (it == boundary_edge_groups.end()) continue;
+      const int g = it->second;
+      if (g < 0 || g >= static_cast<int>(mesh.Bname.size()) ||
+          lowerCopy(mesh.Bname[g]) != "wall") {
+        continue;
+      }
+      Vec2 wall_mid = 0.5 * (mesh.V[edge.first] + mesh.V[edge.second]);
+      if (!bladeEdgeArcMidpoint(mesh.V[edge.first], mesh.V[edge.second], wall_mid)) {
+        wall_mid = projectToBladeSpline(wall_mid);
+      }
+      mesh.V[mid_idx] = wall_mid;
+    }
+  }
+}
+
+double patchMinimumExactDetJ(const Mesh &mesh, const std::set<int> &patch_elems) {
+  double min_detJ = std::numeric_limits<double>::infinity();
+  for (int e : patch_elems) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    const auto &elem = mesh.E[e];
+    if (elem.q_order == 2) {
+      CurvedElementDetJMinimum detJ_info;
+      if (exactQ2DetJMinimum(mesh, e, detJ_info)) {
+        min_detJ = std::min(min_detJ, detJ_info.detJ);
+        continue;
+      }
+    }
+    min_detJ = std::min(min_detJ, 2.0 * triangleSignedArea(elem, mesh.V));
+  }
+  if (!std::isfinite(min_detJ)) return 0.0;
+  return min_detJ;
+}
+
+WallSplitAssessment assessWallSplitPatch(
+    const Mesh &mesh,
+    int va, int vb,
+    const Vec2 &mid,
+    const std::vector<int> &edge_adj_elems,
+    const std::set<int> &patch_elems,
+    const std::vector<std::vector<int>> &node_to_elem) {
+  WallSplitAssessment out;
+  out.feasible = true;
+  out.min_patch_detJ = patchMinimumExactDetJ(mesh, patch_elems);
+  out.min_bezier_corner_area = std::numeric_limits<double>::infinity();
+  out.min_child_angle = std::numeric_limits<double>::infinity();
+  out.min_child_quality = std::numeric_limits<double>::infinity();
+
+  std::set<int> local_edge_patch_elems;
+  for (int e : node_to_elem[va]) local_edge_patch_elems.insert(e);
+  for (int e : node_to_elem[vb]) local_edge_patch_elems.insert(e);
+  double orig_local_min_area = std::numeric_limits<double>::infinity();
+  for (int e : local_edge_patch_elems) {
+    orig_local_min_area = std::min(orig_local_min_area, triangleSignedArea(mesh.E[e], mesh.V));
+  }
+  orig_local_min_area = std::max(orig_local_min_area, 1e-12);
+
+  for (int eadj : edge_adj_elems) {
+    const int *ev = mesh.E[eadj].v;
+    int vopp = -1;
+    for (int k = 0; k < 3; ++k) {
+      if (ev[k] != va && ev[k] != vb) {
+        vopp = ev[k];
+        break;
+      }
+    }
+    if (vopp < 0) continue;
+
+    std::string reason =
+        localWallSplitPatchFailureReason(mesh, va, vb, vopp, mid, mesh.V[vopp], node_to_elem);
+    if (!reason.empty()) {
+      out.feasible = false;
+      out.failing_adjacent++;
+    }
+
+    const Vec2 &vopp_pos = mesh.V[vopp];
+    const double a1 = triangleSignedAreaPts(vopp_pos, mesh.V[va], mid);
+    const double a2 = triangleSignedAreaPts(vopp_pos, mid, mesh.V[vb]);
+    if (a1 > 1e-12 && a2 > 1e-12) {
+      out.min_child_angle = std::min(
+          out.min_child_angle,
+          std::min(triangleMinAngleDegPts(vopp_pos, mesh.V[va], mid),
+                   triangleMinAngleDegPts(vopp_pos, mid, mesh.V[vb])));
+      const double q1 = std::abs(2.0 * std::sqrt(3.0) *
+                                 ((mesh.V[va] - vopp_pos).x * (mid - vopp_pos).y -
+                                  (mesh.V[va] - vopp_pos).y * (mid - vopp_pos).x)) /
+                        std::max((mesh.V[va] - vopp_pos).normSq() +
+                                     (mid - mesh.V[va]).normSq() +
+                                     (vopp_pos - mid).normSq(),
+                                 1e-16);
+      const double q2 = std::abs(2.0 * std::sqrt(3.0) *
+                                 ((mid - vopp_pos).x * (mesh.V[vb] - vopp_pos).y -
+                                  (mid - vopp_pos).y * (mesh.V[vb] - vopp_pos).x)) /
+                        std::max((mid - vopp_pos).normSq() +
+                                     (mesh.V[vb] - mid).normSq() +
+                                     (vopp_pos - mesh.V[vb]).normSq(),
+                                 1e-16);
+      out.min_child_quality = std::min(out.min_child_quality, std::min(q1, q2));
+    } else {
+      out.min_child_angle = -1.0;
+      out.min_child_quality = -1.0;
+    }
+  }
+
+  for (int e : patch_elems) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    if (mesh.E[e].q_order == 2) {
+      out.min_bezier_corner_area =
+          std::min(out.min_bezier_corner_area, q2BezierMinCornerArea(mesh, e));
+    }
+  }
+
+  if (!std::isfinite(out.min_bezier_corner_area)) out.min_bezier_corner_area = 0.0;
+  if (!std::isfinite(out.min_child_angle)) out.min_child_angle = -1.0;
+  if (!std::isfinite(out.min_child_quality)) out.min_child_quality = -1.0;
+
+  const double delta = (out.min_patch_detJ < 0.0)
+                           ? std::sqrt(1e-8 + 0.04 * out.min_patch_detJ * out.min_patch_detJ)
+                           : 1e-4;
+  const double JR = 0.5 * (out.min_patch_detJ +
+                           std::sqrt(out.min_patch_detJ * out.min_patch_detJ + 4.0 * delta * delta));
+  out.score = (out.feasible ? 1e6 : 0.0)
+              - 5000.0 * static_cast<double>(out.failing_adjacent)
+              + 25.0 * out.min_child_angle
+              + 400.0 * out.min_child_quality
+              + 50.0 * out.min_bezier_corner_area
+              + 10.0 * std::log(std::max(JR, 1e-12));
+  return out;
+}
+
+[[maybe_unused]] bool optimizeWallPatchForSplit(
+    Mesh &mesh,
+    int va, int vb,
+    const Vec2 &mid,
+    const std::vector<std::vector<int>> &node_to_elem,
+    const std::vector<std::set<int>> &vertex_neighbors,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups,
+    std::string &repair_summary) {
+  std::vector<int> edge_adj_elems;
+  for (int e : node_to_elem[va]) {
+    const int *ev = mesh.E[e].v;
+    if (ev[0] == vb || ev[1] == vb || ev[2] == vb) edge_adj_elems.push_back(e);
+  }
+  if (edge_adj_elems.empty()) return false;
+
+  std::set<int> patch_elems(edge_adj_elems.begin(), edge_adj_elems.end());
+  std::set<int> patch_nodes{va, vb};
+  std::vector<int> local_opposites;
+  for (int e : edge_adj_elems) {
+    const int *ev = mesh.E[e].v;
+    for (int k = 0; k < 3; ++k) {
+      if (ev[k] != va && ev[k] != vb) {
+        local_opposites.push_back(ev[k]);
+        patch_nodes.insert(ev[k]);
+      }
+    }
+  }
+  for (int vid : local_opposites) {
+    for (int e : node_to_elem[vid]) patch_elems.insert(e);
+    for (int nbr : vertex_neighbors[vid]) patch_nodes.insert(nbr);
+  }
+  for (int vid : patch_nodes) {
+    for (int e : node_to_elem[vid]) patch_elems.insert(e);
+  }
+
+  const auto periodic_vertices = collectPeriodicVertices(mesh);
+  const auto boundary_vertices = collectBoundaryVertices(mesh);
+  auto isWallBoundaryVertex = [&](int vid) {
+    for (int nbr : vertex_neighbors[vid]) {
+      const auto key = std::make_pair(std::min(vid, nbr), std::max(vid, nbr));
+      auto it = boundary_edge_groups.find(key);
+      if (it == boundary_edge_groups.end()) continue;
+      const int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  std::vector<int> movable_vertices = local_opposites;
+  for (int vid : patch_nodes) {
+    if (std::find(movable_vertices.begin(), movable_vertices.end(), vid) != movable_vertices.end()) {
+      continue;
+    }
+    movable_vertices.push_back(vid);
+  }
+  movable_vertices.erase(
+      std::remove_if(movable_vertices.begin(), movable_vertices.end(),
+                     [&](int vid) {
+                       if (periodic_vertices.count(vid)) return true;
+                       if (boundary_vertices.count(vid) && !isWallBoundaryVertex(vid)) return true;
+                       if (vid == va || vid == vb) return true;
+                       return false;
+                     }),
+      movable_vertices.end());
+  if (movable_vertices.empty()) return false;
+
+  const std::vector<Vec2> original_vertices = mesh.V;
+  retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+  WallSplitAssessment best = assessWallSplitPatch(mesh, va, vb, mid, edge_adj_elems,
+                                                  patch_elems, node_to_elem);
+  if (best.feasible) {
+    repair_summary = "local patch already feasible";
+    return true;
+  }
+
+  bool any_change = false;
+  for (int iter = 0; iter < 5; ++iter) {
+    bool iter_changed = false;
+    for (int vid : movable_vertices) {
+      const Vec2 current = mesh.V[vid];
+      std::vector<Vec2> candidates;
+
+      if (!vertex_neighbors[vid].empty()) {
+        Vec2 avg{0.0, 0.0};
+        for (int nbr : vertex_neighbors[vid]) avg = avg + mesh.V[nbr];
+        avg = avg / static_cast<double>(vertex_neighbors[vid].size());
+        candidates.push_back(0.75 * current + 0.25 * avg);
+        candidates.push_back(0.5 * current + 0.5 * avg);
+      }
+
+      BladeProjection proj = projectToBladeSplineDetailed(current);
+      BladeProjection mid_proj = projectToBladeSplineDetailed(mid);
+      const double edge_len = (mesh.V[vb] - mesh.V[va]).norm();
+      if (mid_proj.valid) {
+        const Vec2 t_hat = branchTangent(mid_proj.branch, mid_proj.s);
+        const Vec2 n_hat = branchFluidNormal(mid_proj.branch, mid_proj.s);
+        const Vec2 rel = current - mid_proj.pt;
+        const double tangential = rel.dot(t_hat);
+        for (double normal_scale : {0.20, 0.30, 0.40}) {
+          candidates.push_back(mid_proj.pt + tangential * t_hat +
+                               normal_scale * edge_len * n_hat);
+        }
+      }
+      if (boundary_vertices.count(vid) && isWallBoundaryVertex(vid)) {
+        Vec2 projected = current;
+        if (proj.valid) projected = proj.pt;
+        candidates.push_back(projected);
+      }
+
+      Vec2 best_pos = current;
+      WallSplitAssessment best_local = best;
+      for (const Vec2 &candidate : candidates) {
+        std::vector<Vec2> verts_trial = mesh.V;
+        if (!localMovePreservesMesh(mesh, vid, node_to_elem, mesh.V, verts_trial, candidate)) {
+          continue;
+        }
+        mesh.V[vid] = candidate;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+        WallSplitAssessment trial = assessWallSplitPatch(
+            mesh, va, vb, mid, edge_adj_elems, patch_elems, node_to_elem);
+        if (trial.score > best_local.score + 1e-8) {
+          best_local = trial;
+          best_pos = candidate;
+        }
+        mesh.V[vid] = current;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+      }
+
+      if ((best_pos - current).norm() > 1e-12) {
+        mesh.V[vid] = best_pos;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+        best = best_local;
+        iter_changed = true;
+        any_change = true;
+        if (best.feasible) {
+          repair_summary = "Bezier/Jacobian local patch optimization succeeded";
+          return true;
+        }
+      }
+    }
+    if (!iter_changed) break;
+  }
+
+  if (!best.feasible) {
+    mesh.V = original_vertices;
+    retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+    repair_summary = "local Bezier/Jacobian patch optimization failed";
+    return false;
+  }
+
+  repair_summary = "Bezier/Jacobian local patch optimization succeeded";
+  return any_change;
+}
+
+[[maybe_unused]] void smoothRefinedCurvedMesh(
+    Mesh &mesh,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups,
+    int first_new_vertex) {
+  if (!curvedRefinementSmoothingEnabled()) return;
+
+  bool has_curved = false;
   for (const auto &elem : mesh.E) {
-    if (elem.q_order != 1) {
-      all_linear = false;
+    if (elem.q_order > 1) {
+      has_curved = true;
       break;
     }
   }
-  if (!all_linear) return;
+  if (!has_curved) return;
 
+  std::set<int> moved_patch_elems;
+  const int move_count =
+      smoothNewInteriorVertices(mesh, first_new_vertex, &moved_patch_elems);
+  if (move_count <= 0) return;
+
+  if (!moved_patch_elems.empty()) {
+    retunePatchQ2Geometry(mesh, moved_patch_elems, boundary_edge_groups);
+  }
+  std::cerr << "    curved smoothing: moved_corner_nodes=" << move_count
+            << std::endl;
+}
+
+[[maybe_unused]] void applyLocalEdgeSwapCleanup(
+    Mesh &mesh,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups,
+    int first_new_vertex,
+    int first_new_elem) {
+  if (mesh.E.empty()) return;
   rebuildMeshEdgeConnectivity(mesh, boundary_edge_groups);
   mesh.appendPeriodicToIE();
-  const int swap_count = improveMeshByEdgeSwaps(mesh, boundary_edge_groups, 8);
+  const int swap_count = improveMeshByEdgeSwaps(
+      mesh, boundary_edge_groups, 8, first_new_vertex, first_new_elem);
   if (swap_count > 0) {
     rebuildMeshEdgeConnectivity(mesh, boundary_edge_groups);
     mesh.appendPeriodicToIE();
-  }
-
-  const int move_count = smoothNewInteriorVertices(mesh, first_new_vertex);
-  if (move_count > 0) {
-    rebuildMeshEdgeConnectivity(mesh, boundary_edge_groups);
-    mesh.appendPeriodicToIE();
-  }
-  if (swap_count > 0 || move_count > 0) {
-    std::cerr << "    local cleanup: swaps=" << swap_count
-              << " smoothed_moves=" << move_count << std::endl;
+    std::cerr << "    local cleanup: swaps=" << swap_count << std::endl;
   }
 }
 
 RefinementMap bisectMarkedElementsImpl(
-    Mesh &mesh, const std::vector<bool> &marked_in, int retry_depth,
-    const std::vector<int> &fallback_priority = {}, int target_adj_splits = 0,
-    const std::set<std::pair<int, int>> &split_edge_blacklist = {}) {
+    Mesh &mesh, const std::vector<bool> &marked_in,
+    const std::vector<int> &fallback_priority = {}, int target_adj_splits = 0) {
   RefinementMap rmap;
   int old_Ne = mesh.E.size();
   int old_Nv = mesh.V.size();
@@ -921,6 +1467,49 @@ RefinementMap bisectMarkedElementsImpl(
     return d.x * d.x + d.y * d.y;
   };
 
+  auto getEncroachedWallEdge = [&](int e) -> std::pair<int, int> {
+    int v[3] = {mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]};
+    std::pair<int, int> best{-1, -1};
+    double best_score = -1.0;
+    for (int i = 0; i < 3; ++i) {
+      const int a = v[i];
+      const int b = v[(i + 1) % 3];
+      const int p = v[(i + 2) % 3];
+      const auto edge = std::make_pair(std::min(a, b), std::max(a, b));
+      auto it = old_boundary_edge.find(edge);
+      if (it == old_boundary_edge.end()) continue;
+      const int g = it->second;
+      if (g < 0 || g >= static_cast<int>(mesh.Bname.size()) ||
+          lowerCopy(mesh.Bname[g]) != "wall") {
+        continue;
+      }
+      if (!diametralLensEncroached(mesh.V[a], mesh.V[b], mesh.V[p])) continue;
+      const double angle = oppositeAngleDeg(mesh.V[a], mesh.V[b], mesh.V[p]);
+      const double score = 1e6 * angle + edgeLength2(a, b);
+      if (score > best_score) {
+        best = edge;
+        best_score = score;
+      }
+    }
+    return best;
+  };
+
+  auto getPreferredRefinementEdge = [&](int e) -> std::pair<int, int> {
+    const auto encroached_wall = getEncroachedWallEdge(e);
+    if (encroached_wall.first >= 0) return encroached_wall;
+    const auto wall_edge = getLongestWallEdge(e);
+    if (wall_edge.first >= 0) return wall_edge;
+    return getLE(e);
+  };
+
+  auto isWallEdge = [&](const std::pair<int, int> &edge) {
+    auto it = old_boundary_edge.find(edge);
+    if (it == old_boundary_edge.end()) return false;
+    const int g = it->second;
+    return g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+           lowerCopy(mesh.Bname[g]) == "wall";
+  };
+
   auto buildCurrentNodeToElem = [&]() {
     std::vector<std::vector<int>> cur_node_to_elem(mesh.V.size());
     for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
@@ -931,19 +1520,6 @@ RefinementMap bisectMarkedElementsImpl(
     return cur_node_to_elem;
   };
 
-  auto buildCurrentVertexNeighbors = [&]() {
-    std::vector<std::set<int>> cur_vertex_neighbors(mesh.V.size());
-    for (const auto &elem : mesh.E) {
-      cur_vertex_neighbors[elem.v[0]].insert(elem.v[1]);
-      cur_vertex_neighbors[elem.v[0]].insert(elem.v[2]);
-      cur_vertex_neighbors[elem.v[1]].insert(elem.v[0]);
-      cur_vertex_neighbors[elem.v[1]].insert(elem.v[2]);
-      cur_vertex_neighbors[elem.v[2]].insert(elem.v[0]);
-      cur_vertex_neighbors[elem.v[2]].insert(elem.v[1]);
-    }
-    return cur_vertex_neighbors;
-  };
-
   auto interiorMidpointAllowed = [&](int va, int vb) {
     (void)va;
     (void)vb;
@@ -951,15 +1527,7 @@ RefinementMap bisectMarkedElementsImpl(
   };
 
   std::set<std::pair<int,int>> e2b;
-  for(int e=0; e<old_Ne; e++) if(marked[e]) e2b.insert(getLE(e));
-
-  double current_min_angle_deg = 180.0;
-  for (const auto &elem : mesh.E) {
-    current_min_angle_deg = std::min(
-        current_min_angle_deg,
-        triangleMinAngleDeg(mesh.V[elem.v[0]], mesh.V[elem.v[1]], mesh.V[elem.v[2]]));
-  }
-  if (mesh.E.empty()) current_min_angle_deg = 0.0;
+  for(int e=0; e<old_Ne; e++) if(marked[e]) e2b.insert(getPreferredRefinementEdge(e));
 
   std::map<std::pair<int,int>, std::pair<int,int>> ppartner;
   for (const auto &ie : mesh.IE) {
@@ -988,12 +1556,22 @@ RefinementMap bisectMarkedElementsImpl(
       int g = old_boundary_edge[key];
       if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
           lowerCopy(mesh.Bname[g]) == "wall") {
-        const Vec2 snapped_mid = projectToBladeSpline(straight_mid);
+        Vec2 snapped_mid = projectToBladeSpline(straight_mid);
+        std::string split_mid_source = "projected straight midpoint";
+        Vec2 arc_mid = snapped_mid;
+        if (bladeEdgeArcMidpoint(mesh.V[va], mesh.V[vb], arc_mid)) {
+          snapped_mid = arc_mid;
+          split_mid_source = "blade arc midpoint";
+        } else {
+          Vec2 curved_mid = snapped_mid;
+          if (curvedParentEdgeMidpoint(mesh, edge_to_elem, va, vb, curved_mid)) {
+            snapped_mid = curved_mid;
+            split_mid_source = "parent curved map midpoint";
+          }
+        }
         const auto cur_node_to_elem = buildCurrentNodeToElem();
-        const auto cur_vertex_neighbors = buildCurrentVertexNeighbors();
         bool accepted = true;
         std::string wall_failure_reason;
-        std::map<int, Vec2> repaired_positions;
         auto eit = edge_to_elem.find(key);
         if (eit != edge_to_elem.end()) {
           for (int eadj : eit->second) {
@@ -1007,44 +1585,28 @@ RefinementMap bisectMarkedElementsImpl(
             }
             if (vopp < 0) continue;
 
-            Vec2 vopp_pos =
-                repaired_positions.count(vopp) ? repaired_positions[vopp] : mesh.V[vopp];
             std::string base_reason = localWallSplitPatchFailureReason(
-                mesh, va, vb, vopp, snapped_mid, vopp_pos, cur_node_to_elem);
+                mesh, va, vb, vopp, snapped_mid, mesh.V[vopp], cur_node_to_elem);
             if (base_reason.empty()) continue;
 
-            Vec2 avg{0.0, 0.0};
-            int count = 0;
-            for (int nbr : cur_vertex_neighbors[vopp]) {
-              avg = avg + (repaired_positions.count(nbr) ? repaired_positions[nbr] : mesh.V[nbr]);
-              count++;
-            }
-            if (count == 0) {
-              wall_failure_reason =
-                  "snap failed: " + base_reason + "; no opposite-node neighbors";
-              accepted = false;
-              break;
-            }
-            avg = avg / static_cast<double>(count);
-            std::string avg_reason = localWallSplitPatchFailureReason(
-                mesh, va, vb, vopp, snapped_mid, avg, cur_node_to_elem);
-            if (!avg_reason.empty()) {
-              wall_failure_reason = "snap failed: " + base_reason +
-                                    "; opposite-node average failed: " + avg_reason;
-              accepted = false;
-              break;
-            }
-            repaired_positions[vopp] = avg;
+            // Heuristic opposite-node repair is disabled for now. Keep the
+            // wall split purely geometry-driven: if the direct curved-wall
+            // patch check fails, reject the split and move on.
+            wall_failure_reason = split_mid_source + " failed: " + base_reason;
+            accepted = false;
+            break;
           }
         }
         if (!accepted) {
+          if (wall_failure_reason.empty()) {
+            wall_failure_reason = split_mid_source + " failed";
+          }
           std::cerr << "    warning: skipped refinement on wall edge (" << va
                     << ", " << vb << ") because " << wall_failure_reason
                     << std::endl;
           ok = false;
           return -1;
         }
-        for (const auto &[vid, pos] : repaired_positions) mesh.V[vid] = pos;
         mid = snapped_mid;
       }
       old_boundary_edge[{std::min(va,vm), std::max(va,vm)}] = g;
@@ -1055,34 +1617,86 @@ RefinementMap bisectMarkedElementsImpl(
     return vm;
   };
 
-  auto getGeomMidQ2 = [&](int va, int vb) {
+  auto getGeomNodeQ2 = [&](int va, int vb, const Vec2 &xq) {
     auto key = std::make_pair(std::min(va, vb), std::max(va, vb));
     if (edge_geom_midpoint_q2.count(key)) return edge_geom_midpoint_q2[key];
-    Vec2 mid = 0.5 * (mesh.V[va] + mesh.V[vb]);
-    if (old_boundary_edge.count(key)) {
-      int g = old_boundary_edge[key];
-      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
-          lowerCopy(mesh.Bname[g]) == "wall") {
-        mid = projectToBladeSpline(mid);
-      }
-    }
     int vm = static_cast<int>(mesh.V.size());
-    mesh.V.push_back(mid);
+    mesh.V.push_back(xq);
     edge_geom_midpoint_q2[key] = vm;
     return vm;
   };
 
-  auto assignQ2Child = [&](Element &child, int a, int b, int c) {
+  auto rollbackCreatedMidpoints = [&](const std::vector<std::pair<std::pair<int, int>, int>> &created) {
+    for (auto it = created.rbegin(); it != created.rend(); ++it) {
+      const auto &edge = it->first;
+      const int vid = it->second;
+      auto map_it = edge_midpoint.find(edge);
+      if (map_it != edge_midpoint.end() && map_it->second == vid) {
+        edge_midpoint.erase(map_it);
+      }
+      if (vid == static_cast<int>(mesh.V.size()) - 1) {
+        mesh.V.pop_back();
+      }
+      if (!rmap.new_vertex_edges.empty()) {
+        const auto &back = rmap.new_vertex_edges.back();
+        const auto back_key =
+            std::make_pair(std::min(back.first, back.second),
+                           std::max(back.first, back.second));
+        if (back_key == edge) {
+          rmap.new_vertex_edges.pop_back();
+        }
+      }
+      for (auto be_it = old_boundary_edge.begin(); be_it != old_boundary_edge.end();) {
+        if (be_it->first.first == vid || be_it->first.second == vid) {
+          be_it = old_boundary_edge.erase(be_it);
+        } else {
+          ++be_it;
+        }
+      }
+    }
+  };
+  auto noteCreatedMidpoint = [&](std::vector<std::pair<std::pair<int, int>, int>> &created,
+                                 const std::pair<int, int> &edge,
+                                 int vid) {
+    for (const auto &entry : created) {
+      if (entry.first == edge && entry.second == vid) return;
+    }
+    if (edge_midpoint.count(edge) && edge_midpoint[edge] == vid &&
+        vid == static_cast<int>(mesh.V.size()) - 1) {
+      created.push_back({edge, vid});
+    }
+  };
+
+  auto assignQ2Child = [&](Element &child,
+                           int a, int b, int c,
+                           const Vec2 &ra, const Vec2 &rb, const Vec2 &rc,
+                           const std::function<Vec2(const Vec2 &)> &parent_map,
+                           bool rebuild_wall_edges_from_blade = false) {
     child.v[0] = a;
     child.v[1] = b;
     child.v[2] = c;
     child.q_order = 2;
+    const Vec2 rab = 0.5 * (ra + rb);
+    const Vec2 rca = 0.5 * (rc + ra);
+    const Vec2 rbc = 0.5 * (rb + rc);
+    auto edgeGeomPoint = [&](int p, int q, const Vec2 &rpq) {
+      Vec2 xq = parent_map(rpq);
+      if (rebuild_wall_edges_from_blade) {
+        const auto edge = std::make_pair(std::min(p, q), std::max(p, q));
+        if (isWallEdge(edge)) {
+          if (!bladeEdgeArcMidpoint(mesh.V[p], mesh.V[q], xq)) {
+            xq = projectToBladeSpline(0.5 * (mesh.V[p] + mesh.V[q]));
+          }
+        }
+      }
+      return xq;
+    };
     child.ho_nodes = {
       a,
-      getGeomMidQ2(a, b),
+      getGeomNodeQ2(a, b, edgeGeomPoint(a, b, rab)),
       b,
-      getGeomMidQ2(c, a),
-      getGeomMidQ2(b, c),
+      getGeomNodeQ2(c, a, edgeGeomPoint(c, a, rca)),
+      getGeomNodeQ2(b, c, edgeGeomPoint(b, c, rbc)),
       c
     };
   };
@@ -1106,22 +1720,17 @@ RefinementMap bisectMarkedElementsImpl(
   };
 
   std::vector<bool> old_elem_touches_wall(old_Ne, false);
+  std::vector<std::array<int, 3>> old_elem_vertices(old_Ne);
   for (int e = 0; e < old_Ne; ++e) {
+    old_elem_vertices[e] = {
+        mesh.E[e].v[0],
+        mesh.E[e].v[1],
+        mesh.E[e].v[2],
+    };
     old_elem_touches_wall[e] =
         elementTouchesWall(mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]);
   };
   std::set<std::pair<int, int>> rejected_edges;
-  std::set<int> blocked_wall_parents;
-  std::set<int> blocked_wall_vertices;
-  std::set<std::pair<int, int>> accepted_split_edges;
-
-  auto edgeIsWallBoundary = [&](const std::pair<int, int> &edge) {
-    auto it = old_boundary_edge.find(edge);
-    if (it == old_boundary_edge.end()) return false;
-    int g = it->second;
-    return g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
-           lowerCopy(mesh.Bname[g]) == "wall";
-  };
   // Track which original cells are "included" (initially marked + any fallback cells
   // added later). Used to count adjoint-driven splits for the fallback stopping criterion.
   std::vector<bool> included(old_Ne, false);
@@ -1134,18 +1743,58 @@ RefinementMap bisectMarkedElementsImpl(
     while(changed) {
       changed = false;
       int cur_Ne = mesh.E.size();
-      for(int e=0; e<cur_Ne; e++) {
+      const std::array<Vec2, 3> ref_corner = {{
+          {0.0, 0.0},
+          {1.0, 0.0},
+          {0.0, 1.0},
+      }};
+      auto elementHasWallCandidate = [&](int e) {
+        if (e < 0 || e >= static_cast<int>(mesh.E.size())) return false;
+        int vloc[3] = {mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]};
+        std::pair<int, int> eloc[3] = {
+            {std::min(vloc[0], vloc[1]), std::max(vloc[0], vloc[1])},
+            {std::min(vloc[1], vloc[2]), std::max(vloc[1], vloc[2])},
+            {std::min(vloc[2], vloc[0]), std::max(vloc[2], vloc[0])},
+        };
+        bool has_requested_candidate = false;
+        for (int i = 0; i < 3; ++i) {
+          if (!e2b.count(eloc[i])) continue;
+          has_requested_candidate = true;
+          auto it = old_boundary_edge.find(eloc[i]);
+          if (it == old_boundary_edge.end()) continue;
+          int g = it->second;
+          if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+              lowerCopy(mesh.Bname[g]) == "wall") {
+            return true;
+          }
+        }
+        if (has_requested_candidate) return false;
+        for (int i = 0; i < 3; ++i) {
+          if (!edge_midpoint.count(eloc[i])) continue;
+          auto it = old_boundary_edge.find(eloc[i]);
+          if (it == old_boundary_edge.end()) continue;
+          int g = it->second;
+          if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+              lowerCopy(mesh.Bname[g]) == "wall") {
+            return true;
+          }
+        }
+        return false;
+      };
+      std::vector<int> elem_order(cur_Ne);
+      std::iota(elem_order.begin(), elem_order.end(), 0);
+      std::stable_sort(elem_order.begin(), elem_order.end(),
+                       [&](int a, int b) {
+                         const bool aw = elementHasWallCandidate(a);
+                         const bool bw = elementHasWallCandidate(b);
+                         if (aw != bw) return aw > bw;
+                         return a < b;
+                       });
+      for (int e : elem_order) {
         int v[3] = {mesh.E[e].v[0], mesh.E[e].v[1], mesh.E[e].v[2]};
         std::pair<int,int> ee[3] = {{std::min(v[0],v[1]), std::max(v[0],v[1])}, {std::min(v[1],v[2]), std::max(v[1],v[2])}, {std::min(v[2],v[0]), std::max(v[2],v[0])}};
         const bool touches_wall = elementTouchesWall(v[0], v[1], v[2]);
         const int parent = rmap.child_to_parent[e];
-        if (parent >= 0 && parent < old_Ne && blocked_wall_parents.count(parent)) {
-          for (int i = 0; i < 3; ++i) {
-            e2b.erase(ee[i]);
-            rejected_edges.insert(ee[i]);
-          }
-          continue;
-        }
         std::vector<std::pair<double, int>> candidates;
         bool has_requested_candidate = false;
         for (int i = 0; i < 3; i++) {
@@ -1174,54 +1823,10 @@ RefinementMap bisectMarkedElementsImpl(
         for (const auto &[len2, t] : candidates) {
           (void)len2;
           if (rejected_edges.count(ee[t])) continue;
+          // Heuristic blocked-wall-patch deferral is disabled. If a wall split
+          // fails, nearby interior edges are still allowed to compete normally.
           const bool parent_marked =
               parent >= 0 && parent < old_Ne && marked[parent];
-          const bool fallback_requested_split = has_requested_candidate && !parent_marked;
-          const bool edge_touches_blocked_wall_vertex =
-              blocked_wall_vertices.count(ee[t].first) ||
-              blocked_wall_vertices.count(ee[t].second);
-          if (edge_touches_blocked_wall_vertex && !edgeIsWallBoundary(ee[t])) {
-            e2b.erase(ee[t]);
-            rejected_edges.insert(ee[t]);
-            if (ppartner.count(ee[t])) {
-              e2b.erase(ppartner[ee[t]]);
-              rejected_edges.insert(ppartner[ee[t]]);
-            }
-            std::cerr << "    warning: skipped refinement on interior edge ("
-                      << ee[t].first << ", " << ee[t].second
-                      << ") because split touches rejected wall patch"
-                      << std::endl;
-            if (touches_wall) break;
-            continue;
-          }
-          if (split_edge_blacklist.count(ee[t])) {
-            e2b.erase(ee[t]);
-            rejected_edges.insert(ee[t]);
-            if (ppartner.count(ee[t])) {
-              e2b.erase(ppartner[ee[t]]);
-              rejected_edges.insert(ppartner[ee[t]]);
-            }
-            std::cerr << "    warning: skipped refinement on interior edge ("
-                      << ee[t].first << ", " << ee[t].second
-                      << ") because edge was blacklisted after a rolled-back pass"
-                      << std::endl;
-            if (touches_wall) break;
-            continue;
-          }
-          if (!parent_marked && touches_wall && !edgeIsWallBoundary(ee[t]) &&
-              current_min_angle_deg < 8.0) {
-            e2b.erase(ee[t]);
-            rejected_edges.insert(ee[t]);
-            if (ppartner.count(ee[t])) {
-              e2b.erase(ppartner[ee[t]]);
-              rejected_edges.insert(ppartner[ee[t]]);
-            }
-            std::cerr << "    warning: skipped refinement on interior edge ("
-                      << ee[t].first << ", " << ee[t].second
-                      << ") because low-angle wall-adjacent fallback is disabled"
-                      << std::endl;
-            break;
-          }
 
           if (ppartner.count(ee[t]) && !edge_midpoint.count(ppartner[ee[t]])) {
             const auto partner = ppartner[ee[t]];
@@ -1237,13 +1842,10 @@ RefinementMap bisectMarkedElementsImpl(
           }
 
           bool mid_ok = false;
+          std::vector<std::pair<std::pair<int, int>, int>> created_midpoints;
           int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb, mid_ok);
+          if (mid_ok) noteCreatedMidpoint(created_midpoints, ee[t], vm);
           if (!mid_ok) {
-            if (parent >= 0 && parent < old_Ne && edgeIsWallBoundary(ee[t])) {
-              blocked_wall_parents.insert(parent);
-              blocked_wall_vertices.insert(ee[t].first);
-              blocked_wall_vertices.insert(ee[t].second);
-            }
             e2b.erase(ee[t]);
             rejected_edges.insert(ee[t]);
             if (ppartner.count(ee[t])) {
@@ -1253,40 +1855,196 @@ RefinementMap bisectMarkedElementsImpl(
             if (touches_wall) break;
             continue;
           }
-          if (fallback_requested_split) {
-            const double child_min_angle = std::min(
-                triangleMinAngleDeg(mesh.V[vc], mesh.V[va], mesh.V[vm]),
-                triangleMinAngleDeg(mesh.V[vc], mesh.V[vm], mesh.V[vb]));
-            if (child_min_angle < 6.0) {
+          const int parent_q_order = mesh.E[e].q_order;
+          const Vec2 ra = ref_corner[t];
+          const Vec2 rb = ref_corner[(t + 1) % 3];
+          const Vec2 rc = ref_corner[(t + 2) % 3];
+          const Vec2 rm = 0.5 * (ra + rb);
+          const auto parent_map = [&](const Vec2 &r) {
+            return mesh.evaluateElementGeometry(e, r.x, r.y).x;
+          };
+          const bool selected_edge_is_wall = isWallEdge(ee[t]);
+          const bool use_true_blade_wall_subdivision =
+              parent_q_order == 2 && selected_edge_is_wall &&
+              trueBladeWallSubdivisionEnabled();
+          if (parent_q_order == 2 && !use_true_blade_wall_subdivision) {
+            // For curved-parent refinement, new child corner nodes should lie on
+            // the restricted parent geometry map, not on a straight endpoint
+            // average. This preserves the parent q=2 geometry under bisection.
+            mesh.V[vm] = parent_map(rm);
+          }
+          const bool use_q2_wall_control_subdivision =
+              parent_q_order == 2 && selected_edge_is_wall;
+          const bool rebuild_wall_children_from_blade =
+              use_q2_wall_control_subdivision &&
+              use_true_blade_wall_subdivision;
+          if (use_q2_wall_control_subdivision) {
+            // Cardoze/Moxey-style local control subdivision for wall-selected
+            // q2 elements: split all three parent edges and create the four
+            // child triangles induced by the reference-space midpoint
+            // subdivision. This gives the wall split immediate first-layer
+            // support without relying on fallback heuristics.
+            const int a = v[0];
+            const int b = v[1];
+            const int c = v[2];
+            const Vec2 rA = ref_corner[0];
+            const Vec2 rB = ref_corner[1];
+            const Vec2 rC = ref_corner[2];
+            const Vec2 rAB = 0.5 * (rA + rB);
+            const Vec2 rBC = 0.5 * (rB + rC);
+            const Vec2 rCA = 0.5 * (rC + rA);
+
+            auto getParentMappedMidpoint = [&](int p, int q, const Vec2 &rpq,
+                                               bool &ok_mid) -> int {
+              const auto edge = std::make_pair(std::min(p, q), std::max(p, q));
+              int mid_idx = getMid(p, q, ok_mid);
+              if (!ok_mid) return -1;
+              noteCreatedMidpoint(created_midpoints, edge, mid_idx);
+              if (!(use_true_blade_wall_subdivision && isWallEdge(edge))) {
+                mesh.V[mid_idx] = parent_map(rpq);
+              }
+              return mid_idx;
+            };
+
+            bool ab_ok = false, bc_ok = false, ca_ok = false;
+            const int mAB = getParentMappedMidpoint(a, b, rAB, ab_ok);
+            const int mBC = getParentMappedMidpoint(b, c, rBC, bc_ok);
+            const int mCA = getParentMappedMidpoint(c, a, rCA, ca_ok);
+            if (!ab_ok || !bc_ok || !ca_ok) {
+              rollbackCreatedMidpoints(created_midpoints);
+              if (touches_wall) break;
+              continue;
+            }
+
+            Element trial0;
+            trial0.v[0] = a;   trial0.v[1] = mAB; trial0.v[2] = mCA;
+            Element trial1;
+            trial1.v[0] = mAB; trial1.v[1] = b;   trial1.v[2] = mBC;
+            Element trial2;
+            trial2.v[0] = mCA; trial2.v[1] = mBC; trial2.v[2] = c;
+            Element trial3;
+            trial3.v[0] = mAB; trial3.v[1] = mBC; trial3.v[2] = mCA;
+            const bool local_children_valid =
+                triangleSignedArea(trial0, mesh.V) > 1e-12 &&
+                triangleSignedArea(trial1, mesh.V) > 1e-12 &&
+                triangleSignedArea(trial2, mesh.V) > 1e-12 &&
+                triangleSignedArea(trial3, mesh.V) > 1e-12;
+            if (!local_children_valid) {
+              std::cerr << "    warning: skipped wall subdivision on edge ("
+                        << ee[t].first << ", " << ee[t].second
+                        << ") because a child became non-positive locally"
+                        << std::endl;
+              rollbackCreatedMidpoints(created_midpoints);
               e2b.erase(ee[t]);
               rejected_edges.insert(ee[t]);
               if (ppartner.count(ee[t])) {
                 e2b.erase(ppartner[ee[t]]);
                 rejected_edges.insert(ppartner[ee[t]]);
               }
-              std::cerr << "    warning: skipped refinement on interior edge ("
-                        << ee[t].first << ", " << ee[t].second
-                        << ") because fallback split would create child min angle "
-                        << child_min_angle << " deg" << std::endl;
               if (touches_wall) break;
               continue;
             }
-          }
-          const int parent_q_order = mesh.E[e].q_order;
-          if (parent_q_order == 2) {
-            assignQ2Child(mesh.E[e], vc, va, vm);
+
+            Element c0, c1, c2, c3;
+            assignQ2Child(c0, a,   mAB, mCA, rA,  rAB, rCA, parent_map,
+                          rebuild_wall_children_from_blade);
+            assignQ2Child(c1, mAB, b,   mBC, rAB, rB,  rBC, parent_map,
+                          rebuild_wall_children_from_blade);
+            assignQ2Child(c2, mCA, mBC, c,   rCA, rBC, rC,  parent_map,
+                          rebuild_wall_children_from_blade);
+            assignQ2Child(c3, mAB, mBC, mCA, rAB, rBC, rCA, parent_map,
+                          rebuild_wall_children_from_blade);
+
+            mesh.E[e] = std::move(c0);
+            mesh.E.push_back(std::move(c1));
+            mesh.E.push_back(std::move(c2));
+            mesh.E.push_back(std::move(c3));
+            // Disabled for now: snapping only the new wall q2 midsides to the
+            // true blade is geometrically cleaner, but on the current
+            // coarse-start `test_q2.gri` it destabilizes the solve around the
+            // first accepted wall subdivision because the untouched wall
+            // corner nodes still lie on the older approximate wall shape.
+            //
+            // const int c1_idx = static_cast<int>(mesh.E.size()) - 3;
+            // const int c2_idx = static_cast<int>(mesh.E.size()) - 2;
+            // const int c3_idx = static_cast<int>(mesh.E.size()) - 1;
+            // const std::set<int> patch_elems = {e, c1_idx, c2_idx, c3_idx};
+            // retuneWallPatchQ2Geometry(mesh, patch_elems, old_boundary_edge);
+            rmap.child_to_parent.push_back(parent);
+            rmap.child_to_parent.push_back(parent);
+            rmap.child_to_parent.push_back(parent);
+            std::cerr << "    accepted wall subdivision: e=" << e
+                      << " parent=" << parent
+                      << " edge=(" << ee[t].first << ", " << ee[t].second << ")"
+                      << " source=" << (parent_marked ? "marked" : "fallback")
+                      << " children=4 periodic=" << (ppartner.count(ee[t]) ? "yes" : "no")
+                      << std::endl;
+            e2b.erase(ee[0]);
+            e2b.erase(ee[1]);
+            e2b.erase(ee[2]);
+            changed = true;
+            split_done = true;
+            break;
+          } else if (parent_q_order == 2) {
+            Element trial1;
+            trial1.v[0] = vc; trial1.v[1] = va; trial1.v[2] = vm;
+            Element trial2;
+            trial2.v[0] = vc; trial2.v[1] = vm; trial2.v[2] = vb;
+            const bool local_children_valid =
+                triangleSignedArea(trial1, mesh.V) > 1e-12 &&
+                triangleSignedArea(trial2, mesh.V) > 1e-12;
+            if (!local_children_valid) {
+              std::cerr << "    warning: skipped refinement on edge ("
+                        << ee[t].first << ", " << ee[t].second
+                        << ") because a child became non-positive locally"
+                        << std::endl;
+              rollbackCreatedMidpoints(created_midpoints);
+              e2b.erase(ee[t]);
+              rejected_edges.insert(ee[t]);
+              if (ppartner.count(ee[t])) {
+                e2b.erase(ppartner[ee[t]]);
+                rejected_edges.insert(ppartner[ee[t]]);
+              }
+              if (touches_wall) break;
+              continue;
+            }
+            Element c1;
+            Element c2;
+            assignQ2Child(c1, vc, va, vm, rc, ra, rm, parent_map);
+            assignQ2Child(c2, vc, vm, vb, rc, rm, rb, parent_map);
+            mesh.E[e] = std::move(c1);
+            mesh.E.push_back(std::move(c2));
           } else {
+            Element trial1;
+            trial1.v[0] = vc; trial1.v[1] = va; trial1.v[2] = vm;
+            Element trial2;
+            trial2.v[0] = vc; trial2.v[1] = vm; trial2.v[2] = vb;
+            const bool local_children_valid =
+                triangleSignedArea(trial1, mesh.V) > 1e-12 &&
+                triangleSignedArea(trial2, mesh.V) > 1e-12;
+            if (!local_children_valid) {
+              std::cerr << "    warning: skipped refinement on edge ("
+                        << ee[t].first << ", " << ee[t].second
+                        << ") because a child became non-positive locally"
+                        << std::endl;
+              rollbackCreatedMidpoints(created_midpoints);
+              e2b.erase(ee[t]);
+              rejected_edges.insert(ee[t]);
+              if (ppartner.count(ee[t])) {
+                e2b.erase(ppartner[ee[t]]);
+                rejected_edges.insert(ppartner[ee[t]]);
+              }
+              if (touches_wall) break;
+              continue;
+            }
             mesh.E[e].v[0] = vc; mesh.E[e].v[1] = va; mesh.E[e].v[2] = vm;
             mesh.E[e].q_order = 1;
             mesh.E[e].ho_nodes.clear();
-          }
-          Element c2;
-          if (parent_q_order == 2) {
-            assignQ2Child(c2, vc, vm, vb);
-          } else {
+            Element c2;
             c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
+            mesh.E.push_back(c2);
           }
-          mesh.E.push_back(c2); rmap.child_to_parent.push_back(parent);
+          rmap.child_to_parent.push_back(parent);
           std::cerr << "    accepted split: e=" << e
                     << " parent=" << parent
                     << " edge=(" << ee[t].first << ", " << ee[t].second << ")"
@@ -1294,7 +2052,6 @@ RefinementMap bisectMarkedElementsImpl(
                     << " wall_adjacent=" << (touches_wall ? "yes" : "no")
                     << " periodic=" << (ppartner.count(ee[t]) ? "yes" : "no")
                     << std::endl;
-          accepted_split_edges.insert(ee[t]);
           e2b.erase(ee[t]);
           changed = true;
           split_done = true;
@@ -1318,19 +2075,16 @@ RefinementMap bisectMarkedElementsImpl(
     bool added = false;
     while (fb_cursor < (int)fallback_priority.size() && need > 0) {
       int fe = fallback_priority[fb_cursor++];
-      if (fe >= old_Ne || included[fe] || blocked_wall_parents.count(fe)) continue;
-      included[fe] = true;
-      auto fb_edge = getLE(fe);
+      if (fe >= old_Ne || included[fe]) continue;
+      auto fb_edge = getPreferredRefinementEdge(fe);
       if (old_elem_touches_wall[fe]) {
-        const auto wall_edge = getLongestWallEdge(fe);
-        if (wall_edge.first >= 0) fb_edge = wall_edge;
+        auto preferred_wall = getEncroachedWallEdge(fe);
+        if (preferred_wall.first < 0) preferred_wall = getLongestWallEdge(fe);
+        if (preferred_wall.first >= 0 && rejected_edges.count(preferred_wall)) {
+          continue;
+        }
       }
-      if (split_edge_blacklist.count(fb_edge)) {
-        std::cerr << "    fallback candidate e=" << fe
-                  << " edge=(" << fb_edge.first << ", " << fb_edge.second << ")"
-                  << " skipped: edge blacklisted after rollback" << std::endl;
-        continue;
-      }
+      included[fe] = true;
       std::cerr << "    fallback candidate e=" << fe
                 << " edge=(" << fb_edge.first << ", " << fb_edge.second << ")"
                 << " wall_adjacent=" << (old_elem_touches_wall[fe] ? "yes" : "no")
@@ -1357,9 +2111,9 @@ RefinementMap bisectMarkedElementsImpl(
     }
   }
 
-  if (localRefinementCleanupEnabled()) {
-    improveRefinedLinearMesh(mesh, old_boundary_edge, old_Nv);
-  }
+  // Heuristic local edge-swap cleanup is disabled for now.
+  // applyLocalEdgeSwapCleanup(mesh, old_boundary_edge, old_Nv, old_Ne);
+  smoothRefinedCurvedMesh(mesh, old_boundary_edge, old_Nv);
   rebuildMeshEdgeConnectivity(mesh, old_boundary_edge);
   mesh.appendPeriodicToIE();
   mesh.has_curved_elements = false;
@@ -1369,8 +2123,6 @@ RefinementMap bisectMarkedElementsImpl(
     mesh.has_curved_elements = mesh.has_curved_elements || (e.q_order > 1);
   }
   mesh.computeGeometry();
-  rmap.accepted_split_edges.assign(accepted_split_edges.begin(),
-                                   accepted_split_edges.end());
   return rmap;
 }
 
@@ -1420,15 +2172,14 @@ void setWallGeometryTolerance(double tolerance) {
 }
 
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in) {
-  return bisectMarkedElementsImpl(mesh, marked_in, 2);
+  return bisectMarkedElementsImpl(mesh, marked_in);
 }
 
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in,
                                    const std::vector<int> &fallback_priority,
-                                   int target_adj_splits,
-                                   const std::set<std::pair<int,int>> &split_edge_blacklist) {
-  return bisectMarkedElementsImpl(mesh, marked_in, 2, fallback_priority, target_adj_splits,
-                                  split_edge_blacklist);
+                                   int target_adj_splits) {
+  return bisectMarkedElementsImpl(mesh, marked_in, fallback_priority,
+                                  target_adj_splits);
 }
 
 void printWallRefinementDiagnostics(const Mesh &mesh,
@@ -1608,6 +2359,523 @@ void printWallRefinementDiagnostics(const Mesh &mesh,
               << " opp=" << vopp
               << " status=" << status << std::endl;
   }
+}
+
+bool exactQ2DetJMinimum(const Mesh &mesh, int elem_idx,
+                        CurvedElementDetJMinimum &out) {
+  out = CurvedElementDetJMinimum{};
+  QuadraticDetJPoly poly;
+  if (!fitQ2DetJPolynomial(mesh, elem_idx, poly)) return false;
+
+  considerExactDetJCandidate(mesh, elem_idx, 0.0, 0.0, out);
+  considerExactDetJCandidate(mesh, elem_idx, 1.0, 0.0, out);
+  considerExactDetJCandidate(mesh, elem_idx, 0.0, 1.0, out);
+
+  const double eps = 1e-14;
+  if (std::abs(poly.d) > eps) {
+    considerExactDetJCandidate(mesh, elem_idx, -poly.b / (2.0 * poly.d), 0.0, out);
+  }
+  if (std::abs(poly.f) > eps) {
+    considerExactDetJCandidate(mesh, elem_idx, 0.0, -poly.c / (2.0 * poly.f), out);
+  }
+  const double edge_quad = poly.d - poly.e + poly.f;
+  const double edge_lin = poly.b - poly.c + poly.e - 2.0 * poly.f;
+  if (std::abs(edge_quad) > eps) {
+    const double t = -edge_lin / (2.0 * edge_quad);
+    considerExactDetJCandidate(mesh, elem_idx, t, 1.0 - t, out);
+  }
+
+  const double hdet = 4.0 * poly.d * poly.f - poly.e * poly.e;
+  if (std::abs(hdet) > eps) {
+    const double xi = (-2.0 * poly.f * poly.b + poly.e * poly.c) / hdet;
+    const double eta = (poly.e * poly.b - 2.0 * poly.d * poly.c) / hdet;
+    considerExactDetJCandidate(mesh, elem_idx, xi, eta, out);
+  }
+
+  return out.exact;
+}
+
+struct PatchQualityAssessment {
+  double min_patch_detJ = 0.0;
+  double min_angle_deg = 0.0;
+  double min_quality = 0.0;
+  double score = -std::numeric_limits<double>::infinity();
+};
+
+PatchQualityAssessment assessPatchQuality(const Mesh &mesh,
+                                          const std::set<int> &patch_elems) {
+  PatchQualityAssessment out;
+  out.min_patch_detJ = patchMinimumExactDetJ(mesh, patch_elems);
+  out.min_angle_deg = std::numeric_limits<double>::infinity();
+  out.min_quality = std::numeric_limits<double>::infinity();
+
+  for (int e : patch_elems) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    out.min_angle_deg = std::min(out.min_angle_deg,
+                                 triangleMinAngleDeg(mesh.E[e], mesh.V));
+    out.min_quality = std::min(out.min_quality,
+                               triangleQuality(mesh.E[e], mesh.V));
+  }
+
+  if (!std::isfinite(out.min_angle_deg)) out.min_angle_deg = 0.0;
+  if (!std::isfinite(out.min_quality)) out.min_quality = 0.0;
+
+  const double delta = (out.min_patch_detJ < 0.0)
+                           ? std::sqrt(1e-8 + 0.04 * out.min_patch_detJ * out.min_patch_detJ)
+                           : 1e-4;
+  const double JR = 0.5 * (out.min_patch_detJ +
+                           std::sqrt(out.min_patch_detJ * out.min_patch_detJ +
+                                     4.0 * delta * delta));
+  out.score = 30.0 * out.min_angle_deg
+              + 1200.0 * out.min_quality
+              + 10.0 * std::log(std::max(JR, 1e-12));
+  return out;
+}
+
+bool improvePatchByEdgeSwaps(
+    Mesh &mesh,
+    const std::set<int> &patch_elems,
+    const std::map<std::pair<int, int>, int> &boundary_edge_groups,
+    int max_swaps,
+    const std::function<bool(int)> &is_wall_boundary_vertex) {
+  if (max_swaps <= 0 || patch_elems.empty()) return false;
+
+  const auto periodic_vertices = collectPeriodicVertices(mesh);
+  const auto periodic_edges = collectPeriodicEdgeKeys(mesh);
+  const auto boundary_vertices = collectBoundaryVertices(mesh);
+  bool any_change = false;
+
+  for (int swap_iter = 0; swap_iter < max_swaps; ++swap_iter) {
+    std::map<std::pair<int, int>, std::vector<int>> edge_to_elem;
+    for (int e : patch_elems) {
+      if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+      const auto &elem = mesh.E[e];
+      if (elem.q_order != 1) continue;
+      edge_to_elem[{std::min(elem.v[0], elem.v[1]), std::max(elem.v[0], elem.v[1])}].push_back(e);
+      edge_to_elem[{std::min(elem.v[1], elem.v[2]), std::max(elem.v[1], elem.v[2])}].push_back(e);
+      edge_to_elem[{std::min(elem.v[2], elem.v[0]), std::max(elem.v[2], elem.v[0])}].push_back(e);
+    }
+
+    bool changed = false;
+    for (const auto &[edge, elems] : edge_to_elem) {
+      if (elems.size() != 2) continue;
+      if (boundary_edge_groups.count(edge)) continue;
+      if (periodic_edges.count(edge)) continue;
+
+      const int e0 = elems[0];
+      const int e1 = elems[1];
+      if (patch_elems.count(e0) == 0 || patch_elems.count(e1) == 0) continue;
+      const auto &elem0 = mesh.E[e0];
+      const auto &elem1 = mesh.E[e1];
+      if (elem0.q_order != 1 || elem1.q_order != 1) continue;
+
+      const int a = edge.first;
+      const int b = edge.second;
+      int c = -1;
+      int d = -1;
+      for (int k = 0; k < 3; ++k) {
+        if (elem0.v[k] != a && elem0.v[k] != b) c = elem0.v[k];
+        if (elem1.v[k] != a && elem1.v[k] != b) d = elem1.v[k];
+      }
+      if (c < 0 || d < 0 || c == d) continue;
+
+      if (periodic_vertices.count(a) || periodic_vertices.count(b) ||
+          periodic_vertices.count(c) || periodic_vertices.count(d)) {
+        continue;
+      }
+
+      bool has_nonwall_boundary_vertex = false;
+      for (int v : {a, b, c, d}) {
+        if (boundary_vertices.count(v) && !is_wall_boundary_vertex(v)) {
+          has_nonwall_boundary_vertex = true;
+          break;
+        }
+      }
+      if (has_nonwall_boundary_vertex) continue;
+
+      const auto new_edge = std::make_pair(std::min(c, d), std::max(c, d));
+      if (boundary_edge_groups.count(new_edge)) continue;
+      if (periodic_edges.count(new_edge)) continue;
+      auto edge_it = edge_to_elem.find(new_edge);
+      if (edge_it != edge_to_elem.end() && !edge_it->second.empty()) continue;
+      if (!segmentsIntersect(mesh.V[a], mesh.V[b], mesh.V[c], mesh.V[d], 1e-12)) continue;
+
+      Element swapped0 = makePositiveElement(c, d, a, mesh.V);
+      Element swapped1 = makePositiveElement(d, c, b, mesh.V);
+      const double area0 = triangleSignedArea(swapped0, mesh.V);
+      const double area1 = triangleSignedArea(swapped1, mesh.V);
+      if (!(area0 > 1e-12) || !(area1 > 1e-12)) continue;
+
+      const double old_min_angle = std::min(triangleMinAngleDeg(elem0, mesh.V),
+                                            triangleMinAngleDeg(elem1, mesh.V));
+      const double new_min_angle = std::min(triangleMinAngleDeg(swapped0, mesh.V),
+                                            triangleMinAngleDeg(swapped1, mesh.V));
+      const double old_min_quality = std::min(triangleQuality(elem0, mesh.V),
+                                              triangleQuality(elem1, mesh.V));
+      const double new_min_quality = std::min(triangleQuality(swapped0, mesh.V),
+                                              triangleQuality(swapped1, mesh.V));
+      const double old_score = 30.0 * old_min_angle + 1200.0 * old_min_quality;
+      const double new_score = 30.0 * new_min_angle + 1200.0 * new_min_quality;
+      if (new_score <= old_score + 1e-8) continue;
+
+      mesh.E[e0] = swapped0;
+      mesh.E[e1] = swapped1;
+      changed = true;
+      any_change = true;
+      break;
+    }
+
+    if (!changed) break;
+  }
+
+  return any_change;
+}
+
+bool repairLowQualityCurvedPatch(Mesh &mesh, int elem_idx) {
+  if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) return false;
+
+  std::map<std::pair<int, int>, int> boundary_edge_groups;
+  for (const auto &be : mesh.BE) {
+    boundary_edge_groups[{std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1])}] = be.bIndex;
+  }
+
+  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+  std::vector<std::set<int>> vertex_neighbors(mesh.V.size());
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    const auto &elem = mesh.E[e];
+    for (int k = 0; k < 3; ++k) node_to_elem[elem.v[k]].push_back(e);
+    vertex_neighbors[elem.v[0]].insert(elem.v[1]);
+    vertex_neighbors[elem.v[0]].insert(elem.v[2]);
+    vertex_neighbors[elem.v[1]].insert(elem.v[0]);
+    vertex_neighbors[elem.v[1]].insert(elem.v[2]);
+    vertex_neighbors[elem.v[2]].insert(elem.v[0]);
+    vertex_neighbors[elem.v[2]].insert(elem.v[1]);
+  }
+
+  std::set<int> patch_nodes{
+      mesh.E[elem_idx].v[0],
+      mesh.E[elem_idx].v[1],
+      mesh.E[elem_idx].v[2],
+  };
+  std::set<int> patch_elems{elem_idx};
+  for (int vid : patch_nodes) {
+    for (int e : node_to_elem[vid]) patch_elems.insert(e);
+  }
+  std::vector<int> ring_nodes(patch_nodes.begin(), patch_nodes.end());
+  for (int vid : ring_nodes) {
+    for (int nbr : vertex_neighbors[vid]) patch_nodes.insert(nbr);
+  }
+  for (int vid : patch_nodes) {
+    for (int e : node_to_elem[vid]) patch_elems.insert(e);
+  }
+
+  const auto periodic_vertices = collectPeriodicVertices(mesh);
+  const auto boundary_vertices = collectBoundaryVertices(mesh);
+  auto isWallBoundaryVertex = [&](int vid) {
+    for (int e : node_to_elem[vid]) {
+      const auto &elem = mesh.E[e];
+      const std::pair<int, int> edges[3] = {
+          {std::min(elem.v[0], elem.v[1]), std::max(elem.v[0], elem.v[1])},
+          {std::min(elem.v[1], elem.v[2]), std::max(elem.v[1], elem.v[2])},
+          {std::min(elem.v[2], elem.v[0]), std::max(elem.v[2], elem.v[0])},
+      };
+      for (const auto &edge : edges) {
+        if (edge.first != vid && edge.second != vid) continue;
+        auto it = boundary_edge_groups.find(edge);
+        if (it == boundary_edge_groups.end()) continue;
+        int g = it->second;
+        if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+            lowerCopy(mesh.Bname[g]) == "wall") {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  auto wallNeighborVertices = [&](int vid) {
+    std::vector<int> nbrs;
+    for (int nbr : vertex_neighbors[vid]) {
+      const auto key = std::make_pair(std::min(vid, nbr), std::max(vid, nbr));
+      auto it = boundary_edge_groups.find(key);
+      if (it == boundary_edge_groups.end()) continue;
+      int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        nbrs.push_back(nbr);
+      }
+    }
+    return nbrs;
+  };
+
+  std::vector<int> movable_vertices;
+  for (int vid : patch_nodes) {
+    if (periodic_vertices.count(vid)) continue;
+    if (boundary_vertices.count(vid) && !isWallBoundaryVertex(vid)) continue;
+    movable_vertices.push_back(vid);
+  }
+  if (movable_vertices.empty()) return false;
+
+  retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+  const PatchQualityAssessment initial = assessPatchQuality(mesh, patch_elems);
+  PatchQualityAssessment best = initial;
+  bool any_change = false;
+
+  if (improvePatchByEdgeSwaps(mesh, patch_elems, boundary_edge_groups, 8,
+                              isWallBoundaryVertex)) {
+    retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+    best = assessPatchQuality(mesh, patch_elems);
+    any_change = best.score > initial.score + 1e-8;
+  }
+
+  for (int iter = 0; iter < 6; ++iter) {
+    bool iter_changed = false;
+    for (int vid : movable_vertices) {
+      const Vec2 original = mesh.V[vid];
+      std::vector<Vec2> candidates;
+
+      if (!vertex_neighbors[vid].empty()) {
+        Vec2 avg{0.0, 0.0};
+        for (int nbr : vertex_neighbors[vid]) avg = avg + mesh.V[nbr];
+        avg = avg / static_cast<double>(vertex_neighbors[vid].size());
+
+        if (boundary_vertices.count(vid) && isWallBoundaryVertex(vid)) {
+          auto wn = wallNeighborVertices(vid);
+          if (wn.size() >= 2) {
+            Vec2 arc_mid = original;
+            if (bladeEdgeArcMidpoint(mesh.V[wn[0]], mesh.V[wn[1]], arc_mid)) {
+              candidates.push_back(0.75 * original + 0.25 * arc_mid);
+              candidates.push_back(0.5 * original + 0.5 * arc_mid);
+              candidates.push_back(arc_mid);
+            }
+          }
+          BladeProjection old_proj = projectToBladeSplineDetailed(original);
+          BladeProjection avg_proj = projectToBladeSplineDetailed(avg);
+          if (avg_proj.valid &&
+              (!old_proj.valid || old_proj.branch == avg_proj.branch)) {
+            candidates.push_back(0.75 * original + 0.25 * avg_proj.pt);
+            candidates.push_back(0.5 * original + 0.5 * avg_proj.pt);
+            candidates.push_back(avg_proj.pt);
+          }
+        } else {
+          candidates.push_back(0.75 * original + 0.25 * avg);
+          candidates.push_back(0.5 * original + 0.5 * avg);
+          candidates.push_back(avg);
+        }
+      }
+
+      PatchQualityAssessment best_local = best;
+      Vec2 best_pos = original;
+      for (const Vec2 &candidate : candidates) {
+        std::vector<Vec2> verts_trial = mesh.V;
+        if (!localMovePreservesMesh(mesh, vid, node_to_elem, mesh.V, verts_trial,
+                                    candidate)) {
+          continue;
+        }
+
+        mesh.V[vid] = candidate;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+        const PatchQualityAssessment trial = assessPatchQuality(mesh, patch_elems);
+        if (trial.min_patch_detJ > 0.0 && trial.score > best_local.score + 1e-8) {
+          best_local = trial;
+          best_pos = candidate;
+        }
+        mesh.V[vid] = original;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+      }
+
+      if ((best_pos - original).norm() > 1e-12) {
+        mesh.V[vid] = best_pos;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+        best = best_local;
+        iter_changed = true;
+        any_change = true;
+      }
+    }
+    if (!iter_changed) break;
+  }
+
+  mesh.computeGeometry();
+  if (any_change) {
+    std::cerr << "    local quality repair: seed=" << elem_idx
+              << " patch_elems=" << patch_elems.size()
+              << " min_angle " << initial.min_angle_deg << " -> "
+              << best.min_angle_deg
+              << " | min_quality " << initial.min_quality << " -> "
+              << best.min_quality
+              << " | min_detJ " << initial.min_patch_detJ << " -> "
+              << best.min_patch_detJ << std::endl;
+  }
+  return any_change && best.score > initial.score + 1e-8 &&
+         best.min_patch_detJ > 0.0;
+}
+
+bool repairInvalidCurvedPatch(Mesh &mesh, int elem_idx) {
+  if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) return false;
+  if (mesh.E[elem_idx].q_order != 2) return false;
+
+  std::map<std::pair<int, int>, int> boundary_edge_groups;
+  for (const auto &be : mesh.BE) {
+    boundary_edge_groups[{std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1])}] = be.bIndex;
+  }
+
+  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+  std::vector<std::set<int>> vertex_neighbors(mesh.V.size());
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    const auto &elem = mesh.E[e];
+    for (int k = 0; k < 3; ++k) node_to_elem[elem.v[k]].push_back(e);
+    vertex_neighbors[elem.v[0]].insert(elem.v[1]);
+    vertex_neighbors[elem.v[0]].insert(elem.v[2]);
+    vertex_neighbors[elem.v[1]].insert(elem.v[0]);
+    vertex_neighbors[elem.v[1]].insert(elem.v[2]);
+    vertex_neighbors[elem.v[2]].insert(elem.v[0]);
+    vertex_neighbors[elem.v[2]].insert(elem.v[1]);
+  }
+
+  std::set<int> patch_nodes{
+      mesh.E[elem_idx].v[0],
+      mesh.E[elem_idx].v[1],
+      mesh.E[elem_idx].v[2],
+  };
+  std::set<int> patch_elems{elem_idx};
+  for (int vid : patch_nodes) {
+    for (int e : node_to_elem[vid]) patch_elems.insert(e);
+  }
+  std::vector<int> ring_nodes(patch_nodes.begin(), patch_nodes.end());
+  for (int vid : ring_nodes) {
+    for (int nbr : vertex_neighbors[vid]) patch_nodes.insert(nbr);
+  }
+  for (int vid : patch_nodes) {
+    for (int e : node_to_elem[vid]) patch_elems.insert(e);
+  }
+
+  const auto periodic_vertices = collectPeriodicVertices(mesh);
+  const auto boundary_vertices = collectBoundaryVertices(mesh);
+  auto isWallBoundaryVertex = [&](int vid) {
+    for (int e : node_to_elem[vid]) {
+      const auto &elem = mesh.E[e];
+      const std::pair<int, int> edges[3] = {
+          {std::min(elem.v[0], elem.v[1]), std::max(elem.v[0], elem.v[1])},
+          {std::min(elem.v[1], elem.v[2]), std::max(elem.v[1], elem.v[2])},
+          {std::min(elem.v[2], elem.v[0]), std::max(elem.v[2], elem.v[0])},
+      };
+      for (const auto &edge : edges) {
+        if (edge.first != vid && edge.second != vid) continue;
+        auto it = boundary_edge_groups.find(edge);
+        if (it == boundary_edge_groups.end()) continue;
+        int g = it->second;
+        if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+            lowerCopy(mesh.Bname[g]) == "wall") {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  auto wallNeighborVertices = [&](int vid) {
+    std::vector<int> nbrs;
+    for (int nbr : vertex_neighbors[vid]) {
+      const auto key = std::make_pair(std::min(vid, nbr), std::max(vid, nbr));
+      auto it = boundary_edge_groups.find(key);
+      if (it == boundary_edge_groups.end()) continue;
+      int g = it->second;
+      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+          lowerCopy(mesh.Bname[g]) == "wall") {
+        nbrs.push_back(nbr);
+      }
+    }
+    return nbrs;
+  };
+
+  std::vector<int> movable_vertices;
+  for (int vid : patch_nodes) {
+    if (periodic_vertices.count(vid)) continue;
+    if (boundary_vertices.count(vid) && !isWallBoundaryVertex(vid)) continue;
+    movable_vertices.push_back(vid);
+  }
+  if (movable_vertices.empty()) return false;
+
+  auto patchMetric = [&]() { return patchMinimumExactDetJ(mesh, patch_elems); };
+
+  retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+  double best_patch_detJ = patchMetric();
+  const double initial_patch_detJ = best_patch_detJ;
+  bool any_change = false;
+
+  for (int iter = 0; iter < 6; ++iter) {
+    bool iter_changed = false;
+    for (int vid : movable_vertices) {
+      const Vec2 original = mesh.V[vid];
+      std::vector<Vec2> candidates;
+
+      if (!vertex_neighbors[vid].empty()) {
+        Vec2 avg{0.0, 0.0};
+        for (int nbr : vertex_neighbors[vid]) avg = avg + mesh.V[nbr];
+        avg = avg / static_cast<double>(vertex_neighbors[vid].size());
+
+        if (boundary_vertices.count(vid) && isWallBoundaryVertex(vid)) {
+          auto wn = wallNeighborVertices(vid);
+          if (wn.size() >= 2) {
+            Vec2 arc_mid = original;
+            if (bladeEdgeArcMidpoint(mesh.V[wn[0]], mesh.V[wn[1]], arc_mid)) {
+              candidates.push_back(0.75 * original + 0.25 * arc_mid);
+              candidates.push_back(0.5 * original + 0.5 * arc_mid);
+            }
+          }
+          BladeProjection old_proj = projectToBladeSplineDetailed(original);
+          BladeProjection avg_proj = projectToBladeSplineDetailed(avg);
+          if (avg_proj.valid &&
+              (!old_proj.valid || old_proj.branch == avg_proj.branch)) {
+            candidates.push_back(0.75 * original + 0.25 * avg_proj.pt);
+            candidates.push_back(0.5 * original + 0.5 * avg_proj.pt);
+            candidates.push_back(avg_proj.pt);
+          }
+        } else {
+          candidates.push_back(0.75 * original + 0.25 * avg);
+          candidates.push_back(0.5 * original + 0.5 * avg);
+        }
+      }
+
+      double local_best = best_patch_detJ;
+      Vec2 local_best_pos = original;
+      for (const Vec2 &candidate : candidates) {
+        std::vector<Vec2> verts_trial = mesh.V;
+        if (!localMovePreservesMesh(mesh, vid, node_to_elem, mesh.V, verts_trial, candidate)) {
+          continue;
+        }
+
+        mesh.V[vid] = candidate;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+        const double trial_detJ = patchMetric();
+        if (trial_detJ > local_best + 1e-8) {
+          local_best = trial_detJ;
+          local_best_pos = candidate;
+        }
+        mesh.V[vid] = original;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+      }
+
+      if ((local_best_pos - original).norm() > 1e-12) {
+        mesh.V[vid] = local_best_pos;
+        retunePatchQ2Geometry(mesh, patch_elems, boundary_edge_groups);
+        best_patch_detJ = local_best;
+        iter_changed = true;
+        any_change = true;
+      }
+    }
+    if (!iter_changed) break;
+    if (best_patch_detJ > 0.0) break;
+  }
+
+  mesh.computeGeometry();
+  if (any_change) {
+    std::cerr << "    local curved repair: seed=" << elem_idx
+              << " patch_elems=" << patch_elems.size()
+              << " min_detJ " << initial_patch_detJ
+              << " -> " << best_patch_detJ << std::endl;
+  }
+  return any_change && best_patch_detJ > std::max(initial_patch_detJ, 0.0);
 }
 
 std::vector<std::vector<Vec4>> interpolateSolution(const std::vector<std::vector<Vec4>> &U_old, const RefinementMap &rmap, int ndof) {
