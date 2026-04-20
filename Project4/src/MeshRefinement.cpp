@@ -11,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <array>
 
 namespace {
 
@@ -721,6 +722,10 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
 
   rmap.child_to_parent.resize(old_Ne);
   for(int i=0; i<old_Ne; i++) rmap.child_to_parent[i] = i;
+  std::vector<std::array<int, 3>> old_elem_vertices(old_Ne);
+  for (int i = 0; i < old_Ne; ++i) {
+    old_elem_vertices[i] = {mesh.E[i].v[0], mesh.E[i].v[1], mesh.E[i].v[2]};
+  }
 
   auto getMid = [&](int va, int vb, bool &ok) {
     auto key = std::make_pair(std::min(va,vb), std::max(va,vb));
@@ -884,6 +889,23 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     return false;
   };
 
+  auto edgeIsWallBoundary = [&](const std::pair<int, int> &edge) {
+    auto it = old_boundary_edge.find(edge);
+    if (it == old_boundary_edge.end()) return false;
+    int g = it->second;
+    return g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+           lowerCopy(mesh.Bname[g]) == "wall";
+  };
+
+  std::set<int> wall_boundary_vertices;
+  for (const auto &[edge, g] : old_boundary_edge) {
+    if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
+        lowerCopy(mesh.Bname[g]) == "wall") {
+      wall_boundary_vertices.insert(edge.first);
+      wall_boundary_vertices.insert(edge.second);
+    }
+  }
+
   auto elementAspectRatio = [&](int a, int b, int c) {
     const Vec2 &va = mesh.V[a];
     const Vec2 &vb = mesh.V[b];
@@ -906,6 +928,21 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
   };
 
   std::set<std::pair<int, int>> rejected_edges;
+  std::set<int> blocked_wall_parents;
+  std::set<int> blocked_wall_vertices;
+
+  auto elementTouchesBlockedWallVertex = [&](int a, int b, int c) {
+    return blocked_wall_vertices.count(a) || blocked_wall_vertices.count(b) ||
+           blocked_wall_vertices.count(c);
+  };
+
+  auto oldElementTouchesBlockedWallVertex = [&](int e) {
+    if (e < 0 || e >= old_Ne) return false;
+    const auto &verts = old_elem_vertices[e];
+    return blocked_wall_vertices.count(verts[0]) ||
+           blocked_wall_vertices.count(verts[1]) ||
+           blocked_wall_vertices.count(verts[2]);
+  };
 
   // Track which original cells are "included" (initially marked + any fallback cells
   // added later). Used to count adjoint-driven splits for the fallback stopping criterion.
@@ -924,6 +961,29 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
         std::pair<int,int> ee[3] = {{std::min(v[0],v[1]), std::max(v[0],v[1])}, {std::min(v[1],v[2]), std::max(v[1],v[2])}, {std::min(v[2],v[0]), std::max(v[2],v[0])}};
         const bool touches_wall = elementTouchesWall(v[0], v[1], v[2]);
         const double aspect_ratio = elementAspectRatio(v[0], v[1], v[2]);
+        const int parent = rmap.child_to_parent[e];
+        if (elementTouchesBlockedWallVertex(v[0], v[1], v[2])) {
+          for (int i = 0; i < 3; ++i) {
+            e2b.erase(ee[i]);
+            rejected_edges.insert(ee[i]);
+            if (ppartner.count(ee[i])) {
+              e2b.erase(ppartner[ee[i]]);
+              rejected_edges.insert(ppartner[ee[i]]);
+            }
+          }
+          continue;
+        }
+        if (parent >= 0 && parent < old_Ne && blocked_wall_parents.count(parent)) {
+          for (int i = 0; i < 3; ++i) {
+            e2b.erase(ee[i]);
+            rejected_edges.insert(ee[i]);
+            if (ppartner.count(ee[i])) {
+              e2b.erase(ppartner[ee[i]]);
+              rejected_edges.insert(ppartner[ee[i]]);
+            }
+          }
+          continue;
+        }
         std::vector<std::pair<double, int>> candidates;
         bool has_requested_candidate = false;
         for (int i = 0; i < 3; i++) {
@@ -968,15 +1028,59 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
         for (const auto &[len2, t] : candidates) {
           (void)len2;
           if (rejected_edges.count(ee[t])) continue;
-          const int parent = rmap.child_to_parent[e];
           const bool marked_wall_candidate =
               touches_wall && has_requested_candidate &&
               parent >= 0 && parent < old_Ne && marked[parent];
+          const bool parent_marked =
+              parent >= 0 && parent < old_Ne && marked[parent];
+          const bool edge_touches_wall_boundary_vertex =
+              wall_boundary_vertices.count(ee[t].first) ||
+              wall_boundary_vertices.count(ee[t].second);
+
+          const bool edge_touches_blocked_wall_vertex =
+              blocked_wall_vertices.count(ee[t].first) ||
+              blocked_wall_vertices.count(ee[t].second);
+          if (!parent_marked && edge_touches_blocked_wall_vertex && !edgeIsWallBoundary(ee[t])) {
+            std::cerr << "    warning: skipped refinement on interior edge ("
+                      << ee[t].first << ", " << ee[t].second
+                      << ") because fallback split touches rejected wall patch"
+                      << std::endl;
+            e2b.erase(ee[t]);
+            rejected_edges.insert(ee[t]);
+            if (ppartner.count(ee[t])) {
+              e2b.erase(ppartner[ee[t]]);
+              rejected_edges.insert(ppartner[ee[t]]);
+            }
+            if (touches_wall) break;
+            continue;
+          }
+          if (!parent_marked && edge_touches_wall_boundary_vertex && !edgeIsWallBoundary(ee[t])) {
+            std::cerr << "    warning: skipped refinement on interior edge ("
+                      << ee[t].first << ", " << ee[t].second
+                      << ") because fallback split uses wall-boundary vertex"
+                      << std::endl;
+            e2b.erase(ee[t]);
+            rejected_edges.insert(ee[t]);
+            if (ppartner.count(ee[t])) {
+              e2b.erase(ppartner[ee[t]]);
+              rejected_edges.insert(ppartner[ee[t]]);
+            }
+            if (touches_wall) break;
+            continue;
+          }
 
           if (ppartner.count(ee[t]) && !edge_midpoint.count(ppartner[ee[t]])) {
             const auto partner = ppartner[ee[t]];
             if (!interiorMidpointAllowed(ee[t].first, ee[t].second) ||
                 !interiorMidpointAllowed(partner.first, partner.second)) {
+              if (edgeIsWallBoundary(ee[t])) {
+                blocked_wall_vertices.insert(ee[t].first);
+                blocked_wall_vertices.insert(ee[t].second);
+              }
+              if (edgeIsWallBoundary(partner)) {
+                blocked_wall_vertices.insert(partner.first);
+                blocked_wall_vertices.insert(partner.second);
+              }
               e2b.erase(ee[t]);
               e2b.erase(partner);
               rejected_edges.insert(ee[t]);
@@ -989,6 +1093,11 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
           bool mid_ok = false;
           int va = v[t], vb = v[(t+1)%3], vc = v[(t+2)%3], vm = getMid(va, vb, mid_ok);
           if (!mid_ok) {
+            if (parent >= 0 && parent < old_Ne && edgeIsWallBoundary(ee[t])) {
+              blocked_wall_parents.insert(parent);
+              blocked_wall_vertices.insert(ee[t].first);
+              blocked_wall_vertices.insert(ee[t].second);
+            }
             e2b.erase(ee[t]);
             rejected_edges.insert(ee[t]);
             if (ppartner.count(ee[t])) {
@@ -1013,6 +1122,13 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
             c2.v[0] = vc; c2.v[1] = vm; c2.v[2] = vb; c2.q_order = 1;
           }
           mesh.E.push_back(c2); rmap.child_to_parent.push_back(parent);
+          std::cerr << "    accepted split: e=" << e
+                    << " parent=" << parent
+                    << " edge=(" << ee[t].first << ", " << ee[t].second << ")"
+                    << " source=" << (parent_marked ? "marked" : "fallback")
+                    << " wall_adjacent=" << (touches_wall ? "yes" : "no")
+                    << " periodic=" << (ppartner.count(ee[t]) ? "yes" : "no")
+                    << std::endl;
           e2b.erase(ee[t]);
           changed = true;
           split_done = true;
@@ -1036,7 +1152,8 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     bool added = false;
     while (fb_cursor < (int)fallback_priority.size() && need > 0) {
       int fe = fallback_priority[fb_cursor++];
-      if (fe >= old_Ne || included[fe]) continue;
+      if (fe >= old_Ne || included[fe] || blocked_wall_parents.count(fe) ||
+          oldElementTouchesBlockedWallVertex(fe)) continue;
       included[fe] = true;
       auto fb_edge = getLE(fe);
       std::cerr << "    fallback candidate e=" << fe

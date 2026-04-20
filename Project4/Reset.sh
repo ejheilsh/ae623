@@ -13,7 +13,7 @@
 # ============================================================================
 set -euo pipefail
 
-MESH_INPUT="${1:-test_q2}"
+MESH_INPUT="${1:-test}"
 P_ORDER="${2:-0}"
 PREVIEW=false
 
@@ -51,8 +51,8 @@ FLUX="roe"
 ADAPT_CFL="1.0"
 ADAPT_ITERS="2000000"
 ADAPT_TOL="1e-9"
-ADAPT_CYCLES="400"
-ADAPT_FRACTION="0.001"
+ADAPT_CYCLES="100"
+ADAPT_FRACTION="0.01"
 LATEST_CFL="0.1"
 LATEST_ITERS="100000"
 
@@ -67,7 +67,7 @@ echo "=== Running adjoint adaptation on $GRIDFILE (p=$P_ORDER) ==="
   --adjoint-adapt "$ADAPT_TOL" "$ADAPT_CYCLES" "$ADAPT_FRACTION"
 
 echo "=== Animating adaptation history ==="
-uv run postproc/animate_mesh_adaptation.py "$OUTDIR" "$ADAPT_GIF" --show-blade --show-next-refine
+# uv run postproc/animate_mesh_adaptation.py "$OUTDIR" "$ADAPT_GIF" --show-blade --show-next-refine
 
 if $PREVIEW; then
   echo "=== Previewing animation ==="

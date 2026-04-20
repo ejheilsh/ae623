@@ -38,6 +38,42 @@ struct MeshValidationReport {
   std::vector<std::pair<int, Vec2>> tiny_area_samples;
 };
 
+bool connectivityRegressed(const MeshValidationReport &before,
+                           const MeshValidationReport &after,
+                           std::vector<std::string> &reasons) {
+  if (after.bad_edge_owner_count > before.bad_edge_owner_count) {
+    reasons.push_back("bad edge ownership increased from " +
+                      std::to_string(before.bad_edge_owner_count) + " to " +
+                      std::to_string(after.bad_edge_owner_count));
+  }
+  if (after.orphan_edge_count > before.orphan_edge_count) {
+    reasons.push_back("orphan edges increased from " +
+                      std::to_string(before.orphan_edge_count) + " to " +
+                      std::to_string(after.orphan_edge_count));
+  }
+  if (after.nonmanifold_edge_count > before.nonmanifold_edge_count) {
+    reasons.push_back("nonmanifold edges increased from " +
+                      std::to_string(before.nonmanifold_edge_count) + " to " +
+                      std::to_string(after.nonmanifold_edge_count));
+  }
+  if (after.duplicate_boundary_edge_count > before.duplicate_boundary_edge_count) {
+    reasons.push_back("duplicate boundary edges increased from " +
+                      std::to_string(before.duplicate_boundary_edge_count) + " to " +
+                      std::to_string(after.duplicate_boundary_edge_count));
+  }
+  if (after.invalid_boundary_owner_count > before.invalid_boundary_owner_count) {
+    reasons.push_back("invalid boundary owners increased from " +
+                      std::to_string(before.invalid_boundary_owner_count) + " to " +
+                      std::to_string(after.invalid_boundary_owner_count));
+  }
+  if (after.invalid_interior_owner_count > before.invalid_interior_owner_count) {
+    reasons.push_back("invalid interior owners increased from " +
+                      std::to_string(before.invalid_interior_owner_count) + " to " +
+                      std::to_string(after.invalid_interior_owner_count));
+  }
+  return !reasons.empty();
+}
+
 constexpr std::uint32_t kCompanionMeshHoMagic = 0x484f3031u; // "HO01"
 constexpr std::uint32_t kCompanionMeshPeriodicMagic = 0x50473031u; // "PG01"
 
@@ -811,9 +847,28 @@ int main(int argc, char **argv) {
           }
         }
 
+        const MeshValidationReport pre_refine_report = validateRefinedMesh(solver.mesh);
+        const Mesh mesh_before_refine = solver.mesh;
+        const auto U_before_refine = solver.U;
+        const auto U_dg_before_refine = solver.U_dg;
+
         auto rmap = bisectMarkedElements(solver.mesh, marked, fallback_priority, target_splits);
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
+
+        std::vector<std::string> regression_reasons;
+        if (connectivityRegressed(pre_refine_report, mesh_report, regression_reasons)) {
+          std::cerr << "  Rejecting refinement pass: connectivity regressed." << std::endl;
+          for (const auto &reason : regression_reasons) {
+            std::cerr << "    " << reason << std::endl;
+          }
+          solver.mesh = mesh_before_refine;
+          solver.U = U_before_refine;
+          solver.U_dg = U_dg_before_refine;
+          std::cerr << "  Restored pre-refinement mesh/state; stopping adaptation."
+                    << std::endl;
+          break;
+        }
 
         // Save the newly refined mesh immediately so it can be inspected even
         // if the next primal solve stalls or is interrupted before completion.
