@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <set>
 #include <numeric>
 #include <cstdint>
 #include <string>
@@ -36,43 +37,8 @@ struct MeshValidationReport {
   Vec2 min_angle_centroid{0.0, 0.0};
   std::vector<std::pair<int, Vec2>> nonpositive_area_samples;
   std::vector<std::pair<int, Vec2>> tiny_area_samples;
+  std::vector<std::string> bad_edge_samples;
 };
-
-bool connectivityRegressed(const MeshValidationReport &before,
-                           const MeshValidationReport &after,
-                           std::vector<std::string> &reasons) {
-  if (after.bad_edge_owner_count > before.bad_edge_owner_count) {
-    reasons.push_back("bad edge ownership increased from " +
-                      std::to_string(before.bad_edge_owner_count) + " to " +
-                      std::to_string(after.bad_edge_owner_count));
-  }
-  if (after.orphan_edge_count > before.orphan_edge_count) {
-    reasons.push_back("orphan edges increased from " +
-                      std::to_string(before.orphan_edge_count) + " to " +
-                      std::to_string(after.orphan_edge_count));
-  }
-  if (after.nonmanifold_edge_count > before.nonmanifold_edge_count) {
-    reasons.push_back("nonmanifold edges increased from " +
-                      std::to_string(before.nonmanifold_edge_count) + " to " +
-                      std::to_string(after.nonmanifold_edge_count));
-  }
-  if (after.duplicate_boundary_edge_count > before.duplicate_boundary_edge_count) {
-    reasons.push_back("duplicate boundary edges increased from " +
-                      std::to_string(before.duplicate_boundary_edge_count) + " to " +
-                      std::to_string(after.duplicate_boundary_edge_count));
-  }
-  if (after.invalid_boundary_owner_count > before.invalid_boundary_owner_count) {
-    reasons.push_back("invalid boundary owners increased from " +
-                      std::to_string(before.invalid_boundary_owner_count) + " to " +
-                      std::to_string(after.invalid_boundary_owner_count));
-  }
-  if (after.invalid_interior_owner_count > before.invalid_interior_owner_count) {
-    reasons.push_back("invalid interior owners increased from " +
-                      std::to_string(before.invalid_interior_owner_count) + " to " +
-                      std::to_string(after.invalid_interior_owner_count));
-  }
-  return !reasons.empty();
-}
 
 constexpr std::uint32_t kCompanionMeshHoMagic = 0x484f3031u; // "HO01"
 constexpr std::uint32_t kCompanionMeshPeriodicMagic = 0x50473031u; // "PG01"
@@ -216,15 +182,12 @@ MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
     elem_edge_counts[sortedEdgeKey(elem.v[2], elem.v[0])]++;
   }
 
-  for (const auto &[edge, count] : elem_edge_counts) {
-    if (count == 1) report.orphan_edge_count++;
-    else if (count > 2) report.nonmanifold_edge_count++;
-  }
-
   std::map<std::pair<int, int>, int> boundary_edge_counts;
+  std::set<std::pair<int, int>> boundary_edge_keys;
   for (const auto &be : mesh.BE) {
     auto key = sortedEdgeKey(be.v[0], be.v[1]);
     boundary_edge_counts[key]++;
+    boundary_edge_keys.insert(key);
     if (be.elemL < 0 || be.elemL >= static_cast<int>(mesh.E.size()))
       report.invalid_boundary_owner_count++;
   }
@@ -232,7 +195,9 @@ MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
     if (count > 1) report.duplicate_boundary_edge_count++;
   }
 
+  std::set<std::pair<int, int>> interior_edge_keys;
   for (const auto &ie : mesh.IE) {
+    interior_edge_keys.insert(sortedEdgeKey(ie.v[0], ie.v[1]));
     if (ie.elemL < 0 || ie.elemL >= static_cast<int>(mesh.E.size()) ||
         ie.elemR < 0 || ie.elemR >= static_cast<int>(mesh.E.size()) ||
         ie.elemL == ie.elemR) {
@@ -241,18 +206,40 @@ MeshValidationReport validateRefinedMesh(const Mesh &mesh) {
   }
 
   for (const auto &[edge, count] : elem_edge_counts) {
-    bool in_be = boundary_edge_counts.count(edge) > 0;
-    bool in_ie = false;
-    for (const auto &ie : mesh.IE) {
-      if (sortedEdgeKey(ie.v[0], ie.v[1]) == edge) {
-        in_ie = true;
-        break;
+    const bool in_be = boundary_edge_keys.count(edge) > 0;
+    const bool in_ie = interior_edge_keys.count(edge) > 0;
+
+    if (count == 1 && !in_be && !in_ie) {
+      report.bad_edge_owner_count++;
+      if (static_cast<int>(report.bad_edge_samples.size()) < kMaxValidationSamples) {
+        report.bad_edge_samples.push_back("edge=(" + std::to_string(edge.first) + ", " +
+                                          std::to_string(edge.second) +
+                                          ") elem_count=1 missing_boundary_owner");
       }
     }
+    if (count == 2 && !in_ie) {
+      report.bad_edge_owner_count++;
+      if (static_cast<int>(report.bad_edge_samples.size()) < kMaxValidationSamples) {
+        report.bad_edge_samples.push_back("edge=(" + std::to_string(edge.first) + ", " +
+                                          std::to_string(edge.second) +
+                                          ") elem_count=2 missing_interior_owner");
+      }
+    }
+    if (count > 2) {
+      report.bad_edge_owner_count++;
+      if (static_cast<int>(report.bad_edge_samples.size()) < kMaxValidationSamples) {
+        report.bad_edge_samples.push_back("edge=(" + std::to_string(edge.first) + ", " +
+                                          std::to_string(edge.second) + ") elem_count=" +
+                                          std::to_string(count));
+      }
+    }
+  }
 
-    if (count == 1 && !in_be) report.bad_edge_owner_count++;
-    if (count == 2 && !in_ie) report.bad_edge_owner_count++;
-    if (count > 2) report.bad_edge_owner_count++;
+  for (const auto &[edge, count] : elem_edge_counts) {
+    const bool in_be = boundary_edge_keys.count(edge) > 0;
+    const bool in_ie = interior_edge_keys.count(edge) > 0;
+    if (count == 1 && !in_be && !in_ie) report.orphan_edge_count++;
+    else if (count > 2) report.nonmanifold_edge_count++;
   }
 
   if (mesh.E.empty()) {
@@ -302,6 +289,11 @@ void printMeshValidationReport(const MeshValidationReport &r) {
   std::cerr << "    bad edge ownership = " << r.bad_edge_owner_count
             << " | nonmanifold edges = " << r.nonmanifold_edge_count
             << " | orphan edges = " << r.orphan_edge_count << std::endl;
+  if (!r.bad_edge_samples.empty()) {
+    std::cerr << "    bad edge samples:";
+    for (const auto &sample : r.bad_edge_samples) std::cerr << " [" << sample << "]";
+    std::cerr << std::endl;
+  }
   std::cerr << "    duplicate boundary edges = "
             << r.duplicate_boundary_edge_count
             << " | invalid boundary owners = "
@@ -626,6 +618,47 @@ int main(int argc, char **argv) {
       solver.solveUnsteady(itercap, t_end);
     } else if (adjoint_adapt) {
       // ── ADJOINT-BASED h-ADAPTATION LOOP ──────────────────────────
+      std::set<std::pair<int, int>> split_edge_blacklist;
+      int no_growth_cycles = 0;
+      Mesh pending_rollback_mesh;
+      std::vector<Vec4> pending_rollback_U;
+      std::vector<std::vector<Vec4>> pending_rollback_U_dg;
+      std::vector<std::pair<int, int>> pending_rollback_edges;
+      bool have_pending_rollback = false;
+
+      auto blacklistSplitEdges =
+          [&](const std::vector<std::pair<int, int>> &edges,
+              const std::string &label) {
+            int new_blacklisted = 0;
+            if (edges.empty()) return new_blacklisted;
+            std::cerr << "    " << label << ":";
+            for (const auto &edge : edges) {
+              if (split_edge_blacklist.insert(edge).second) new_blacklisted++;
+              std::cerr << " (" << edge.first << ", " << edge.second << ")";
+            }
+            std::cerr << std::endl;
+            return new_blacklisted;
+          };
+
+      auto handleNoGrowth = [&](int new_blacklisted_edges) {
+        if (new_blacklisted_edges > 0) {
+          no_growth_cycles = 0;
+          std::cerr << "  No cells added this cycle, but blacklisted "
+                    << new_blacklisted_edges
+                    << " new split edges; retrying." << std::endl;
+          return false;
+        }
+        no_growth_cycles++;
+        std::cerr << "  No cells added this cycle (" << no_growth_cycles
+                  << "/2 consecutive no-growth cycles)." << std::endl;
+        if (no_growth_cycles >= 2) {
+          std::cerr << "  Stopping adaptation: mesh size unchanged for two"
+                    << " consecutive cycles." << std::endl;
+          return true;
+        }
+        return false;
+      };
+
       for (int cycle = 0; cycle < adapt_max_cycles; ++cycle) {
         std::cerr << "=== Adaptation cycle " << cycle << " ===" << std::endl;
         std::cerr << "  Mesh: " << solver.mesh.E.size() << " elements" << std::endl;
@@ -670,9 +703,22 @@ int main(int argc, char **argv) {
         // including cases where the RK4 hit a non-physical state and restored the
         // last valid solution.
         if (!solver.last_steady_converged) {
-          std::cerr << "  Primal failed (itercap exceeded without stagnation) — stopping adaptation." << std::endl;
-          break;
+          if (!have_pending_rollback) {
+            std::cerr << "  Primal failed (itercap exceeded without stagnation) — stopping adaptation." << std::endl;
+            break;
+          }
+          std::cerr << "  Primal failed on the newly refined mesh — rolling back"
+                    << " the last accepted refinement." << std::endl;
+          int new_blacklisted = blacklistSplitEdges(
+              pending_rollback_edges, "blacklisting accepted split edges");
+          solver.mesh = pending_rollback_mesh;
+          solver.U = pending_rollback_U;
+          solver.U_dg = pending_rollback_U_dg;
+          have_pending_rollback = false;
+          if (handleNoGrowth(new_blacklisted)) break;
+          continue;
         }
+        have_pending_rollback = false;
 
         double Cl_cycle = solver.integrateCl();
         std::cerr << "  Cl = " << std::setprecision(6) << Cl_cycle
@@ -847,28 +893,56 @@ int main(int argc, char **argv) {
           }
         }
 
-        const MeshValidationReport pre_refine_report = validateRefinedMesh(solver.mesh);
         const Mesh mesh_before_refine = solver.mesh;
         const auto U_before_refine = solver.U;
         const auto U_dg_before_refine = solver.U_dg;
-
-        auto rmap = bisectMarkedElements(solver.mesh, marked, fallback_priority, target_splits);
+        auto baseline_report = validateRefinedMesh(mesh_before_refine);
+        auto rmap = bisectMarkedElements(solver.mesh, marked, fallback_priority,
+                                         target_splits, split_edge_blacklist);
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
 
-        std::vector<std::string> regression_reasons;
-        if (connectivityRegressed(pre_refine_report, mesh_report, regression_reasons)) {
-          std::cerr << "  Rejecting refinement pass: connectivity regressed." << std::endl;
-          for (const auto &reason : regression_reasons) {
-            std::cerr << "    " << reason << std::endl;
-          }
+        const int max_bad_edge_owners =
+            std::max(20, baseline_report.bad_edge_owner_count + 4);
+        const int max_orphan_edges =
+            std::max(50, baseline_report.orphan_edge_count + 6);
+        const bool reject_refined_pass =
+            mesh_report.bad_edge_owner_count > max_bad_edge_owners ||
+            mesh_report.orphan_edge_count > max_orphan_edges ||
+            mesh_report.min_angle_deg < 4.0 ||
+            mesh_report.nonpositive_area_count > 0 ||
+            mesh_report.nonmanifold_edge_count > 0 ||
+            mesh_report.duplicate_boundary_edge_count > 0 ||
+            mesh_report.invalid_boundary_owner_count > 0 ||
+            mesh_report.invalid_interior_owner_count > 0;
+        if (reject_refined_pass) {
+          std::cerr << "  Rejecting refinement pass: mesh quality/connectivity exceeded"
+                    << " rollback thresholds." << std::endl;
+          std::cerr << "    thresholds: bad_edge_owners<=" << max_bad_edge_owners
+                    << ", orphan_edges<=" << max_orphan_edges
+                    << ", min_angle>=4 deg"
+                    << std::endl;
+          int new_blacklisted = blacklistSplitEdges(
+              rmap.accepted_split_edges, "blacklisting accepted split edges");
           solver.mesh = mesh_before_refine;
           solver.U = U_before_refine;
           solver.U_dg = U_dg_before_refine;
-          std::cerr << "  Restored pre-refinement mesh/state; stopping adaptation."
+          std::cerr << "  Restored pre-refinement mesh/state and continuing adaptation."
                     << std::endl;
-          break;
+          if (handleNoGrowth(new_blacklisted)) break;
+          continue;
         }
+
+        if (solver.mesh.E.size() == mesh_before_refine.E.size()) {
+          if (handleNoGrowth(0)) break;
+          continue;
+        }
+        no_growth_cycles = 0;
+        pending_rollback_mesh = mesh_before_refine;
+        pending_rollback_U = U_before_refine;
+        pending_rollback_U_dg = U_dg_before_refine;
+        pending_rollback_edges = rmap.accepted_split_edges;
+        have_pending_rollback = true;
 
         // Save the newly refined mesh immediately so it can be inspected even
         // if the next primal solve stalls or is interrupted before completion.

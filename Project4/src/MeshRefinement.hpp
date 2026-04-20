@@ -3,6 +3,7 @@
 
 #include "Mesh.hpp"
 #include "Vector.hpp"
+#include <set>
 #include <vector>
 
 // Maps new (refined) mesh entities back to the old mesh for solution transfer.
@@ -12,6 +13,8 @@ struct RefinementMap {
   // For each new vertex added at an edge midpoint:
   //   new_vertex_edges[i] = {v0, v1}  the two OLD vertices whose midpoint it is
   std::vector<std::pair<int,int>> new_vertex_edges;
+  // Edge ids whose splits were accepted in the refinement pass.
+  std::vector<std::pair<int,int>> accepted_split_edges;
 };
 
 // Given element-wise error indicators, mark the top `fraction` for refinement.
@@ -37,7 +40,8 @@ RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_i
 // Only one call to the connectivity rebuild ever happens.
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in,
                                    const std::vector<int> &fallback_priority,
-                                   int target_adj_splits);
+                                   int target_adj_splits,
+                                   const std::set<std::pair<int,int>> &split_edge_blacklist);
 
 // Print centroid/status diagnostics for wall-adjacent elements in the current mesh.
 // Intended for debugging why large blade-surface cells are not being split.
