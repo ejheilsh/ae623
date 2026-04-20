@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -688,6 +691,10 @@ int main(int argc, char **argv) {
         double total_error = 0.0;
         for (double e : indicators) total_error += e;
         std::cerr << "  Estimated |delta_Cl| = " << total_error << std::endl;
+        if (!std::isfinite(total_error)) {
+          std::cerr << "  Adjoint produced invalid error indicators — stopping adaptation." << std::endl;
+          break;
+        }
         if (total_error < adjoint_tol && n_ar_marked == 0) {
           std::cerr << "  Converged! Error below tolerance " << adjoint_tol << std::endl;
           break;

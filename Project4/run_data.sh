@@ -61,85 +61,85 @@ find_resume_ic() {
   fi
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. UNIFORM REFINEMENT — p=0 on q=1 meshes (2k, 8k, 32k, 128k)
-# ──────────────────────────────────────────────────────────────────────────────
-echo "================================================================"
-echo "  SECTION 1: Uniform refinement — p=0 on all mesh sizes"
-echo "================================================================"
-
-for grid in 2k 8k 32k; do #128k
-  GRIDFILE="grids/${grid}.gri"
-  MARKER="${OUTDIR}/steady_${grid}_p0_results.bin"
-
-  if [[ ! -f "$GRIDFILE" ]]; then
-    echo "  [WARN] Grid $GRIDFILE not found, skipping"
-    continue
-  fi
-
-  if should_skip "$MARKER"; then continue; fi
-
-  find_resume_ic "${OUTDIR}/steady_${grid}_p0_temp_iter_latest_dg.bin"
-
-  echo "--- Running p=0 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 0 1.0 $FLUX 200000 steady $RESUME_IC \
-    2>&1 | tee "${OUTDIR}/${grid}_p0_run.log"
-  echo ""
-done
-
-# Collect uniform Cl values into a single log for plot_cl_convergence.py
-echo "--- Collecting uniform Cl values ---"
-UNIFORM_LOG="${OUTDIR}/uniform_run.log"
-> "$UNIFORM_LOG"
-for grid in 2k 8k 32k; do #128k
-  LOG="${OUTDIR}/${grid}_p0_run.log"
-  if [[ -f "$LOG" ]]; then
-    cat "$LOG" >> "$UNIFORM_LOG"
-  fi
-done
-echo "  Uniform log: $UNIFORM_LOG"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. HIGHER-ORDER UNIFORM — p=1 and p=2 on 2k, 8k meshes
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 2: Higher-order uniform — p=1, p=2 on 2k and 8k"
-echo "================================================================"
-
-# p=1 runs (CFL=1 is fine, auto-chains from p=0)
-for grid in 2k 8k; do
-  GRIDFILE="grids/${grid}.gri"
-  MARKER="${OUTDIR}/steady_${grid}_p1_results.bin"
-
-  if should_skip "$MARKER"; then continue; fi
-
-  find_resume_ic "${OUTDIR}/steady_${grid}_p1_temp_iter_latest_dg.bin"
-
-  echo "--- Running p=1 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 1 1.0 $FLUX 200000 steady $RESUME_IC \
-    2>&1 | tee "${OUTDIR}/${grid}_p1_run.log"
-  echo ""
-done
-
-# p=2 runs (CFL=10 is stable for p=2, gives 10x speedup)
-for grid in 2k 8k; do
-  GRIDFILE="grids/${grid}.gri"
-  MARKER="${OUTDIR}/steady_${grid}_p2_results.bin"
-
-  if should_skip "$MARKER"; then continue; fi
-
-  find_resume_ic "${OUTDIR}/steady_${grid}_p2_temp_iter_latest_dg.bin"
-
-  echo "--- Running p=2 CFL=10 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 2 10.0 $FLUX 200000 steady $RESUME_IC \
-    2>&1 | tee "${OUTDIR}/${grid}_p2_run.log"
-  echo ""
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. ADJOINT-ADAPTED REFINEMENT — p=0 on base.gri (q=2 curved mesh)
-# ──────────────────────────────────────────────────────────────────────────────
+# # ──────────────────────────────────────────────────────────────────────────────
+# # 1. UNIFORM REFINEMENT — p=0 on q=1 meshes (2k, 8k, 32k, 128k)
+# # ──────────────────────────────────────────────────────────────────────────────
+# echo "================================================================"
+# echo "  SECTION 1: Uniform refinement — p=0 on all mesh sizes"
+# echo "================================================================"
+# 
+# for grid in 2k 8k 32k; do #128k
+#   GRIDFILE="grids/${grid}.gri"
+#   MARKER="${OUTDIR}/steady_${grid}_p0_results.bin"
+# 
+#   if [[ ! -f "$GRIDFILE" ]]; then
+#     echo "  [WARN] Grid $GRIDFILE not found, skipping"
+#     continue
+#   fi
+# 
+#   if should_skip "$MARKER"; then continue; fi
+# 
+#   find_resume_ic "${OUTDIR}/steady_${grid}_p0_temp_iter_latest_dg.bin"
+# 
+#   echo "--- Running p=0 on ${grid} mesh ---"
+#   $SOLVER "$GRIDFILE" 0 1.0 $FLUX 200000 steady $RESUME_IC \
+#     2>&1 | tee "${OUTDIR}/${grid}_p0_run.log"
+#   echo ""
+# done
+# 
+# # Collect uniform Cl values into a single log for plot_cl_convergence.py
+# echo "--- Collecting uniform Cl values ---"
+# UNIFORM_LOG="${OUTDIR}/uniform_run.log"
+# > "$UNIFORM_LOG"
+# for grid in 2k 8k 32k; do #128k
+#   LOG="${OUTDIR}/${grid}_p0_run.log"
+#   if [[ -f "$LOG" ]]; then
+#     cat "$LOG" >> "$UNIFORM_LOG"
+#   fi
+# done
+# echo "  Uniform log: $UNIFORM_LOG"
+# 
+# # ──────────────────────────────────────────────────────────────────────────────
+# # 2. HIGHER-ORDER UNIFORM — p=1 and p=2 on 2k, 8k meshes
+# # ──────────────────────────────────────────────────────────────────────────────
+# echo ""
+# echo "================================================================"
+# echo "  SECTION 2: Higher-order uniform — p=1, p=2 on 2k and 8k"
+# echo "================================================================"
+# 
+# # p=1 runs (CFL=1 is fine, auto-chains from p=0)
+# for grid in 2k 8k; do
+#   GRIDFILE="grids/${grid}.gri"
+#   MARKER="${OUTDIR}/steady_${grid}_p1_results.bin"
+# 
+#   if should_skip "$MARKER"; then continue; fi
+# 
+#   find_resume_ic "${OUTDIR}/steady_${grid}_p1_temp_iter_latest_dg.bin"
+# 
+#   echo "--- Running p=1 on ${grid} mesh ---"
+#   $SOLVER "$GRIDFILE" 1 1.0 $FLUX 200000 steady $RESUME_IC \
+#     2>&1 | tee "${OUTDIR}/${grid}_p1_run.log"
+#   echo ""
+# done
+# 
+# # p=2 runs (CFL=10 is stable for p=2, gives 10x speedup)
+# for grid in 2k 8k; do
+#   GRIDFILE="grids/${grid}.gri"
+#   MARKER="${OUTDIR}/steady_${grid}_p2_results.bin"
+# 
+#   if should_skip "$MARKER"; then continue; fi
+# 
+#   find_resume_ic "${OUTDIR}/steady_${grid}_p2_temp_iter_latest_dg.bin"
+# 
+#   echo "--- Running p=2 CFL=10 on ${grid} mesh ---"
+#   $SOLVER "$GRIDFILE" 2 10.0 $FLUX 200000 steady $RESUME_IC \
+#     2>&1 | tee "${OUTDIR}/${grid}_p2_run.log"
+#   echo ""
+# done
+# 
+# # ──────────────────────────────────────────────────────────────────────────────
+# # 3. ADJOINT-ADAPTED REFINEMENT — p=0 on base.gri (q=2 curved mesh)
+# # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "================================================================"
 echo "  SECTION 3: Adjoint-adapted refinement — p=0 on base.gri"
@@ -149,9 +149,9 @@ ADAPT_MARKER="${OUTDIR}/steady_base_p0_adjoint_indicators_cycle0.bin"
 if should_skip "$ADAPT_MARKER"; then
   echo "  Adjoint adapt data already exists"
 else
-  echo "--- Running adjoint-adapt on base.gri (6 cycles, 25% fraction) ---"
+  echo "--- Running adjoint-adapt on base.gri (9 cycles, 25% fraction) ---"
   $SOLVER grids/base.gri 0 1.0 $FLUX 200000 steady \
-    --adjoint-adapt 1e-4 6 0.25 \
+    --adjoint-adapt 1e-4 9 0.25 \
     2>&1 | tee "${OUTDIR}/adapt_run.log"
   echo ""
 fi

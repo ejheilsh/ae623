@@ -1,7 +1,11 @@
 #include "MeshRefinement.hpp"
+#define _USE_MATH_DEFINES
 #include "spline.h"
 #include <algorithm>
 #include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -829,6 +833,15 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
       if (!mid_ok) {
         e2b.erase(ee[t]);
         continue;
+      }
+      // Ensure periodic partner edge is also marked for splitting.
+      // Without this, conformity-driven splits on periodic edges leave
+      // the partner boundary un-split, creating mismatched periodic pairs.
+      {
+        auto split_key = std::make_pair(std::min(va,vb), std::max(va,vb));
+        if (ppartner.count(split_key) && !edge_midpoint.count(ppartner[split_key])) {
+          e2b.insert(ppartner[split_key]);
+        }
       }
       int parent = rmap.child_to_parent[e];
       const int parent_q_order = mesh.E[e].q_order;
