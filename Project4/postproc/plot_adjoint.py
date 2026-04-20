@@ -32,11 +32,17 @@ def read_indicators(filename):
 
 output_dir = sys.argv[1]
 cycle = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+prefix = sys.argv[3] if len(sys.argv) > 3 else None
 d = Path(output_dir)
 
-psi_file  = sorted(d.glob(f"*adjoint_psi_cycle{cycle}_dg.bin"))[0]
-ind_file  = sorted(d.glob(f"*adjoint_indicators_cycle{cycle}.bin"))[0]
-mesh_file = sorted(d.glob(f"*adjoint_mesh_cycle{cycle}.bin"))[0]
+if prefix:
+    psi_file  = d / f"{prefix}adjoint_psi_cycle{cycle}_dg.bin"
+    ind_file  = d / f"{prefix}adjoint_indicators_cycle{cycle}.bin"
+    mesh_file = d / f"{prefix}adjoint_mesh_cycle{cycle}.bin"
+else:
+    psi_file  = sorted(d.glob(f"*adjoint_psi_cycle{cycle}_dg.bin"))[0]
+    ind_file  = sorted(d.glob(f"*adjoint_indicators_cycle{cycle}.bin"))[0]
+    mesh_file = sorted(d.glob(f"*adjoint_mesh_cycle{cycle}.bin"))[0]
 
 nodes, elements = read_companion_mesh(str(mesh_file))
 psi_dg, p_order, ndof = read_dg_results(str(psi_file))
@@ -77,6 +83,9 @@ fig.colorbar(pc2, ax=ax, label="log10(indicator)")
 ax.set_title("Error Indicators")
 
 plt.tight_layout()
-outname = d / f"adjoint_cycle{cycle}.png"
+if prefix:
+    outname = d / f"{prefix}adjoint_cycle{cycle}.png"
+else:
+    outname = d / f"adjoint_cycle{cycle}.png"
 plt.savefig(outname, dpi=150, bbox_inches="tight")
 print(f"Saved {outname}")

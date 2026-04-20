@@ -220,17 +220,19 @@ echo "================================================================"
 echo "  SECTION 8: Adjoint field + error indicator plots → $DIR_ADJOINT"
 echo "================================================================"
 
-for cycle in 0 1 2 3 4 5 6 7 8 9; do
-  IND="${DATADIR}/steady_base_p0_adjoint_indicators_cycle${cycle}.bin"
-  if [[ ! -f "$IND" ]]; then continue; fi
+for ADAPT_CASE in steady_2k_q3_p0 steady_2k_q3_p1; do
+  PREFIX="${ADAPT_CASE}_"
+  for cycle in 0 1 2 3 4 5 6 7 8 9; do
+    IND="${DATADIR}/${PREFIX}adjoint_indicators_cycle${cycle}.bin"
+    if [[ ! -f "$IND" ]]; then continue; fi
 
-  echo "--- Adjoint cycle ${cycle} ---"
-  # plot_adjoint.py saves to <output_dir>/adjoint_cycle<N>.png
-  # Run it pointing at DATADIR, then copy result to report subfolder
-  "$PYTHON" "$POSTPROC/plot_adjoint.py" "$DATADIR" "$cycle" 2>/dev/null || true
-  if [[ -f "${DATADIR}/adjoint_cycle${cycle}.png" ]]; then
-    cp "${DATADIR}/adjoint_cycle${cycle}.png" "${DIR_ADJOINT}/"
-  fi
+    echo "--- ${ADAPT_CASE} adjoint cycle ${cycle} ---"
+    "$PYTHON" "$POSTPROC/plot_adjoint.py" "$DATADIR" "$cycle" "$PREFIX" 2>/dev/null || true
+    PNGFILE="${DATADIR}/${PREFIX}adjoint_cycle${cycle}.png"
+    if [[ -f "$PNGFILE" ]]; then
+      cp "$PNGFILE" "${DIR_ADJOINT}/"
+    fi
+  done
 done
 
 # ──────────────────────────────────────────────────────────────────────────────

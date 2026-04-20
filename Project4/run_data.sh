@@ -145,7 +145,7 @@ echo "================================================================"
 echo "  SECTION 3: Adjoint-adapted refinement — p=0 on 2k_q3.gri"
 echo "================================================================"
 
-ADAPT_MARKER="${OUTDIR}/steady_2k_q3_p0_adjoint_indicators_cycle0.bin"
+ADAPT_MARKER="${OUTDIR}/steady_2k_q3_p1_adjoint_indicators_cycle0.bin"
 if should_skip "$ADAPT_MARKER"; then
   echo "  Adjoint adapt data already exists"
 else
