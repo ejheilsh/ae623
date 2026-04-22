@@ -9,6 +9,7 @@
 #include <iostream>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <unordered_map>
 
 #ifdef _OPENMP
@@ -1482,6 +1483,93 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
               << std::endl;
   };
 
+  auto update_steady_cell_residuals = [&](const ResidualResult &res,
+                                          double *out_min_rho = nullptr,
+                                          double *out_min_p = nullptr) {
+    double minRho = 1e10;
+    double minP = 1e10;
+    cell_residuals.resize(Ne);
+    for (int i = 0; i < Ne; ++i) {
+      double cell_res = 0.0;
+      for (int j = 0; j < ndof_per_elem; ++j) {
+        const auto &r = res.R[i * ndof_per_elem + j];
+        cell_res += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
+      }
+      cell_residuals[i] = cell_res;
+
+      State s(cellAverage(U_dg[i]), gamma);
+      minRho = std::min(minRho, s.rho());
+      minP = std::min(minP, s.p());
+    }
+    if (out_min_rho) *out_min_rho = minRho;
+    if (out_min_p) *out_min_p = minP;
+  };
+
+  auto print_top_residual_cells = [&](int niter, int top_n = 8) {
+    if (cell_residuals.empty()) return;
+    std::vector<int> order(cell_residuals.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(),
+                     [&](int a, int b) { return cell_residuals[a] > cell_residuals[b]; });
+
+    std::cerr << "Top residual cells at failure (iter " << niter << "):" << std::endl;
+    const int nprint = std::min(top_n, static_cast<int>(order.size()));
+    for (int k = 0; k < nprint; ++k) {
+      const int e = order[k];
+      const State s(cellAverage(U_dg[e]), gamma);
+      const Vec2 c = (e >= 0 && e < static_cast<int>(mesh.centroids.size()))
+                         ? mesh.centroids[e]
+                         : Vec2{0.0, 0.0};
+      std::cerr << "  #" << (k + 1)
+                << " e=" << e
+                << " centroid=(" << c.x << ", " << c.y << ")"
+                << " cell_res=" << cell_residuals[e]
+                << " rho=" << s.rho()
+                << " p=" << s.p()
+                << " q=" << mesh.E[e].q_order
+                << std::endl;
+    }
+  };
+
+  auto save_steady_failure_state = [&](int niter, const char *reason) {
+    std::filesystem::create_directories(steady_output_dir);
+    std::string avg_filename =
+        steady_output_dir + "/" + steady_output_prefix + "failure_latest.bin";
+    saveSnapshot(avg_filename);
+    std::string dg_filename =
+        steady_output_dir + "/" + steady_output_prefix + "failure_latest_dg.bin";
+    saveDGSnapshot(dg_filename);
+
+    std::string residual_filename =
+        steady_output_dir + "/" + steady_output_prefix + "failure_residual.bin";
+    {
+      std::ofstream res_out(residual_filename, std::ios::binary);
+      int Nit = (int)res_history.size();
+      res_out.write((char *)&Nit, sizeof(int));
+      if (Nit > 0) {
+        res_out.write((char *)res_history.data(), sizeof(double) * Nit);
+      }
+    }
+
+    std::string cell_res_filename =
+        steady_output_dir + "/" + steady_output_prefix + "failure_cell_res.bin";
+    {
+      std::ofstream cell_res_out(cell_res_filename, std::ios::binary);
+      int Ne_res = (int)cell_residuals.size();
+      cell_res_out.write((char *)&Ne_res, sizeof(int));
+      if (Ne_res > 0) {
+        cell_res_out.write((char *)cell_residuals.data(), sizeof(double) * Ne_res);
+      }
+    }
+
+    std::cerr << "Saved steady failure snapshot (" << reason << "): "
+              << avg_filename
+              << " | DG: " << dg_filename
+              << " | Residual: " << residual_filename
+              << " | Cell residuals: " << cell_res_filename
+              << std::endl;
+  };
+
   for (int niter = 0; niter < itercap; ++niter) {
     // STEP 4: Compute R(U) once — used for both convergence monitoring and
     //         time advancement (Step 5).  This is Stage 1 of SSP-RK2.
@@ -1492,11 +1580,15 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     for (const auto &r : res.R) {
       Rnorm += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
     }
+    double minRho = 1e10, minP = 1e10;
+    update_steady_cell_residuals(res, &minRho, &minP);
 
     if (!std::isfinite(Rnorm)) {
       last_steady_failed_nonphysical = true;
       std::cerr << "Non-finite residual detected at iteration " << niter
                 << " — aborting steady solve." << std::endl;
+      print_top_residual_cells(niter);
+      save_steady_failure_state(niter, "nonfinite-residual");
       break;
     }
 
@@ -1534,25 +1626,6 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
     }
 
     if (niter % 1000 == 0 || Rnorm < target_residual) {
-      double minRho = 1e10, minP = 1e10;
-      cell_residuals.resize(Ne);
-      
-      // For residual monitoring, check the cell-average (DOF 0 for p=0, or average for p>0)
-      for (int i = 0; i < Ne; ++i) {
-        // Cell residual: sum over all DOFs in the element
-        double cell_res = 0;
-        for (int j = 0; j < ndof_per_elem; ++j) {
-          const auto &r = res.R[i * ndof_per_elem + j];
-          cell_res += std::abs(r[0]) + std::abs(r[1]) + std::abs(r[2]) + std::abs(r[3]);
-        }
-        cell_residuals[i] = cell_res;
-
-        // Check physical state using the true cell average (not DOF 0)
-        State s(cellAverage(U_dg[i]), gamma);
-        minRho = std::min(minRho, s.rho());
-        minP = std::min(minP, s.p());
-      }
-      
       std::cout << "Iter: " << std::setw(6) << niter
                 << " | Residual: " << std::scientific << std::setprecision(6)
                 << Rnorm
@@ -1589,6 +1662,8 @@ void FiniteVolumeSolver::solveSteady(int itercap) {
       std::cerr << "Non-physical state detected at iteration " << niter
                 << " — restoring last valid state and aborting steady solve."
                 << std::endl;
+      print_top_residual_cells(niter);
+      save_steady_failure_state(niter, "nonphysical-update");
       break;
     }
   }

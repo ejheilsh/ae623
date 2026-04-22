@@ -11,6 +11,70 @@
 #include <vector>
 
 namespace {
+using EdgeKey = std::pair<int, int>;
+
+EdgeKey sortedEdgeKey(int a, int b) {
+  return std::make_pair(std::min(a, b), std::max(a, b));
+}
+
+std::vector<PeriodicGroup>
+splitPeriodicGroupsByConnectivity(const std::vector<PeriodicGroup> &groups,
+                                  const std::vector<Vec2> &verts,
+                                  const std::map<EdgeKey, std::vector<int>> &edgeToElems) {
+  std::vector<PeriodicGroup> split_groups;
+  for (const auto &group : groups) {
+    if (group.pairs.empty()) {
+      continue;
+    }
+
+    std::vector<std::pair<int, int>> pairs = group.pairs;
+    for (auto &p : pairs) {
+      if (verts[p.first].y > verts[p.second].y) {
+        std::swap(p.first, p.second);
+      }
+    }
+    std::stable_sort(
+        pairs.begin(), pairs.end(),
+        [&](const std::pair<int, int> &a, const std::pair<int, int> &b) {
+          if (verts[a.first].x != verts[b.first].x) {
+            return verts[a.first].x < verts[b.first].x;
+          }
+          return verts[a.first].y < verts[b.first].y;
+        });
+
+    PeriodicGroup current;
+    current.type = group.type;
+    current.nPairs = 0;
+    current.pairs.push_back(pairs.front());
+
+    auto flush_current = [&]() {
+      if (current.pairs.empty()) {
+        return;
+      }
+      current.nPairs = static_cast<int>(current.pairs.size());
+      split_groups.push_back(current);
+      current = {};
+      current.type = group.type;
+      current.nPairs = 0;
+    };
+
+    for (size_t i = 1; i < pairs.size(); ++i) {
+      const auto &prev = pairs[i - 1];
+      const auto &next = pairs[i];
+      const bool bottom_exists =
+          edgeToElems.count(sortedEdgeKey(prev.first, next.first)) > 0;
+      const bool top_exists =
+          edgeToElems.count(sortedEdgeKey(prev.second, next.second)) > 0;
+      if (!bottom_exists && !top_exists) {
+        flush_current();
+      }
+      current.pairs.push_back(next);
+    }
+    flush_current();
+  }
+  return split_groups;
+}
+
 void getElementGeometryNodes(const Mesh &mesh, const Element &el,
                              std::vector<Vec2> &xnode) {
   static const int perm_q2[] = {0, 2, 5, 1, 4, 3};
@@ -386,31 +450,29 @@ void Mesh::appendPeriodicToIE() {
 
   std::cout << "pairing periodic edges from ordered node pairs..." << std::endl;
 
-  auto sortedEdge = [](int a, int b) {
-    return std::make_pair(std::min(a, b), std::max(a, b));
-  };
-
   // edge -> adjacent element ids from connectivity
-  std::map<std::pair<int, int>, std::vector<int>> edgeToElems;
+  std::map<EdgeKey, std::vector<int>> edgeToElems;
   for (int elem = 0; elem < static_cast<int>(E.size()); ++elem) {
     const int n0 = E[elem].v[0];
     const int n1 = E[elem].v[1];
     const int n2 = E[elem].v[2];
-    edgeToElems[sortedEdge(n0, n1)].push_back(elem);
-    edgeToElems[sortedEdge(n1, n2)].push_back(elem);
-    edgeToElems[sortedEdge(n2, n0)].push_back(elem);
+    edgeToElems[sortedEdgeKey(n0, n1)].push_back(elem);
+    edgeToElems[sortedEdgeKey(n1, n2)].push_back(elem);
+    edgeToElems[sortedEdgeKey(n2, n0)].push_back(elem);
   }
 
+  periodicGroups = splitPeriodicGroupsByConnectivity(periodicGroups, V, edgeToElems);
+
   // Existing IE set to avoid duplicates.
-  std::set<std::pair<int, int>> ieSet;
+  std::set<EdgeKey> ieSet;
   for (const auto &ie : IE) {
-    ieSet.insert(sortedEdge(ie.v[0], ie.v[1]));
+    ieSet.insert(sortedEdgeKey(ie.v[0], ie.v[1]));
   }
 
   // BE lookup so periodic sides can be removed if present.
-  std::map<std::pair<int, int>, std::vector<int>> beKeyToIdx;
+  std::map<EdgeKey, std::vector<int>> beKeyToIdx;
   for (int i = 0; i < static_cast<int>(BE.size()); ++i) {
-    beKeyToIdx[sortedEdge(BE[i].v[0], BE[i].v[1])].push_back(i);
+    beKeyToIdx[sortedEdgeKey(BE[i].v[0], BE[i].v[1])].push_back(i);
   }
 
   std::set<int> removeBEIdx;
@@ -445,8 +507,8 @@ void Mesh::appendPeriodicToIE() {
       const int b2 = pairs[i + 1].first;
       const int t2 = pairs[i + 1].second;
 
-      const auto keyBottom = sortedEdge(b1, b2);
-      const auto keyTop = sortedEdge(t1, t2);
+      const auto keyBottom = sortedEdgeKey(b1, b2);
+      const auto keyTop = sortedEdgeKey(t1, t2);
       expectedCount += 1;
 
       const auto itBottom = edgeToElems.find(keyBottom);

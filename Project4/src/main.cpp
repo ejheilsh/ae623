@@ -119,6 +119,26 @@ void writeCompanionMeshSnapshot(const Mesh &mesh, const std::string &mesh_file) 
   }
 }
 
+std::vector<int> topResidualRepairSeeds(const Mesh &mesh,
+                                        const std::vector<double> &cell_residuals,
+                                        int max_seeds = 6) {
+  std::vector<int> order(cell_residuals.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(),
+                   [&](int a, int b) { return cell_residuals[a] > cell_residuals[b]; });
+
+  std::vector<int> seeds;
+  seeds.reserve(max_seeds);
+  for (int e : order) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    if (!std::isfinite(cell_residuals[e]) || cell_residuals[e] <= 0.0) continue;
+    if (mesh.E[e].q_order < 2) continue;
+    seeds.push_back(e);
+    if (static_cast<int>(seeds.size()) >= max_seeds) break;
+  }
+  return seeds;
+}
+
 std::pair<int, int> sortedEdgeKey(int a, int b) {
   return {std::min(a, b), std::max(a, b)};
 }
@@ -776,6 +796,7 @@ int main(int argc, char **argv) {
       std::vector<Vec4> pending_rollback_U;
       std::vector<std::vector<Vec4>> pending_rollback_U_dg;
       bool have_pending_rollback = false;
+      bool saved_failed_refined_mesh_this_cycle = false;
 
       for (int cycle = 0; cycle < adapt_max_cycles; ++cycle) {
         std::cerr << "=== Adaptation cycle " << cycle << " ===" << std::endl;
@@ -823,8 +844,20 @@ int main(int argc, char **argv) {
         if (!solver.last_steady_converged) {
           bool repaired_and_recovered = false;
           if (have_pending_rollback) {
+            if (!saved_failed_refined_mesh_this_cycle) {
+              std::string failed_mesh_file = output_dir + "/" + file_prefix
+                  + "adjoint_mesh_cycle" + std::to_string(cycle)
+                  + "_failed.bin";
+              writeCompanionMeshSnapshot(solver.mesh, failed_mesh_file);
+              std::cerr << "  Failed refined mesh snapshot saved to "
+                        << failed_mesh_file << std::endl;
+              saved_failed_refined_mesh_this_cycle = true;
+            }
             auto failure_report = validateRefinedMesh(solver.mesh);
             std::vector<int> repair_seeds;
+            auto residual_seeds =
+                topResidualRepairSeeds(solver.mesh, solver.cell_residuals, 6);
+            for (int e : residual_seeds) repair_seeds.push_back(e);
             if (failure_report.worst_quality_elem >= 0)
               repair_seeds.push_back(failure_report.worst_quality_elem);
             if (failure_report.min_angle_elem >= 0 &&
@@ -835,14 +868,26 @@ int main(int argc, char **argv) {
                 failure_report.min_sampled_detJ_elem != failure_report.min_angle_elem)
               repair_seeds.push_back(failure_report.min_sampled_detJ_elem);
 
-            for (int seed_elem : repair_seeds) {
+            std::vector<int> unique_repair_seeds;
+            for (int e : repair_seeds) {
+              if (e < 0) continue;
+              if (std::find(unique_repair_seeds.begin(), unique_repair_seeds.end(), e) !=
+                  unique_repair_seeds.end())
+                continue;
+              unique_repair_seeds.push_back(e);
+            }
+
+            const Mesh mesh_retry_base = solver.mesh;
+            const auto U_retry_base = solver.U;
+            const auto U_dg_retry_base = solver.U_dg;
+            bool any_repaired = false;
+
+            for (int seed_elem : unique_repair_seeds) {
               if (seed_elem < 0) continue;
               std::cerr << "  Primal failed on refined mesh — attempting local"
                         << " curved-patch repair around elem " << seed_elem
-                        << " and retrying once." << std::endl;
-              const Mesh mesh_retry = solver.mesh;
-              const auto U_retry = solver.U;
-              const auto U_dg_retry = solver.U_dg;
+                        << "." << std::endl;
+              const Mesh mesh_before_seed = solver.mesh;
               bool repaired = repairLowQualityCurvedPatch(solver.mesh, seed_elem);
               if (!repaired) {
                 repaired = repairInvalidCurvedPatch(solver.mesh, seed_elem);
@@ -850,7 +895,7 @@ int main(int argc, char **argv) {
               if (!repaired) continue;
 
               auto repaired_report = validateRefinedMesh(solver.mesh);
-              std::cerr << "  Revalidated mesh after primal-failure repair:"
+              std::cerr << "  Revalidated mesh after local repair:"
                         << std::endl;
               printMeshValidationReport(repaired_report);
               bool repaired_invalid =
@@ -862,14 +907,16 @@ int main(int argc, char **argv) {
                   repaired_report.invalid_interior_owner_count > 0;
               if (repaired_invalid) {
                 std::cerr << "  Local repair produced an invalid mesh —"
-                          << " ignoring retry." << std::endl;
-                solver.mesh = mesh_retry;
-                solver.U = U_retry;
-                solver.U_dg = U_dg_retry;
+                          << " discarding that patch move." << std::endl;
+                solver.mesh = mesh_before_seed;
                 continue;
               }
 
-              auto U_dg_save = solver.U_dg;
+              any_repaired = true;
+            }
+
+            if (any_repaired) {
+              auto U_dg_save = U_dg_retry_base;
               solver.initializeDG();
               if ((int)U_dg_save.size() == (int)solver.mesh.E.size()) {
                 solver.U_dg = U_dg_save;
@@ -878,19 +925,20 @@ int main(int argc, char **argv) {
               for (size_t e = 0; e < solver.mesh.E.size(); ++e)
                 solver.U[e] = solver.cellAverage(solver.U_dg[e]);
 
+              std::cerr << "  Retrying primal after cumulative local"
+                        << " curved-patch repairs." << std::endl;
               solver.solveSteady(itercap);
               if (solver.last_steady_converged) {
-                std::cerr << "  Local curved-patch repair recovered the refined"
-                          << " primal solve." << std::endl;
+                std::cerr << "  Cumulative local curved-patch repairs recovered"
+                          << " the refined primal solve." << std::endl;
                 repaired_and_recovered = true;
-                break;
+              } else {
+                std::cerr << "  Retry after cumulative local curved-patch"
+                          << " repairs still failed." << std::endl;
+                solver.mesh = mesh_retry_base;
+                solver.U = U_retry_base;
+                solver.U_dg = U_dg_retry_base;
               }
-
-              std::cerr << "  Retry after local curved-patch repair still failed."
-                        << std::endl;
-              solver.mesh = mesh_retry;
-              solver.U = U_retry;
-              solver.U_dg = U_dg_retry;
             }
           }
           if (!repaired_and_recovered) {
@@ -910,6 +958,7 @@ int main(int argc, char **argv) {
           }
         }
         have_pending_rollback = false;
+        saved_failed_refined_mesh_this_cycle = false;
 
         double Cl_cycle = solver.integrateCl();
         std::cerr << "  Cl = " << std::setprecision(6) << Cl_cycle
@@ -1089,6 +1138,30 @@ int main(int argc, char **argv) {
         const auto U_dg_before_refine = solver.U_dg;
         auto rmap = bisectMarkedElements(solver.mesh, marked, fallback_priority,
                                          target_splits);
+        {
+          std::vector<int> parent_refine_count(Ne_orig, 0);
+          for (int parent : rmap.child_to_parent) {
+            if (parent >= 0 && parent < Ne_orig) {
+              parent_refine_count[parent]++;
+            }
+          }
+          std::vector<bool> refined_parent_mask(Ne_orig, false);
+          for (int e = 0; e < Ne_orig; ++e) {
+            refined_parent_mask[e] = parent_refine_count[e] > 1;
+          }
+          std::string refined_file = output_dir + "/" + file_prefix
+              + "adjoint_refined_cycle" + std::to_string(cycle) + ".bin";
+          std::ofstream refined_out(refined_file, std::ios::binary);
+          int Ne_refined = static_cast<int>(refined_parent_mask.size());
+          refined_out.write((char*)&Ne_refined, sizeof(int));
+          for (bool m : refined_parent_mask) {
+            unsigned char flag = m ? 1 : 0;
+            refined_out.write((char*)&flag, sizeof(unsigned char));
+          }
+          refined_out.close();
+          std::cerr << "  Actual refined-parent cells saved to "
+                    << refined_file << std::endl;
+        }
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
 
