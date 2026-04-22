@@ -10,6 +10,14 @@ from pathlib import Path
 from scipy.optimize import minimize_scalar
 import seaborn as sns
 
+"""
+# Step 1: generate q=1 mesh
+python v2.py                      # -> grids/500_q1.gri (384 cells)
+
+# Step 2: curve wall edges to q=3
+python ..\Project3\curve_mesh.py grids\500_q1.gri --q 3 -o grids\500_q3.gri
+"""
+
 
 dir_base = Path(__file__).resolve().parent
 
@@ -1172,7 +1180,7 @@ def main():
     coarse_smooth_omega = 0.15
 
     # initialize
-    m = mesh_class(label="test", h_bounds=(0.67, 4.15))
+    m = mesh_class(label="500_q1", h_bounds=(0.67, 4.15))
     print(f"\nThere are {len(m.E2N)} cells in the base mesh")
 
     if coarse_smooth_iterations > 0:
@@ -1181,6 +1189,11 @@ def main():
         m.correct_edgehash_for_periodic_boundaries(plot_mode="revised")
         m.populate_geom_matrices()
         print(f"Applied coarse-mesh smoothing: iters={coarse_smooth_iterations}, omega={coarse_smooth_omega}")
+
+    # 1 global refinement: each call subdivides every triangle into 4 (~x4 cells)
+    # base ~96 -> 1 global -> ~384 cells (closest to 500 without overshooting)
+    m.refinement_global()
+    print(f"After global refinement: {len(m.E2N)} cells")
 
     m.write_gri()
     # m.label = "test2"
