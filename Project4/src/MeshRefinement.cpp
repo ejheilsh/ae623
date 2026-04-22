@@ -855,6 +855,70 @@ void setWallGeometryTolerance(double tolerance) {
   meshSmoothingConfig().wall_geom_tol = std::max(0.0, tolerance);
 }
 
+void recurveWallElements(Mesh &mesh) {
+  // Re-apply q=2 curved geometry to all q=1 wall-adjacent elements after
+  // bisection.  Only the high-order (edge-midpoint) nodes are projected onto
+  // the blade spline — corner vertex positions are never moved, so triangle
+  // quality is unaffected.
+  std::set<std::pair<int,int>> wall_edges;
+  for (const auto &be : mesh.BE) {
+    int bIdx = be.bIndex;
+    if (bIdx >= 0 && bIdx < (int)mesh.Bname.size() &&
+        lowerCopy(mesh.Bname[bIdx]) == "wall") {
+      wall_edges.insert({std::min(be.v[0], be.v[1]), std::max(be.v[0], be.v[1])});
+    }
+  }
+  if (wall_edges.empty()) return;
+
+  // Collect q=1 elements that own a wall edge.
+  std::vector<int> wall_elems;
+  for (const auto &be : mesh.BE) {
+    int bIdx = be.bIndex;
+    if (bIdx >= 0 && bIdx < (int)mesh.Bname.size() &&
+        lowerCopy(mesh.Bname[bIdx]) == "wall") {
+      if (mesh.E[be.elemL].q_order == 1)
+        wall_elems.push_back(be.elemL);
+    }
+  }
+  std::sort(wall_elems.begin(), wall_elems.end());
+  wall_elems.erase(std::unique(wall_elems.begin(), wall_elems.end()), wall_elems.end());
+  if (wall_elems.empty()) return;
+
+  // Cache: canonical edge pair -> index of its midpoint node in mesh.V.
+  std::map<std::pair<int,int>, int> mid_cache;
+  auto getMidNode = [&](int va, int vb) -> int {
+    auto key = std::make_pair(std::min(va,vb), std::max(va,vb));
+    auto it = mid_cache.find(key);
+    if (it != mid_cache.end()) return it->second;
+    Vec2 mid = 0.5 * (mesh.V[va] + mesh.V[vb]);
+    if (wall_edges.count(key))
+      mid = projectToBladeSpline(mid); // project only the HO node, not the vertex
+    int vm = (int)mesh.V.size();
+    mesh.V.push_back(mid);
+    mid_cache[key] = vm;
+    return vm;
+  };
+
+  int n_recurved = 0;
+  for (int e : wall_elems) {
+    auto &elem = mesh.E[e];
+    int v0 = elem.v[0], v1 = elem.v[1], v2 = elem.v[2];
+    // ho_nodes layout for q=2: {v0, mid01, v1, mid20, mid12, v2}
+    elem.q_order = 2;
+    elem.ho_nodes = {
+      v0, getMidNode(v0,v1), v1,
+      getMidNode(v2,v0), getMidNode(v1,v2), v2
+    };
+    ++n_recurved;
+  }
+
+  mesh.q_order_global = std::max(mesh.q_order_global, 2);
+  mesh.has_curved_elements = true;
+  mesh.computeGeometry();
+  std::cerr << "  recurveWallElements: upgraded " << n_recurved
+            << " elements to q=2 with blade-projected wall midpoints." << std::endl;
+}
+
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in) {
   return bisectMarkedElementsImpl(mesh, marked_in, 2);
 }

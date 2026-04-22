@@ -1175,69 +1175,34 @@ class mesh_class():
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate q=1 blade cascade mesh")
+    parser.add_argument("--target", type=int, default=1000,
+                        help="Stop refining when element count reaches this (default: 1000)")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Output filename label (default: auto from --target, e.g. 1k)")
+    args = parser.parse_args()
+
+    target = args.target
+    label = args.label or (f"{target // 1000}k" if target >= 1000 else f"{target}")
+
     t_start = time.perf_counter()
-    coarse_smooth_iterations = 80
-    coarse_smooth_omega = 0.15
 
-    # initialize
-    m = mesh_class(label="500_q1", h_bounds=(0.67, 4.15))
-    print(f"\nThere are {len(m.E2N)} cells in the base mesh")
+    m = mesh_class(label=label, h_bounds=(0.67, 4.15))
+    print(f"\nBase mesh: {len(m.E2N)} cells  (target: {target})")
 
-    if coarse_smooth_iterations > 0:
-        m.smooth_cells(iterations=coarse_smooth_iterations, omega=coarse_smooth_omega)
-        m.edgehash()
-        m.correct_edgehash_for_periodic_boundaries(plot_mode="revised")
-        m.populate_geom_matrices()
-        print(f"Applied coarse-mesh smoothing: iters={coarse_smooth_iterations}, omega={coarse_smooth_omega}")
+    for i in range(10):
+        m.refinement_local()
+        n = len(m.E2N)
+        print(f"  Local refinement {i+1}: {n} cells")
+        if n >= target:
+            break
 
-    # 1 global refinement: each call subdivides every triangle into 4 (~x4 cells)
-    # base ~96 -> 1 global -> ~384 cells (closest to 500 without overshooting)
-    m.refinement_global()
-    print(f"After global refinement: {len(m.E2N)} cells")
+    print(f"\nFinal mesh: {len(m.E2N)} cells")
+    t_end = time.perf_counter()
+    print(f"Time: {t_end - t_start:.1f}s")
 
     m.write_gri()
-    # m.label = "test2"
-
-    # m.mesh_verification()
-
-    # # m.visual_mesh(fname="mesh0")
-
-    # # refine locally
-    # for _ in range(7): # 7 for report
-    #     m.refinement_local()
-    #     # m.plot_by_distance(vmin=0, vmax=2)
-    # print(f"There are {len(m.E2N)} cells in the mesh after local refinement")
-    # t_end = time.perf_counter()
-    # print(f"Time to generate locally refined base mesh: {t_end - t_start:.3f} seconds")
-    # # m.visual_mesh(fname="mesh1")
-    # # m.visual_mesh(fname="mesh1_edge_length", color_by="edge_length")
-    # # m.plot_by_distance()
-    # # m.visual_mesh(fname="mesh1_projection", color_by="projections")
-    # print(f"\n local refinement: {len(m.E2N)} cells")
-    # # m.mesh_verification()
-    # m.write_gri()
-    # # m.label = "8k"
-
-    # # # # refine globally afterwards
-    # # for i in range(3): # 3
-    # #     m.refinement_global()
-    # #     # m.plot_by_distance()
-    # #     t_end = time.perf_counter()
-    # #     print(f"Time to get to this point: {t_end - t_start:.3f} seconds")
-    # #     m.write_gri()
-    # #     if i == 0:
-    # #         m.label = "32k"
-    # #     if i == 1:
-    # #         m.label = "128k"
-    # #     # m.visual_mesh(fname=f"mesh{2 + i}")
-    # #     # m.visual_mesh(fname=f"mesh{2+i}_edge_length", color_by="edge_length")
-    # #     # if i == 2: # 2
-    # #     #     m.visual_mesh(fname=f"mesh{2+i}_target", color_by="target_size")
-
-    # #     print(f"\n Global refinement {i+1}: {len(m.E2N)} cells")
-
-
-    # #     # m.mesh_verification()
 
 
 

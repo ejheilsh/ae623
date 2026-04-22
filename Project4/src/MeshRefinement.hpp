@@ -27,6 +27,11 @@ std::vector<bool> markByAspectRatio(const Mesh &mesh,
 void setMeshSmoothingIterations(int iterations);
 void setWallGeometryTolerance(double tolerance);
 
+// After bisection, re-upgrade wall-adjacent elements to q=2 by projecting
+// the wall-edge high-order nodes onto the blade spline.
+// Corner vertex positions are unchanged, so triangle quality is unaffected.
+void recurveWallElements(Mesh &mesh);
+
 // Bisect each marked triangle at its longest edge.
 // Modifies `mesh` in place and returns the parent-child mapping.
 RefinementMap bisectMarkedElements(Mesh &mesh, const std::vector<bool> &marked_in);

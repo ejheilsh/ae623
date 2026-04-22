@@ -765,6 +765,7 @@ int main(int argc, char **argv) {
         }
 
         auto rmap = bisectMarkedElements(solver.mesh, marked);
+        recurveWallElements(solver.mesh);
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
 
