@@ -649,19 +649,6 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     return cur_node_to_elem;
   };
 
-  auto buildCurrentVertexNeighbors = [&]() {
-    std::vector<std::set<int>> cur_vertex_neighbors(mesh.V.size());
-    for (const auto &elem : mesh.E) {
-      cur_vertex_neighbors[elem.v[0]].insert(elem.v[1]);
-      cur_vertex_neighbors[elem.v[0]].insert(elem.v[2]);
-      cur_vertex_neighbors[elem.v[1]].insert(elem.v[0]);
-      cur_vertex_neighbors[elem.v[1]].insert(elem.v[2]);
-      cur_vertex_neighbors[elem.v[2]].insert(elem.v[0]);
-      cur_vertex_neighbors[elem.v[2]].insert(elem.v[1]);
-    }
-    return cur_vertex_neighbors;
-  };
-
   std::set<std::pair<int,int>> e2b;
   for(int e=0; e<old_Ne; e++) if(marked[e]) e2b.insert(getLE(e));
 
@@ -691,64 +678,6 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     Vec2 mid = straight_mid;
     if (old_boundary_edge.count(key)) {
       int g = old_boundary_edge[key];
-      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
-          lowerCopy(mesh.Bname[g]) == "wall") {
-        const Vec2 snapped_mid = projectToBladeSpline(straight_mid);
-        auto eit = edge_to_elem.find(key);
-        const auto cur_node_to_elem = buildCurrentNodeToElem();
-        const auto cur_vertex_neighbors = buildCurrentVertexNeighbors();
-        bool accepted = true;
-        std::map<int, Vec2> repaired_positions;
-
-        if (eit != edge_to_elem.end()) {
-          for (int eadj : eit->second) {
-            const int *ev = mesh.E[eadj].v;
-            int vopp = -1;
-            for (int k = 0; k < 3; ++k) {
-              if (ev[k] != va && ev[k] != vb) {
-                vopp = ev[k];
-                break;
-              }
-            }
-            if (vopp < 0) continue;
-
-            Vec2 vopp_pos = repaired_positions.count(vopp) ? repaired_positions[vopp] : mesh.V[vopp];
-            if (localWallSplitPatchValid(mesh, va, vb, vopp, snapped_mid, vopp_pos,
-                                         cur_node_to_elem)) {
-              continue;
-            }
-
-            Vec2 avg{0.0, 0.0};
-            int count = 0;
-            for (int nbr : cur_vertex_neighbors[vopp]) {
-              avg = avg + (repaired_positions.count(nbr) ? repaired_positions[nbr] : mesh.V[nbr]);
-              count++;
-            }
-            if (count == 0) {
-              accepted = false;
-              break;
-            }
-            avg = avg / static_cast<double>(count);
-            if (!localWallSplitPatchValid(mesh, va, vb, vopp, snapped_mid, avg,
-                                          cur_node_to_elem)) {
-              accepted = false;
-              break;
-            }
-            repaired_positions[vopp] = avg;
-          }
-        }
-
-        if (!accepted) {
-          std::cerr << "    warning: skipped refinement on wall edge (" << va
-                    << ", " << vb
-                    << ") because snap and opposite-node averaging failed"
-                    << std::endl;
-          ok = false;
-          return -1;
-        }
-        for (const auto &[vid, pos] : repaired_positions) mesh.V[vid] = pos;
-        mid = snapped_mid;
-      }
       old_boundary_edge[{std::min(va,vm), std::max(va,vm)}] = g;
       old_boundary_edge[{std::min(vb,vm), std::max(vb,vm)}] = g;
     } else {
@@ -771,13 +700,7 @@ RefinementMap bisectMarkedElementsImpl(Mesh &mesh, const std::vector<bool> &mark
     auto key = std::make_pair(std::min(va, vb), std::max(va, vb));
     if (edge_geom_midpoint_q2.count(key)) return edge_geom_midpoint_q2[key];
     Vec2 mid = 0.5 * (mesh.V[va] + mesh.V[vb]);
-    if (old_boundary_edge.count(key)) {
-      int g = old_boundary_edge[key];
-      if (g >= 0 && g < static_cast<int>(mesh.Bname.size()) &&
-          lowerCopy(mesh.Bname[g]) == "wall") {
-        mid = projectToBladeSpline(mid);
-      }
-    }
+    (void)old_boundary_edge;
     int vm = static_cast<int>(mesh.V.size());
     mesh.V.push_back(mid);
     edge_geom_midpoint_q2[key] = vm;

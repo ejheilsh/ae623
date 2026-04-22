@@ -220,7 +220,7 @@ echo "================================================================"
 echo "  SECTION 8: Adjoint field + error indicator plots → $DIR_ADJOINT"
 echo "================================================================"
 
-for ADAPT_CASE in steady_500_q3_p0 steady_2k_q3_p1 steady_2k_q3_p1; do
+for ADAPT_CASE in steady_500_q3_p1; do
   PREFIX="${ADAPT_CASE}_"
   for cycle in 0 1 2 3; do
     IND="${DATADIR}/${PREFIX}adjoint_indicators_cycle${cycle}.bin"
