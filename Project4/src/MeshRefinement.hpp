@@ -13,6 +13,9 @@ struct RefinementMap {
   // For each new vertex added at an edge midpoint:
   //   new_vertex_edges[i] = {v0, v1}  the two OLD vertices whose midpoint it is
   std::vector<std::pair<int,int>> new_vertex_edges;
+  // parent_split_reason[old_elem] stores a small code explaining why that
+  // parent was actually refined in this pass (0 = not refined).
+  std::vector<unsigned char> parent_split_reason;
 };
 
 struct CurvedElementDetJMinimum {
@@ -65,6 +68,12 @@ bool repairInvalidCurvedPatch(Mesh &mesh, int elem_idx);
 // element. Intended for thin first-layer patches that pass detJ checks but
 // still destabilize the next primal solve.
 bool repairLowQualityCurvedPatch(Mesh &mesh, int elem_idx);
+
+// Try a localized q1 patch cleanup using edge swaps and small interior smoothing.
+// Intended for straight-sided meshes where grading or conformity creates weak
+// transition patches even though the mesh remains valid.
+bool repairLowQualityQ1Patch(Mesh &mesh, int elem_idx,
+                             bool allow_topology_changes = true);
 
 // Transfer the DG solution from the old mesh to the refined mesh.
 // For an element that was not refined, the DOFs are copied directly.

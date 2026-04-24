@@ -191,26 +191,11 @@ def style_axes(ax, label, box=None):
         xmin, xmax, ymin, ymax = box
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
-        x_text = 0.5 * (xmin + xmax)
-        y_text = 17.5 if ymin <= 17.5 <= ymax else ymin + 0.78 * (ymax - ymin)
-    else:
-        xmin, xmax = ax.get_xlim()
-        ymin, ymax = ax.get_ylim()
-        x_text = 0.5 * (xmin + xmax)
-        y_text = ymin + 0.78 * (ymax - ymin)
-    ax.text(
-        x_text,
-        y_text,
-        label,
-        ha="center",
-        va="center",
-        fontsize=18,
-        family="serif",
-    )
 
 
 def plot_single_mesh(ax, mesh, segments, title, box=None, lw=0.8, blade_ref=None,
-                     show_ho_nodes=False, show_ho_corners=False):
+                     show_ho_nodes=False, show_ho_corners=False,
+                     show_wall_nodes=False):
     for seg in segments:
         ax.plot(seg[:, 0], seg[:, 1], color="black", linewidth=lw)
     if blade_ref is not None:
@@ -227,25 +212,27 @@ def plot_single_mesh(ax, mesh, segments, title, box=None, lw=0.8, blade_ref=None
                 edgecolors="none",
                 zorder=4,
             )
-    mesh_wall_nodes = wall_nodes(mesh)
-    ax.scatter(
-        mesh_wall_nodes[:, 0],
-        mesh_wall_nodes[:, 1],
-        s=18,
-        color="magenta",
-        edgecolors="none",
-        zorder=5,
-    )
+    if show_wall_nodes:
+        mesh_wall_nodes = wall_nodes(mesh)
+        ax.scatter(
+            mesh_wall_nodes[:, 0],
+            mesh_wall_nodes[:, 1],
+            s=18,
+            color="magenta",
+            edgecolors="none",
+            zorder=5,
+        )
     style_axes(ax, title, box=box)
 
 
 def save_single_mesh_figure(mesh_path, label, box, outpath, samples_per_edge=25,
                             keep_open=False, blade_ref=None,
-                            show_ho_nodes=False, show_ho_corners=False):
+                            show_ho_nodes=False, show_ho_corners=False,
+                            show_wall_nodes=False):
     mesh = read_gri_mesh(str(mesh_path))
     segments = build_edge_segments(mesh, samples_per_edge=samples_per_edge)
 
-    fig, ax = plt.subplots(1, 1, figsize=(4.5, 4.5))
+    fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5))
     plot_single_mesh(
         ax,
         mesh,
@@ -255,20 +242,22 @@ def save_single_mesh_figure(mesh_path, label, box, outpath, samples_per_edge=25,
         blade_ref=blade_ref,
         show_ho_nodes=show_ho_nodes,
         show_ho_corners=show_ho_corners,
+        show_wall_nodes=show_wall_nodes,
     )
     fig.tight_layout()
-    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    fig.savefig(outpath, dpi=600, bbox_inches="tight")
     if not keep_open:
         plt.close(fig)
 
 
 def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25,
                       keep_open=False, blade_ref=None,
-                      show_ho_nodes=False, show_ho_corners=False):
+                      show_ho_nodes=False, show_ho_corners=False,
+                      show_wall_nodes=False):
     meshes = [read_gri_mesh(str(p)) for p in mesh_paths]
     segments = [build_edge_segments(mesh, samples_per_edge=samples_per_edge) for mesh in meshes]
 
-    fig, axes = plt.subplots(1, len(meshes), figsize=(4.2 * len(meshes), 4.5))
+    fig, axes = plt.subplots(1, len(meshes), figsize=(6.0 * len(meshes), 6.5))
     if len(meshes) == 1:
         axes = [axes]
 
@@ -282,10 +271,11 @@ def comparison_figure(mesh_paths, labels, box, outpath, samples_per_edge=25,
             blade_ref=blade_ref,
             show_ho_nodes=show_ho_nodes,
             show_ho_corners=show_ho_corners,
+            show_wall_nodes=show_wall_nodes,
         )
 
     fig.tight_layout()
-    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    fig.savefig(outpath, dpi=600, bbox_inches="tight")
     if not keep_open:
         plt.close(fig)
 
@@ -312,6 +302,11 @@ def main():
         "--show-ho-corners",
         action="store_true",
         help="When used with --show-ho-nodes, include corner nodes too",
+    )
+    parser.add_argument(
+        "--show-wall-nodes",
+        action="store_true",
+        help="Overlay wall boundary nodes",
     )
     parser.add_argument("--samples-per-edge", type=int, default=31, help="Geometry samples per edge")
     parser.add_argument("--no-show", action="store_true", help="Save figures without opening interactive windows")
@@ -350,6 +345,7 @@ def main():
                 blade_ref=blade_ref,
                 show_ho_nodes=args.show_ho_nodes,
                 show_ho_corners=args.show_ho_corners,
+                show_wall_nodes=args.show_wall_nodes,
             )
             print(f"Saved {outpath}")
 

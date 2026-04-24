@@ -10,7 +10,7 @@
 Create a mesh-adaptation animation from saved adjoint adaptation cycles.
 
 Usage:
-    python postproc/animate_mesh_adaptation.py <data_dir> [output.gif] [--show-blade] [--show-ar-cleanup] [--show-next-refine]
+    python postproc/animate_mesh_adaptation.py <data_dir> [output.gif] [--show-blade] [--show-ar-cleanup] [--show-next-refine] [--show-indicators] [--show-indicators-wall-only]
 """
 
 import argparse
@@ -192,13 +192,32 @@ def build_boundary_groups(mesh, samples_per_edge=21):
             groups[bidx]["segs"].append(sample_edge_segment(elem, nodes, directed_edge, samples_per_edge=samples_per_edge))
     return groups
 
+def build_wall_touching_mask(mesh):
+    bdry_names = mesh["bdry_names"]
+    wall_edges = set()
+    for v0, v1, bidx in mesh["bdry_edges"]:
+        name = bdry_names.get(bidx, "").lower()
+        if "wall" in name or (not name and bidx == 2):
+            wall_edges.add(tuple(sorted((v0, v1))))
+
+    mask = np.zeros(len(mesh["elements"]), dtype=bool)
+    for ei, elem in enumerate(mesh["elements"]):
+        corners = elem["corners"]
+        for edge in ((corners[0], corners[1]), (corners[1], corners[2]), (corners[2], corners[0])):
+            if tuple(sorted(edge)) in wall_edges:
+                mask[ei] = True
+                break
+    return mask
+
 def draw_mesh_axes(ax, fill_polys, edge_segments, groups, blade_ref=None, show_blade=False, add_legend=False,
                    scalar_values=None, scalar_norm=None, scalar_cmap='viridis'):
     if scalar_values is not None and len(scalar_values) == len(fill_polys):
+        cmap = plt.get_cmap(scalar_cmap).copy()
+        cmap.set_bad((1.0, 1.0, 1.0, 0.0))
         pc = PolyCollection(
             fill_polys,
-            array=np.asarray(scalar_values),
-            cmap=scalar_cmap,
+            array=np.ma.asarray(scalar_values),
+            cmap=cmap,
             norm=scalar_norm,
             edgecolors='none',
         )
@@ -257,7 +276,8 @@ def blade_inset_specs(blade_ref):
     return specs
 
 def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_cleanup=False,
-                 show_indicators=False, indicator_norm=None, show_next_refine=False):
+                 show_indicators=False, indicator_norm=None, show_next_refine=False,
+                 show_indicators_wall_only=False):
     mesh_file = glob.glob(os.path.join(data_dir, f"*adjoint_mesh_cycle{cycle}.bin"))[0]
     mesh = read_companion_mesh(mesh_file)
     elements = mesh["elements"]
@@ -271,6 +291,9 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
             candidate = read_indicators(ind_files[0])
             if len(candidate) == len(elements):
                 indicators = np.maximum(np.abs(candidate), 1e-30)
+                if show_indicators_wall_only:
+                    wall_mask = build_wall_touching_mask(mesh)
+                    indicators = np.ma.masked_where(~wall_mask, indicators)
     
     fig = plt.figure(figsize=(26, 13))
     gs = fig.add_gridspec(
@@ -309,31 +332,54 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
                 has_ar_overlay = True
 
     next_refine_mask = None
+    refined_mask = None
     has_next_refine_overlay = False
+    has_refined_overlay = False
     if show_next_refine:
         mark_files = glob.glob(os.path.join(data_dir, f"*adjoint_marked_cycle{cycle}.bin"))
         if mark_files:
             next_refine_mask = read_marked_mask(mark_files[0])
-            if len(next_refine_mask) == len(elements) and np.any(next_refine_mask):
-                marked_verts = [fill_polys[i] for i, is_marked in enumerate(next_refine_mask) if is_marked]
-                mark_pc = PolyCollection(
-                    marked_verts,
+        refined_files = glob.glob(os.path.join(data_dir, f"*adjoint_refined_cycle{cycle}.bin"))
+        if refined_files:
+            refined_mask = read_marked_mask(refined_files[0])
+        if next_refine_mask is not None and len(next_refine_mask) == len(elements):
+            if refined_mask is not None and len(refined_mask) != len(elements):
+                refined_mask = None
+            targeted_only_mask = next_refine_mask.copy()
+            if refined_mask is not None:
+                targeted_only_mask = np.logical_and(next_refine_mask, np.logical_not(refined_mask))
+            if np.any(targeted_only_mask):
+                targeted_verts = [fill_polys[i] for i, is_marked in enumerate(targeted_only_mask) if is_marked]
+                target_pc = PolyCollection(
+                    targeted_verts,
+                    facecolors='gold',
+                    edgecolors='goldenrod',
+                    linewidths=0.7,
+                    alpha=0.45,
+                    label='Targeted Only',
+                )
+                ax.add_collection(target_pc)
+                has_next_refine_overlay = True
+            if refined_mask is not None and np.any(refined_mask):
+                refined_verts = [fill_polys[i] for i, is_marked in enumerate(refined_mask) if is_marked]
+                refine_pc = PolyCollection(
+                    refined_verts,
                     facecolors='royalblue',
                     edgecolors='navy',
                     linewidths=0.7,
                     alpha=0.35,
-                    label='Refine Next',
+                    label='Actually Refined',
                 )
-                ax.add_collection(mark_pc)
-                has_next_refine_overlay = True
+                ax.add_collection(refine_pc)
+                has_refined_overlay = True
 
     title = f"Cycle {cycle} - Elements: {len(elements)}"
     if indicators is not None:
         title += " | Colored by |eps_e|"
     if has_ar_overlay:
         title += " | AR Cleanup Targets"
-    if has_next_refine_overlay:
-        title += " | Next Refine"
+    if has_next_refine_overlay or has_refined_overlay:
+        title += " | Targeted vs Refined"
     ax.set_title(title)
 
     if show_blade and blade_ref:
@@ -353,16 +399,30 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
                 scalar_values=indicators,
                 scalar_norm=indicator_norm,
             )
-            if has_next_refine_overlay and next_refine_mask is not None:
-                marked_verts = [fill_polys[i] for i, is_marked in enumerate(next_refine_mask) if is_marked]
-                mark_pc = PolyCollection(
-                    marked_verts,
-                    facecolors='royalblue',
-                    edgecolors='navy',
-                    linewidths=0.7,
-                    alpha=0.35,
-                )
-                iax.add_collection(mark_pc)
+            if next_refine_mask is not None and len(next_refine_mask) == len(elements):
+                targeted_only_mask = next_refine_mask.copy()
+                if refined_mask is not None and len(refined_mask) == len(elements):
+                    targeted_only_mask = np.logical_and(next_refine_mask, np.logical_not(refined_mask))
+                if np.any(targeted_only_mask):
+                    targeted_verts = [fill_polys[i] for i, is_marked in enumerate(targeted_only_mask) if is_marked]
+                    target_pc = PolyCollection(
+                        targeted_verts,
+                        facecolors='gold',
+                        edgecolors='goldenrod',
+                        linewidths=0.7,
+                        alpha=0.45,
+                    )
+                    iax.add_collection(target_pc)
+                if refined_mask is not None and len(refined_mask) == len(elements) and np.any(refined_mask):
+                    refined_verts = [fill_polys[i] for i, is_marked in enumerate(refined_mask) if is_marked]
+                    refine_pc = PolyCollection(
+                        refined_verts,
+                        facecolors='royalblue',
+                        edgecolors='navy',
+                        linewidths=0.7,
+                        alpha=0.35,
+                    )
+                    iax.add_collection(refine_pc)
             iax.set_xlim(*spec["xlim"])
             iax.set_ylim(*spec["ylim"])
             iax.set_xticks([])
@@ -384,8 +444,11 @@ def render_frame(data_dir, cycle, show_blade=False, blade_ref=None, show_ar_clea
         legend_handles.append(plt.Line2D([0], [0], color='k', linestyle='--', alpha=0.5, linewidth=1.5))
         legend_labels.append('Blade Ref')
     if has_next_refine_overlay:
+        legend_handles.append(plt.Line2D([0], [0], color='goldenrod', linewidth=6, alpha=0.45))
+        legend_labels.append('Targeted, Not Refined')
+    if has_refined_overlay:
         legend_handles.append(plt.Line2D([0], [0], color='royalblue', linewidth=6, alpha=0.35))
-        legend_labels.append('Refine Next')
+        legend_labels.append('Actually Refined')
     ax.legend(legend_handles, legend_labels, loc='upper right')
     if indicators is not None:
         cbar = fig.colorbar(pc, ax=ax, fraction=0.046, pad=0.03)
@@ -405,6 +468,7 @@ def main():
     parser.add_argument("--show-ar-cleanup", action="store_true")
     parser.add_argument("--show-next-refine", action="store_true")
     parser.add_argument("--show-indicators", action="store_true")
+    parser.add_argument("--show-indicators-wall-only", action="store_true")
     args = parser.parse_args()
 
     cycles = find_cycles(args.data_dir)
@@ -460,6 +524,7 @@ def main():
             args.show_indicators,
             indicator_norm,
             args.show_next_refine,
+            args.show_indicators_wall_only,
         )))
     
     frames[0].save(args.output, save_all=True, append_images=frames[1:], duration=200, loop=0)

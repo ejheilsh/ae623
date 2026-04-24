@@ -52,6 +52,10 @@ struct MeshValidationReport {
 constexpr std::uint32_t kCompanionMeshHoMagic = 0x484f3031u; // "HO01"
 constexpr std::uint32_t kCompanionMeshPeriodicMagic = 0x50473031u; // "PG01"
 
+std::pair<int, int> sortedEdgeKey(int a, int b);
+double triangleSignedArea(const Vec2 &a, const Vec2 &b, const Vec2 &c);
+double angleDegBetween(const Vec2 &u, const Vec2 &v);
+
 void writeCompanionMeshSnapshot(const Mesh &mesh, const std::string &mesh_file) {
   std::ofstream m_out(mesh_file, std::ios::binary);
   int Nn = static_cast<int>(mesh.V.size());
@@ -132,11 +136,427 @@ std::vector<int> topResidualRepairSeeds(const Mesh &mesh,
   for (int e : order) {
     if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
     if (!std::isfinite(cell_residuals[e]) || cell_residuals[e] <= 0.0) continue;
-    if (mesh.E[e].q_order < 2) continue;
     seeds.push_back(e);
     if (static_cast<int>(seeds.size()) >= max_seeds) break;
   }
   return seeds;
+}
+
+bool q1ProactiveRepairEnabled() {
+  const char *env = std::getenv("AMR_Q1_PROACTIVE_REPAIR");
+  return env != nullptr && std::string(env) != "0";
+}
+
+bool q1LimitedLinearProlongationEnabled() {
+  const char *env = std::getenv("AMR_Q1_LINEAR_PROLONGATION");
+  return env != nullptr && std::string(env) != "0";
+}
+
+double q1ProactiveRepairMedianAreaRatio() {
+  const char *env = std::getenv("AMR_Q1_PROACTIVE_REPAIR_AREA_RATIO");
+  return env != nullptr ? std::atof(env) : 3.0;
+}
+
+double q1ProactiveRepairMinAngleDeg() {
+  const char *env = std::getenv("AMR_Q1_PROACTIVE_REPAIR_MIN_ANGLE");
+  return env != nullptr ? std::atof(env) : 6.0;
+}
+
+double q1ProactiveRepairMinQuality() {
+  const char *env = std::getenv("AMR_Q1_PROACTIVE_REPAIR_MIN_QUALITY");
+  return env != nullptr ? std::atof(env) : 0.14;
+}
+
+int q1ProactiveRepairMaxSeeds() {
+  const char *env = std::getenv("AMR_Q1_PROACTIVE_REPAIR_MAX_SEEDS");
+  if (env == nullptr) return 10;
+  try {
+    return std::stoi(env);
+  } catch (...) {
+    return 10;
+  }
+}
+
+int q1ProactiveRepairMinElems() {
+  const char *env = std::getenv("AMR_Q1_PROACTIVE_REPAIR_MIN_ELEMS");
+  if (env == nullptr) return 1500;
+  try {
+    return std::stoi(env);
+  } catch (...) {
+    return 1500;
+  }
+}
+
+double q1PreSolveSliverRepairMinAngleDeg() {
+  const char *env = std::getenv("AMR_Q1_SLIVER_REPAIR_MIN_ANGLE");
+  return env != nullptr ? std::atof(env) : 2.5;
+}
+
+double q1PreSolveSliverRepairMinQuality() {
+  const char *env = std::getenv("AMR_Q1_SLIVER_REPAIR_MIN_QUALITY");
+  return env != nullptr ? std::atof(env) : 0.06;
+}
+
+int q1PreSolveTransitionRepairMinElems() {
+  const char *env = std::getenv("AMR_Q1_TRANSITION_REPAIR_MIN_ELEMS");
+  if (env == nullptr) return 2000;
+  try {
+    return std::stoi(env);
+  } catch (...) {
+    return 2000;
+  }
+}
+
+int q1PreSolveTransitionRepairMaxSeeds() {
+  const char *env = std::getenv("AMR_Q1_TRANSITION_REPAIR_MAX_SEEDS");
+  if (env == nullptr) return 6;
+  try {
+    return std::stoi(env);
+  } catch (...) {
+    return 6;
+  }
+}
+
+struct Q1PreSolveRepairCandidate {
+  int elem = -1;
+  double median_area_ratio = 1.0;
+  double max_area_ratio = 1.0;
+  double min_angle_deg = 180.0;
+  double quality = 1.0;
+  double score = 0.0;
+};
+
+std::vector<int> topQ1PreSolveRepairSeeds(const Mesh &mesh,
+                                          const RefinementMap &rmap,
+                                          int max_seeds = 10) {
+  if (mesh.q_order_global > 1 || mesh.E.empty() || max_seeds <= 0) return {};
+  if (static_cast<int>(rmap.child_to_parent.size()) != static_cast<int>(mesh.E.size())) {
+    return {};
+  }
+
+  auto lower_copy = [](std::string s) {
+    for (char &c : s) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+  };
+  std::vector<char> wall_vertex(mesh.V.size(), 0);
+  for (const auto &be : mesh.BE) {
+    const int g = be.bIndex;
+    if (g < 0 || g >= static_cast<int>(mesh.Bname.size())) continue;
+    if (lower_copy(mesh.Bname[g]) != "wall") continue;
+    if (be.v[0] >= 0 && be.v[0] < static_cast<int>(wall_vertex.size()))
+      wall_vertex[be.v[0]] = 1;
+    if (be.v[1] >= 0 && be.v[1] < static_cast<int>(wall_vertex.size()))
+      wall_vertex[be.v[1]] = 1;
+  }
+
+  std::vector<int> parent_refine_count;
+  int max_parent = -1;
+  for (int parent : rmap.child_to_parent) max_parent = std::max(max_parent, parent);
+  if (max_parent < 0) return {};
+  parent_refine_count.assign(max_parent + 1, 0);
+  for (int parent : rmap.child_to_parent) {
+    if (parent >= 0 && parent < static_cast<int>(parent_refine_count.size())) {
+      parent_refine_count[parent]++;
+    }
+  }
+
+  std::set<int> refined_parents;
+  for (int parent = 0; parent < static_cast<int>(parent_refine_count.size()); ++parent) {
+    if (parent_refine_count[parent] > 1) refined_parents.insert(parent);
+  }
+  if (refined_parents.empty()) return {};
+
+  std::vector<std::vector<int>> node_to_elem(mesh.V.size());
+  std::map<std::pair<int, int>, std::vector<int>> edge_to_elem;
+  std::vector<double> areas(mesh.E.size(), 0.0);
+  std::vector<double> min_angles(mesh.E.size(), 180.0);
+  std::vector<double> qualities(mesh.E.size(), 1.0);
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    const auto &elem = mesh.E[e];
+    if (elem.q_order != 1) continue;
+    const Vec2 &a = mesh.V[elem.v[0]];
+    const Vec2 &b = mesh.V[elem.v[1]];
+    const Vec2 &c = mesh.V[elem.v[2]];
+    areas[e] = std::abs(triangleSignedArea(a, b, c));
+    min_angles[e] = std::min({angleDegBetween(b - a, c - a),
+                              angleDegBetween(a - b, c - b),
+                              angleDegBetween(a - c, b - c)});
+    const Vec2 ab = b - a, bc = c - b, ca = a - c;
+    const double l2sum = ab.normSq() + bc.normSq() + ca.normSq();
+    qualities[e] =
+        l2sum > 0.0 ? 4.0 * std::sqrt(3.0) * areas[e] / l2sum : 0.0;
+    for (int k = 0; k < 3; ++k) node_to_elem[elem.v[k]].push_back(e);
+    edge_to_elem[sortedEdgeKey(elem.v[0], elem.v[1])].push_back(e);
+    edge_to_elem[sortedEdgeKey(elem.v[1], elem.v[2])].push_back(e);
+    edge_to_elem[sortedEdgeKey(elem.v[2], elem.v[0])].push_back(e);
+  }
+
+  std::set<int> seed_elems;
+  for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+    if (mesh.E[e].q_order != 1) continue;
+    const int parent = rmap.child_to_parent[e];
+    if (refined_parents.count(parent)) seed_elems.insert(e);
+  }
+  if (seed_elems.empty()) return {};
+
+  std::set<int> candidate_elems = seed_elems;
+  for (int e : seed_elems) {
+    const auto &elem = mesh.E[e];
+    for (int k = 0; k < 3; ++k) {
+      for (int adj : node_to_elem[elem.v[k]]) candidate_elems.insert(adj);
+    }
+  }
+
+  const double ratio_floor = q1ProactiveRepairMedianAreaRatio();
+  const double angle_floor = q1ProactiveRepairMinAngleDeg();
+  const double quality_floor = q1ProactiveRepairMinQuality();
+  std::vector<Q1PreSolveRepairCandidate> candidates;
+  for (int e : candidate_elems) {
+    if (e < 0 || e >= static_cast<int>(mesh.E.size())) continue;
+    const auto &elem = mesh.E[e];
+    if (elem.q_order != 1) continue;
+    bool touches_wall_vertex = false;
+    for (int k = 0; k < 3; ++k) {
+      if (elem.v[k] >= 0 && elem.v[k] < static_cast<int>(wall_vertex.size()) &&
+          wall_vertex[elem.v[k]]) {
+        touches_wall_vertex = true;
+        break;
+      }
+    }
+    if (!touches_wall_vertex) continue;
+
+    std::vector<double> neighbor_areas;
+    const std::pair<int, int> edges[3] = {
+        sortedEdgeKey(elem.v[0], elem.v[1]),
+        sortedEdgeKey(elem.v[1], elem.v[2]),
+        sortedEdgeKey(elem.v[2], elem.v[0]),
+    };
+    for (const auto &edge : edges) {
+      auto it = edge_to_elem.find(edge);
+      if (it == edge_to_elem.end()) continue;
+      for (int nb : it->second) {
+        if (nb == e || nb < 0 || nb >= static_cast<int>(mesh.E.size())) continue;
+        if (mesh.E[nb].q_order != 1) continue;
+        neighbor_areas.push_back(areas[nb]);
+      }
+    }
+    if (neighbor_areas.empty()) continue;
+    std::sort(neighbor_areas.begin(), neighbor_areas.end());
+    const double nb_median =
+        neighbor_areas[neighbor_areas.size() / 2];
+    const double nb_max = neighbor_areas.back();
+    if (!(nb_median > 1e-14) || !(nb_max > 1e-14)) continue;
+
+    const double median_ratio = std::max(areas[e], nb_median) / std::min(areas[e], nb_median);
+    const double max_ratio = std::max(areas[e], nb_max) / std::min(areas[e], nb_max);
+    const bool flagged =
+        median_ratio >= ratio_floor ||
+        min_angles[e] < angle_floor ||
+        qualities[e] < quality_floor;
+    if (!flagged) continue;
+
+    Q1PreSolveRepairCandidate cand;
+    cand.elem = e;
+    cand.median_area_ratio = median_ratio;
+    cand.max_area_ratio = max_ratio;
+    cand.min_angle_deg = min_angles[e];
+    cand.quality = qualities[e];
+    cand.score =
+        8.0 * std::max(0.0, median_ratio - ratio_floor) +
+        1.5 * std::max(0.0, angle_floor - min_angles[e]) +
+        40.0 * std::max(0.0, quality_floor - qualities[e]);
+    candidates.push_back(cand);
+  }
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Q1PreSolveRepairCandidate &a,
+               const Q1PreSolveRepairCandidate &b) {
+              if (a.score != b.score) return a.score > b.score;
+              if (a.median_area_ratio != b.median_area_ratio)
+                return a.median_area_ratio > b.median_area_ratio;
+              if (a.min_angle_deg != b.min_angle_deg)
+                return a.min_angle_deg < b.min_angle_deg;
+              return a.elem < b.elem;
+            });
+
+  std::vector<int> seeds;
+  seeds.reserve(max_seeds);
+  for (const auto &cand : candidates) {
+    seeds.push_back(cand.elem);
+    if (static_cast<int>(seeds.size()) >= max_seeds) break;
+  }
+  return seeds;
+}
+
+std::vector<std::vector<Vec4>> interpolateQ1P0Solution(
+    const Mesh &old_mesh,
+    const Mesh &new_mesh,
+    const std::vector<Vec4> &U_old_avg,
+    const RefinementMap &rmap,
+    double gamma) {
+  std::vector<std::vector<Vec4>> U_new(
+      rmap.child_to_parent.size(), std::vector<Vec4>(1));
+  if (U_old_avg.empty()) return U_new;
+
+  int max_parent = -1;
+  for (int parent : rmap.child_to_parent) max_parent = std::max(max_parent, parent);
+  std::vector<int> parent_refine_count(std::max(0, max_parent + 1), 0);
+  std::vector<std::vector<int>> parent_to_children(std::max(0, max_parent + 1));
+  for (int e = 0; e < static_cast<int>(rmap.child_to_parent.size()); ++e) {
+    const int parent = rmap.child_to_parent[e];
+    if (parent < 0 || parent >= static_cast<int>(parent_refine_count.size())) continue;
+    parent_refine_count[parent]++;
+    parent_to_children[parent].push_back(e);
+  }
+
+  std::map<std::pair<int, int>, std::vector<int>> edge_to_elem;
+  std::vector<std::set<int>> neighbors(old_mesh.E.size());
+  for (int e = 0; e < static_cast<int>(old_mesh.E.size()); ++e) {
+    const auto &elem = old_mesh.E[e];
+    if (elem.q_order != 1) continue;
+    edge_to_elem[sortedEdgeKey(elem.v[0], elem.v[1])].push_back(e);
+    edge_to_elem[sortedEdgeKey(elem.v[1], elem.v[2])].push_back(e);
+    edge_to_elem[sortedEdgeKey(elem.v[2], elem.v[0])].push_back(e);
+  }
+  for (const auto &[edge, elems] : edge_to_elem) {
+    (void)edge;
+    if (elems.size() != 2) continue;
+    neighbors[elems[0]].insert(elems[1]);
+    neighbors[elems[1]].insert(elems[0]);
+  }
+
+  struct GradientFit {
+    Vec4 gx{0.0, 0.0, 0.0, 0.0};
+    Vec4 gy{0.0, 0.0, 0.0, 0.0};
+    Vec4 umin{0.0, 0.0, 0.0, 0.0};
+    Vec4 umax{0.0, 0.0, 0.0, 0.0};
+    bool valid = false;
+  };
+  std::vector<GradientFit> grads(old_mesh.E.size());
+  for (int e = 0; e < static_cast<int>(old_mesh.E.size()); ++e) {
+    if (e >= static_cast<int>(U_old_avg.size()) || old_mesh.E[e].q_order != 1) continue;
+    GradientFit fit;
+    fit.umin = U_old_avg[e];
+    fit.umax = U_old_avg[e];
+    double m_xx = 0.0, m_xy = 0.0, m_yy = 0.0;
+    std::array<double, 4> rhs_x{0.0, 0.0, 0.0, 0.0};
+    std::array<double, 4> rhs_y{0.0, 0.0, 0.0, 0.0};
+    for (int nb : neighbors[e]) {
+      if (nb < 0 || nb >= static_cast<int>(U_old_avg.size())) continue;
+      const Vec2 d = old_mesh.centroids[nb] - old_mesh.centroids[e];
+      const double dist2 = std::max(d.normSq(), 1e-12);
+      const double w = 1.0 / dist2;
+      m_xx += w * d.x * d.x;
+      m_xy += w * d.x * d.y;
+      m_yy += w * d.y * d.y;
+      const Vec4 du = U_old_avg[nb] - U_old_avg[e];
+      for (int k = 0; k < 4; ++k) {
+        rhs_x[k] += w * d.x * du[k];
+        rhs_y[k] += w * d.y * du[k];
+        fit.umin[k] = std::min(fit.umin[k], U_old_avg[nb][k]);
+        fit.umax[k] = std::max(fit.umax[k], U_old_avg[nb][k]);
+      }
+    }
+    const double det = m_xx * m_yy - m_xy * m_xy;
+    if (neighbors[e].size() >= 2 && std::abs(det) > 1e-14) {
+      for (int k = 0; k < 4; ++k) {
+        fit.gx[k] = ( rhs_x[k] * m_yy - rhs_y[k] * m_xy) / det;
+        fit.gy[k] = (-rhs_x[k] * m_xy + rhs_y[k] * m_xx) / det;
+      }
+      fit.valid = true;
+    }
+    grads[e] = fit;
+  }
+
+  auto makePhysical = [&](const Vec4 &parent, Vec4 child) {
+    State s(child, gamma);
+    if (std::isfinite(s.rho()) && std::isfinite(s.p()) &&
+        s.rho() > 1e-8 && s.p() > 1e-8) {
+      return child;
+    }
+    double theta = 0.5;
+    while (theta >= 1e-6) {
+      Vec4 blended = theta * child + (1.0 - theta) * parent;
+      State sb(blended, gamma);
+      if (std::isfinite(sb.rho()) && std::isfinite(sb.p()) &&
+          sb.rho() > 1e-8 && sb.p() > 1e-8) {
+        return blended;
+      }
+      theta *= 0.5;
+    }
+    return parent;
+  };
+
+  for (int e = 0; e < static_cast<int>(U_new.size()); ++e) {
+    const int parent = rmap.child_to_parent[e];
+    if (parent < 0 || parent >= static_cast<int>(U_old_avg.size())) continue;
+    Vec4 value = U_old_avg[parent];
+    if (parent < static_cast<int>(parent_refine_count.size()) &&
+        parent_refine_count[parent] > 1 &&
+        parent < static_cast<int>(grads.size()) &&
+        grads[parent].valid) {
+      const Vec2 d = new_mesh.centroids[e] - old_mesh.centroids[parent];
+      value += grads[parent].gx * d.x + grads[parent].gy * d.y;
+      for (int k = 0; k < 4; ++k) {
+        value[k] = std::max(grads[parent].umin[k],
+                            std::min(grads[parent].umax[k], value[k]));
+      }
+    }
+    U_new[e][0] = value;
+  }
+
+  for (int parent = 0; parent < static_cast<int>(parent_to_children.size()); ++parent) {
+    const auto &children = parent_to_children[parent];
+    if (children.empty()) continue;
+    double total_area = 0.0;
+    Vec4 avg{0.0, 0.0, 0.0, 0.0};
+    for (int child : children) {
+      if (child < 0 || child >= static_cast<int>(new_mesh.areas.size())) continue;
+      total_area += new_mesh.areas[child];
+      avg += U_new[child][0] * new_mesh.areas[child];
+    }
+    if (!(total_area > 0.0) || parent < 0 || parent >= static_cast<int>(U_old_avg.size())) {
+      continue;
+    }
+    avg = avg / total_area;
+    const Vec4 correction = U_old_avg[parent] - avg;
+    for (int child : children) {
+      U_new[child][0] = makePhysical(U_old_avg[parent], U_new[child][0] + correction);
+    }
+  }
+
+  return U_new;
+}
+
+bool transferRefinedSolutionToCurrentMesh(
+    FiniteVolumeSolver &solver,
+    const Mesh &mesh_before_refine,
+    const std::vector<Vec4> &U_before_refine,
+    const std::vector<std::vector<Vec4>> &U_dg_before_refine,
+    const RefinementMap &rmap,
+    const char *context = nullptr) {
+  const bool used_linear_q1 =
+      solver.ndof_per_elem == 1 && solver.mesh.q_order_global <= 1 &&
+      q1LimitedLinearProlongationEnabled();
+  if (used_linear_q1) {
+    solver.U_dg = interpolateQ1P0Solution(
+        mesh_before_refine, solver.mesh, U_before_refine, rmap, solver.gamma);
+    if (context != nullptr) {
+      std::cerr << "  " << context
+                << ": using limited linear p0 prolongation on the refined q1 mesh."
+                << std::endl;
+    }
+  } else {
+    solver.U_dg =
+        interpolateSolution(U_dg_before_refine, rmap, solver.ndof_per_elem);
+  }
+  solver.U.resize(solver.mesh.E.size());
+  for (size_t e = 0; e < solver.mesh.E.size(); ++e) {
+    solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+  }
+  return used_linear_q1;
 }
 
 std::pair<int, int> sortedEdgeKey(int a, int b) {
@@ -795,6 +1215,7 @@ int main(int argc, char **argv) {
       Mesh pending_rollback_mesh;
       std::vector<Vec4> pending_rollback_U;
       std::vector<std::vector<Vec4>> pending_rollback_U_dg;
+      RefinementMap pending_rollback_rmap;
       bool have_pending_rollback = false;
       bool saved_failed_refined_mesh_this_cycle = false;
 
@@ -853,6 +1274,41 @@ int main(int argc, char **argv) {
                         << failed_mesh_file << std::endl;
               saved_failed_refined_mesh_this_cycle = true;
             }
+            const Mesh failed_mesh_base = solver.mesh;
+            const auto U_failed_base = solver.U;
+            const auto U_dg_failed_base = solver.U_dg;
+            const double cfl_failed_base = solver.CFL;
+
+            bool cfl_retry_recovered = false;
+            for (double factor : {0.5, 0.25, 0.125, 0.05, 0.025, 0.01}) {
+              const double trial_cfl = cfl_failed_base * factor;
+              if (!(trial_cfl > 0.0) || trial_cfl >= cfl_failed_base - 1e-14) {
+                continue;
+              }
+              solver.mesh = failed_mesh_base;
+              solver.U = U_failed_base;
+              solver.U_dg = U_dg_failed_base;
+              solver.CFL = trial_cfl;
+              std::cerr << "  Retrying primal on refined mesh with reduced CFL="
+                        << trial_cfl << "." << std::endl;
+              solver.solveSteady(itercap);
+              if (solver.last_steady_converged) {
+                cfl = trial_cfl;
+                std::cerr << "  Reduced-CFL retry recovered the refined primal"
+                          << " solve." << std::endl;
+                repaired_and_recovered = true;
+                cfl_retry_recovered = true;
+                break;
+              }
+            }
+            if (cfl_retry_recovered) {
+              continue;
+            }
+
+            solver.mesh = failed_mesh_base;
+            solver.U = U_failed_base;
+            solver.U_dg = U_dg_failed_base;
+            solver.CFL = cfl_failed_base;
             auto failure_report = validateRefinedMesh(solver.mesh);
             std::vector<int> repair_seeds;
             auto residual_seeds =
@@ -916,28 +1372,52 @@ int main(int argc, char **argv) {
             }
 
             if (any_repaired) {
-              auto U_dg_save = U_dg_retry_base;
               solver.initializeDG();
-              if ((int)U_dg_save.size() == (int)solver.mesh.E.size()) {
-                solver.U_dg = U_dg_save;
+              if (have_pending_rollback) {
+                transferRefinedSolutionToCurrentMesh(
+                    solver, pending_rollback_mesh, pending_rollback_U,
+                    pending_rollback_U_dg, pending_rollback_rmap,
+                    "Retry after cumulative local curved-patch repairs");
+              } else if (static_cast<int>(U_dg_retry_base.size()) ==
+                         static_cast<int>(solver.mesh.E.size())) {
+                solver.U_dg = U_dg_retry_base;
+                solver.U.resize(solver.mesh.E.size());
+                for (size_t e = 0; e < solver.mesh.E.size(); ++e) {
+                  solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+                }
               }
-              solver.U.resize(solver.mesh.E.size());
-              for (size_t e = 0; e < solver.mesh.E.size(); ++e)
-                solver.U[e] = solver.cellAverage(solver.U_dg[e]);
 
-              std::cerr << "  Retrying primal after cumulative local"
-                        << " curved-patch repairs." << std::endl;
-              solver.solveSteady(itercap);
-              if (solver.last_steady_converged) {
-                std::cerr << "  Cumulative local curved-patch repairs recovered"
-                          << " the refined primal solve." << std::endl;
-                repaired_and_recovered = true;
-              } else {
+              const Mesh repaired_mesh_base = solver.mesh;
+              const auto U_repaired_base = solver.U;
+              const auto U_dg_repaired_base = solver.U_dg;
+              bool repaired_retry_recovered = false;
+              for (double factor : {1.0, 0.5, 0.25, 0.125, 0.05, 0.025, 0.01}) {
+                const double trial_cfl = cfl_failed_base * factor;
+                if (!(trial_cfl > 0.0)) continue;
+                solver.mesh = repaired_mesh_base;
+                solver.U = U_repaired_base;
+                solver.U_dg = U_dg_repaired_base;
+                solver.CFL = trial_cfl;
+                std::cerr << "  Retrying primal after cumulative local"
+                          << " curved-patch repairs with CFL="
+                          << trial_cfl << "." << std::endl;
+                solver.solveSteady(itercap);
+                if (solver.last_steady_converged) {
+                  if (trial_cfl < cfl) cfl = trial_cfl;
+                  std::cerr << "  Cumulative local curved-patch repairs recovered"
+                            << " the refined primal solve." << std::endl;
+                  repaired_and_recovered = true;
+                  repaired_retry_recovered = true;
+                  break;
+                }
+              }
+              if (!repaired_retry_recovered) {
                 std::cerr << "  Retry after cumulative local curved-patch"
                           << " repairs still failed." << std::endl;
                 solver.mesh = mesh_retry_base;
                 solver.U = U_retry_base;
                 solver.U_dg = U_dg_retry_base;
+                solver.CFL = cfl_failed_base;
               }
             }
           }
@@ -1161,6 +1641,22 @@ int main(int argc, char **argv) {
           refined_out.close();
           std::cerr << "  Actual refined-parent cells saved to "
                     << refined_file << std::endl;
+
+          std::string reason_file = output_dir + "/" + file_prefix
+              + "adjoint_refined_reason_cycle" + std::to_string(cycle) + ".bin";
+          std::ofstream reason_out(reason_file, std::ios::binary);
+          int Ne_reason = Ne_orig;
+          reason_out.write((char*)&Ne_reason, sizeof(int));
+          for (int e = 0; e < Ne_orig; ++e) {
+            unsigned char reason = 0;
+            if (e < static_cast<int>(rmap.parent_split_reason.size())) {
+              reason = rmap.parent_split_reason[e];
+            }
+            reason_out.write((char*)&reason, sizeof(unsigned char));
+          }
+          reason_out.close();
+          std::cerr << "  Refined-parent reason codes saved to "
+                    << reason_file << std::endl;
         }
         auto mesh_report = validateRefinedMesh(solver.mesh);
         printMeshValidationReport(mesh_report);
@@ -1223,6 +1719,167 @@ int main(int argc, char **argv) {
           break;
         }
 
+        std::vector<int> transition_repair_seeds;
+        if (solver.mesh.q_order_global <= 1 &&
+            static_cast<int>(solver.mesh.E.size()) >=
+                q1PreSolveTransitionRepairMinElems()) {
+          transition_repair_seeds = topQ1PreSolveRepairSeeds(
+              solver.mesh, rmap, q1PreSolveTransitionRepairMaxSeeds());
+        }
+        if (solver.mesh.q_order_global <= 1 &&
+            (mesh_report.min_angle_deg < q1PreSolveSliverRepairMinAngleDeg() ||
+             mesh_report.worst_quality < q1PreSolveSliverRepairMinQuality() ||
+             !transition_repair_seeds.empty())) {
+          bool repaired_low_quality = false;
+          for (int pass = 0; pass < 3; ++pass) {
+            std::vector<int> sliver_seeds;
+            auto append_unique_seed = [&](int seed_elem) {
+              if (seed_elem < 0) return;
+              if (std::find(sliver_seeds.begin(), sliver_seeds.end(), seed_elem) !=
+                  sliver_seeds.end()) {
+                return;
+              }
+              sliver_seeds.push_back(seed_elem);
+            };
+            if (mesh_report.worst_quality_elem >= 0)
+              append_unique_seed(mesh_report.worst_quality_elem);
+            if (mesh_report.min_angle_elem >= 0 &&
+                mesh_report.min_angle_elem != mesh_report.worst_quality_elem)
+              append_unique_seed(mesh_report.min_angle_elem);
+            for (int seed_elem : transition_repair_seeds) {
+              append_unique_seed(seed_elem);
+            }
+            if (sliver_seeds.empty()) break;
+
+            bool pass_repaired = false;
+            for (int seed_elem : sliver_seeds) {
+              const Mesh mesh_before_seed = solver.mesh;
+              const bool repaired =
+                  (solver.mesh.q_order_global <= 1)
+                      ? repairLowQualityQ1Patch(solver.mesh, seed_elem, false)
+                      : repairLowQualityCurvedPatch(solver.mesh, seed_elem);
+              if (!repaired) continue;
+              auto repaired_report = validateRefinedMesh(solver.mesh);
+              const bool repaired_invalid =
+                  repaired_report.nonpositive_area_count > 0 ||
+                  repaired_report.nonpositive_sampled_detJ_count > 0 ||
+                  repaired_report.nonmanifold_edge_count > 0 ||
+                  repaired_report.duplicate_boundary_edge_count > 0 ||
+                  repaired_report.invalid_boundary_owner_count > 0 ||
+                  repaired_report.invalid_interior_owner_count > 0;
+              if (repaired_invalid) {
+                std::cerr << "  Pre-solve q1 sliver repair around elem "
+                          << seed_elem
+                          << " produced an invalid mesh — discarding that move."
+                          << std::endl;
+                solver.mesh = mesh_before_seed;
+                continue;
+              }
+              mesh_report = repaired_report;
+              pass_repaired = true;
+              repaired_low_quality = true;
+            }
+            if (static_cast<int>(solver.mesh.E.size()) >=
+                q1PreSolveTransitionRepairMinElems()) {
+              transition_repair_seeds = topQ1PreSolveRepairSeeds(
+                  solver.mesh, rmap, q1PreSolveTransitionRepairMaxSeeds());
+            } else {
+              transition_repair_seeds.clear();
+            }
+            if (!pass_repaired ||
+                ((mesh_report.min_angle_deg >=
+                  q1PreSolveSliverRepairMinAngleDeg()) &&
+                 (mesh_report.worst_quality >=
+                  q1PreSolveSliverRepairMinQuality()) &&
+                 transition_repair_seeds.empty())) {
+              break;
+            }
+          }
+          if (repaired_low_quality) {
+            std::cerr << "  Revalidated mesh after pre-solve q1 sliver repair:"
+                      << std::endl;
+            printMeshValidationReport(mesh_report);
+            invalid_refined_pass =
+                mesh_report.nonpositive_area_count > 0 ||
+                mesh_report.nonpositive_sampled_detJ_count > 0 ||
+                mesh_report.nonmanifold_edge_count > 0 ||
+                mesh_report.duplicate_boundary_edge_count > 0 ||
+                mesh_report.invalid_boundary_owner_count > 0 ||
+                mesh_report.invalid_interior_owner_count > 0;
+            if (invalid_refined_pass) {
+              std::cerr << "  Pre-solve q1 sliver repair invalidated the refined"
+                        << " mesh — restoring the pre-refinement mesh/state."
+                        << std::endl;
+              solver.mesh = mesh_before_refine;
+              solver.U = U_before_refine;
+              solver.U_dg = U_dg_before_refine;
+              break;
+            }
+          }
+        }
+
+        if (q1ProactiveRepairEnabled() && solver.mesh.q_order_global <= 1 &&
+            static_cast<int>(solver.mesh.E.size()) >= q1ProactiveRepairMinElems()) {
+          auto proactive_seeds = topQ1PreSolveRepairSeeds(
+              solver.mesh, rmap, q1ProactiveRepairMaxSeeds());
+          bool any_proactive_repaired = false;
+          if (!proactive_seeds.empty()) {
+            std::cerr << "  Proactive q1 transition repair seeds:";
+            for (int e : proactive_seeds) std::cerr << " " << e;
+            std::cerr << std::endl;
+          }
+          for (int seed_elem : proactive_seeds) {
+            if (seed_elem < 0 || seed_elem >= static_cast<int>(solver.mesh.E.size())) {
+              continue;
+            }
+            const Mesh mesh_before_seed = solver.mesh;
+            const bool repaired =
+                (solver.mesh.q_order_global <= 1)
+                    ? repairLowQualityQ1Patch(solver.mesh, seed_elem, false)
+                    : repairLowQualityCurvedPatch(solver.mesh, seed_elem);
+            if (!repaired) continue;
+
+            auto repaired_report = validateRefinedMesh(solver.mesh);
+            bool repaired_invalid =
+                repaired_report.nonpositive_area_count > 0 ||
+                repaired_report.nonpositive_sampled_detJ_count > 0 ||
+                repaired_report.nonmanifold_edge_count > 0 ||
+                repaired_report.duplicate_boundary_edge_count > 0 ||
+                repaired_report.invalid_boundary_owner_count > 0 ||
+                repaired_report.invalid_interior_owner_count > 0;
+            if (repaired_invalid) {
+              std::cerr << "  Proactive q1 repair around elem " << seed_elem
+                        << " produced an invalid mesh — discarding that move."
+                        << std::endl;
+              solver.mesh = mesh_before_seed;
+              continue;
+            }
+            any_proactive_repaired = true;
+          }
+          if (any_proactive_repaired) {
+            mesh_report = validateRefinedMesh(solver.mesh);
+            std::cerr << "  Revalidated mesh after proactive q1 transition repairs:"
+                      << std::endl;
+            printMeshValidationReport(mesh_report);
+            invalid_refined_pass =
+                mesh_report.nonpositive_area_count > 0 ||
+                mesh_report.nonpositive_sampled_detJ_count > 0 ||
+                mesh_report.nonmanifold_edge_count > 0 ||
+                mesh_report.duplicate_boundary_edge_count > 0 ||
+                mesh_report.invalid_boundary_owner_count > 0 ||
+                mesh_report.invalid_interior_owner_count > 0;
+            if (invalid_refined_pass) {
+              std::cerr << "  Proactive q1 transition repair invalidated the"
+                        << " refined mesh — restoring the pre-refinement mesh/state."
+                        << std::endl;
+              solver.mesh = mesh_before_refine;
+              solver.U = U_before_refine;
+              solver.U_dg = U_dg_before_refine;
+              break;
+            }
+          }
+        }
+
         if (solver.mesh.E.size() == mesh_before_refine.E.size()) {
           std::cerr << "  No cells added this cycle — stopping adaptation."
                     << std::endl;
@@ -1231,6 +1888,7 @@ int main(int argc, char **argv) {
         pending_rollback_mesh = mesh_before_refine;
         pending_rollback_U = U_before_refine;
         pending_rollback_U_dg = U_dg_before_refine;
+        pending_rollback_rmap = rmap;
         have_pending_rollback = true;
 
         // Save the newly refined mesh immediately so it can be inspected even
@@ -1243,10 +1901,9 @@ int main(int argc, char **argv) {
         }
 
         // Step 6: Transfer solution to refined mesh
-        solver.U_dg = interpolateSolution(solver.U_dg, rmap, solver.ndof_per_elem);
-        solver.U.resize(solver.mesh.E.size());
-        for (size_t e = 0; e < solver.mesh.E.size(); ++e)
-          solver.U[e] = solver.cellAverage(solver.U_dg[e]);
+        transferRefinedSolutionToCurrentMesh(
+            solver, mesh_before_refine, U_before_refine, U_dg_before_refine,
+            rmap, "Initial refined transfer");
       }
     } else {
       solver.solveSteady(itercap);
