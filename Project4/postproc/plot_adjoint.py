@@ -54,21 +54,23 @@ verts = [nodes[e] for e in elements]
 # p=0: one DOF per element, 4 state components
 psi_mag = np.linalg.norm(psi_dg[:, 0, :], axis=1)
 
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-fig.suptitle(f"Cycle {cycle} | p={p_order} | {Ne} elements")
+#fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
-ax = axes[0]
-pc = PolyCollection(verts, cmap="plasma", edgecolors="none")
-pc.set_array(psi_mag)
-pc.set_clim(psi_mag.min(), psi_mag.max())
-ax.add_collection(pc)
-ax.set_xlim(nodes[:, 0].min(), nodes[:, 0].max())
-ax.set_ylim(nodes[:, 1].min(), nodes[:, 1].max())
-ax.set_aspect("equal")
-fig.colorbar(pc, ax=ax, label="|psi|")
-ax.set_title("Adjoint Magnitude")
+plt.figure(figsize=(8, 6))
+plt.suptitle(f"Cycle {cycle} | p={p_order} | {Ne} elements")
 
-ax = axes[1]
+#ax = axes[0]
+#pc = PolyCollection(verts, cmap="plasma", edgecolors="none")
+#pc.set_array(psi_mag)
+#pc.set_clim(psi_mag.min(), psi_mag.max())
+#ax.add_collection(pc)
+#ax.set_xlim(nodes[:, 0].min(), nodes[:, 0].max())
+#ax.set_ylim(nodes[:, 1].min(), nodes[:, 1].max())
+#ax.set_aspect("equal")
+#fig.colorbar(pc, ax=ax, label="|psi|")
+#ax.set_title("Adjoint Magnitude")
+
+ax = plt.gca()
 ind_log = np.log10(np.maximum(indicators, 1e-30))
 nonzero = ind_log[indicators > 0]
 vmin_ind = nonzero.min() if len(nonzero) else ind_log.min()
@@ -79,7 +81,7 @@ ax.add_collection(pc2)
 ax.set_xlim(nodes[:, 0].min(), nodes[:, 0].max())
 ax.set_ylim(nodes[:, 1].min(), nodes[:, 1].max())
 ax.set_aspect("equal")
-fig.colorbar(pc2, ax=ax, label="log10(indicator)")
+plt.colorbar(pc2, ax=ax, label="log10(indicator)")
 ax.set_title("Error Indicators")
 
 plt.tight_layout()

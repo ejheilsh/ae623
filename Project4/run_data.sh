@@ -156,20 +156,20 @@ find_resume_ic() {
 #   echo ""
 # fi
 
-# ── Smaller-fraction comparison run (10%) ─────────────────────────────────────
+# ── Smaller-fraction comparison run (5%) ─────────────────────────────────────
 echo ""
 echo "================================================================"
-echo "  SECTION 3b: Adjoint-adapted refinement — p=1 on 2k_q3.gri (10% fraction)"
+echo "  SECTION 3b: Adjoint-adapted refinement — p=1 on 2k_q3.gri (5% fraction)"
 echo "================================================================"
 
-ADAPT_MARKER_10="${OUTDIR}/steady_500_q1_adjoint_indicators_cycle0.bin"
-if should_skip "$ADAPT_MARKER_10"; then
+ADAPT_MARKER_5="${OUTDIR}/steady_2k_q3_adjoint_indicators_cycle0.bin"
+if should_skip "$ADAPT_MARKER_5"; then
   echo "  Adjoint adapt data already exists"
 else
-  echo "--- Running adjoint-adapt on 500_q3.gri (8 cycles, 5% fraction) ---"
-  $SOLVER grids/500_q3.gri 1 1.0 $FLUX 200000 steady \
-    --adjoint-adapt 1e-4 8 0.05 --final-ar-cleanup 2.0 \
-    2>&1 | tee "${OUTDIR}/adapt_run_10pct.log"
+  echo "--- Running adjoint-adapt on 2k_q3.gri (8 cycles, 5% fraction) ---"
+  $SOLVER grids/2k_q3.gri 1 1.0 $FLUX 200000 steady \
+    --adjoint-adapt 1e-5 8 0.05 --final-ar-cleanup 2.0 \
+    2>&1 | tee "${OUTDIR}/adapt_run_5pct.log"
   echo ""
 fi
 
