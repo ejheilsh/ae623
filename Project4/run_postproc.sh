@@ -222,7 +222,7 @@ echo "================================================================"
 
 for ADAPT_CASE in steady_2k_q3_p1; do
   PREFIX="${ADAPT_CASE}_"
-  for cycle in 0 1 2 3; do
+  for cycle in 0 1 2 3 4 5; do
     IND="${DATADIR}/${PREFIX}adjoint_indicators_cycle${cycle}.bin"
     if [[ ! -f "$IND" ]]; then continue; fi
 
@@ -263,8 +263,8 @@ done
 
 echo ""
 echo "ADJOINT-ADAPTED Cl VALUES:"
-if [[ -f "${DATADIR}/adapt_run.log" ]]; then
-  grep -E 'Cl = ' "${DATADIR}/adapt_run.log" || true
+if [[ -f "${DATADIR}/adapt_run_5pct.log" ]]; then
+  grep -E 'Cl = ' "${DATADIR}/adapt_run_5pct.log" || true
 fi
 
 echo ""
