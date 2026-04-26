@@ -1,21 +1,26 @@
 #!/bin/bash
 # ============================================================================
-# run_data.sh — Generate all solver data needed for the Project 4 report
+# run_data.sh - Generate adapted-grid data for Project 4 postprocessing
 # ============================================================================
-# Usage:  bash run_data.sh [--skip-existing] [--resume]
+# Default no-argument run:
+#   2k/q1/p0, 2k/q2/p0, 8k/q1/p0, 8k/q2/p0
 #
-#   --skip-existing : Skip cases whose final results.bin already exists
-#   --resume        : Resume interrupted cases from _temp_iter_latest_dg.bin
-#                     (implies --skip-existing)
+# Main outputs:
+#   data_steady/*adjoint_*.bin
+#   final_grids/<ncells>/<curvature>/<solver_order>/iter<N>.gri
+#   final_grids/<ncells>/<curvature>/<solver_order>/latest_accepted.gri
 #
-# This script runs:
-#   1. Uniform refinement: p=0 steady on 2k, 8k, 32k, 128k grids
-#   2. Higher-order uniform: p=1, p=2 steady on 2k, 8k grids (CFL=10 for p=2)
-#   3. Adjoint-adapted refinement: p=0 on base.gri with 6 cycles
-#
-# Outputs land in data_steady/ and logs go to data_steady/*.log
+# Examples:
+#   bash run_data.sh
+#   bash run_data.sh --skip-existing
+#   bash run_data.sh 2k q2 p0
+#   bash run_data.sh --cycles 5 --fraction 0.025 8k q1 p0
+#   bash run_data.sh --export-only 2k q1 p0
 # ============================================================================
-set -e
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
 
 if [[ -x "./euler_solver" ]]; then
   SOLVER="./euler_solver"
@@ -26,139 +31,286 @@ else
   echo "Build it first with: bash build.sh"
   exit 1
 fi
+
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+  echo "Error: python executable not found: $PYTHON"
+  exit 1
+fi
+
 OUTDIR="data_steady"
 FLUX="roe"
-
+CFL="1.0"
+ITERCAP="1000000"
+ADAPT_CYCLES=10
+ADAPT_FRACTION="0.025"
+ADAPT_TOL="0.0"
+AR_CLEANUP="${AR_CLEANUP:-10.0}"
+SMOOTH_ITERS="${SMOOTH_ITERS:-120}"
+WALL_GEOM_TOL="${WALL_GEOM_TOL:-0.15}"
 SKIP_EXISTING=false
-RESUME=false
-for arg in "$@"; do
-  case "$arg" in
-    --skip-existing) SKIP_EXISTING=true ;;
-    --resume)        RESUME=true; SKIP_EXISTING=true ;;
+EXPORT_ONLY=false
+POSITIONAL=()
+
+usage() {
+  sed -n '1,17p' "$0"
+  cat <<'EOF'
+
+Options:
+  --skip-existing       Skip solver runs whose final iter<N>.gri already exists
+  --export-only         Only export existing data_steady mesh snapshots to final_grids
+  --cycles N            Adaptation cycle count (default: 10)
+  --fraction X          Marking fraction (default: 0.025)
+  --tol X               Adjoint tolerance; 0.0 forces all cycles (default: 0.0)
+  --itercap N           Primal iteration cap during adaptation (default: 1000000)
+  --cfl X               Solver CFL during adaptation (default: 1.0)
+  --flux roe|hlle       Numerical flux (default: roe)
+  --final-ar-cleanup X  Also mark cells above aspect-ratio threshold (default: 10.0)
+  --smooth-iters N      Post-refinement smoothing iterations (default: 120)
+  --wall-geom-tol X     Wall geometry tolerance passed to solver (default: 0.15)
+  -h, --help            Show this help
+
+Positional forms:
+  none                  Run all four report cases
+  all                   Run all four report cases
+  <ncells> [q] [p]      Run one case, e.g. 2k q2 p0
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-existing)
+      SKIP_EXISTING=true
+      shift
+      ;;
+    --export-only)
+      EXPORT_ONLY=true
+      shift
+      ;;
+    --cycles)
+      ADAPT_CYCLES="$2"
+      shift 2
+      ;;
+    --fraction)
+      ADAPT_FRACTION="$2"
+      shift 2
+      ;;
+    --tol)
+      ADAPT_TOL="$2"
+      shift 2
+      ;;
+    --itercap)
+      ITERCAP="$2"
+      shift 2
+      ;;
+    --cfl)
+      CFL="$2"
+      shift 2
+      ;;
+    --flux)
+      FLUX="$2"
+      shift 2
+      ;;
+    --final-ar-cleanup)
+      AR_CLEANUP="$2"
+      shift 2
+      ;;
+    --smooth-iters)
+      SMOOTH_ITERS="$2"
+      shift 2
+      ;;
+    --wall-geom-tol)
+      WALL_GEOM_TOL="$2"
+      shift 2
+      ;;
+    --resume)
+      echo "Warning: --resume is accepted for compatibility but adjoint adaptation does not resume mid-cycle."
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "Error: unknown option: $1"
+      usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
   esac
 done
 
-mkdir -p "$OUTDIR"
-
-# Helper: skip a run if output already exists (when --skip-existing)
-should_skip() {
-  local marker_file="$1"
-  if $SKIP_EXISTING && [[ -f "$marker_file" ]]; then
-    echo "  [SKIP] $marker_file already exists"
-    return 0
-  fi
-  return 1
-}
-
-# Helper: find a resume IC file for a case, return path in RESUME_IC
-find_resume_ic() {
-  RESUME_IC=""
-  if ! $RESUME; then return; fi
-  local dg_temp="$1"
-  if [[ -f "$dg_temp" ]]; then
-    echo "  [RESUME] Found checkpoint: $dg_temp"
-    RESUME_IC="$dg_temp"
-  fi
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. UNIFORM REFINEMENT — p=0 on q=1 meshes (2k, 8k, 32k, 128k)
-# ──────────────────────────────────────────────────────────────────────────────
-echo "================================================================"
-echo "  SECTION 1: Uniform refinement — p=0 on all mesh sizes"
-echo "================================================================"
-
-for grid in 2k 8k 32k; do #128k
-  GRIDFILE="grids/${grid}.gri"
-  MARKER="${OUTDIR}/steady_${grid}_p0_results.bin"
-
-  if [[ ! -f "$GRIDFILE" ]]; then
-    echo "  [WARN] Grid $GRIDFILE not found, skipping"
-    continue
-  fi
-
-  if should_skip "$MARKER"; then continue; fi
-
-  find_resume_ic "${OUTDIR}/steady_${grid}_p0_temp_iter_latest_dg.bin"
-
-  echo "--- Running p=0 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 0 1.0 $FLUX 200000 steady $RESUME_IC \
-    2>&1 | tee "${OUTDIR}/${grid}_p0_run.log"
-  echo ""
-done
-
-# Collect uniform Cl values into a single log for plot_cl_convergence.py
-echo "--- Collecting uniform Cl values ---"
-UNIFORM_LOG="${OUTDIR}/uniform_run.log"
-> "$UNIFORM_LOG"
-for grid in 2k 8k 32k; do #128k
-  LOG="${OUTDIR}/${grid}_p0_run.log"
-  if [[ -f "$LOG" ]]; then
-    cat "$LOG" >> "$UNIFORM_LOG"
-  fi
-done
-echo "  Uniform log: $UNIFORM_LOG"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. HIGHER-ORDER UNIFORM — p=1 and p=2 on 2k, 8k meshes
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 2: Higher-order uniform — p=1, p=2 on 2k and 8k"
-echo "================================================================"
-
-# p=1 runs (CFL=1 is fine, auto-chains from p=0)
-for grid in 2k 8k; do
-  GRIDFILE="grids/${grid}.gri"
-  MARKER="${OUTDIR}/steady_${grid}_p1_results.bin"
-
-  if should_skip "$MARKER"; then continue; fi
-
-  find_resume_ic "${OUTDIR}/steady_${grid}_p1_temp_iter_latest_dg.bin"
-
-  echo "--- Running p=1 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 1 1.0 $FLUX 200000 steady $RESUME_IC \
-    2>&1 | tee "${OUTDIR}/${grid}_p1_run.log"
-  echo ""
-done
-
-# p=2 runs (CFL=10 is stable for p=2, gives 10x speedup)
-for grid in 2k 8k; do
-  GRIDFILE="grids/${grid}.gri"
-  MARKER="${OUTDIR}/steady_${grid}_p2_results.bin"
-
-  if should_skip "$MARKER"; then continue; fi
-
-  find_resume_ic "${OUTDIR}/steady_${grid}_p2_temp_iter_latest_dg.bin"
-
-  echo "--- Running p=2 CFL=10 on ${grid} mesh ---"
-  $SOLVER "$GRIDFILE" 2 10.0 $FLUX 200000 steady $RESUME_IC \
-    2>&1 | tee "${OUTDIR}/${grid}_p2_run.log"
-  echo ""
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. ADJOINT-ADAPTED REFINEMENT — p=0 on base.gri (q=2 curved mesh)
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 3: Adjoint-adapted refinement — p=0 on base.gri"
-echo "================================================================"
-
-ADAPT_MARKER="${OUTDIR}/steady_base_p0_adjoint_indicators_cycle0.bin"
-if should_skip "$ADAPT_MARKER"; then
-  echo "  Adjoint adapt data already exists"
-else
-  echo "--- Running adjoint-adapt on base.gri (6 cycles, 25% fraction) ---"
-  $SOLVER grids/base.gri 0 1.0 $FLUX 200000 steady \
-    --adjoint-adapt 1e-4 6 0.25 \
-    2>&1 | tee "${OUTDIR}/adapt_run.log"
-  echo ""
+if [[ ${#POSITIONAL[@]} -gt 3 ]]; then
+  echo "Error: expected at most 3 positional arguments: [ncells] [curvature] [solver_order]"
+  exit 1
 fi
 
-# ──────────────────────────────────────────────────────────────────────────────
+normalize_curvature() {
+  local value="$1"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    value="q${value}"
+  fi
+  if [[ ! "$value" =~ ^q[0-9]+$ ]]; then
+    echo "Error: curvature must look like q1, q2, q3, or a number such as 1" >&2
+    exit 1
+  fi
+  echo "$value"
+}
+
+normalize_solver_order() {
+  local value="$1"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    value="p${value}"
+  fi
+  if [[ ! "$value" =~ ^p[0-9]+$ ]]; then
+    echo "Error: solver_order must look like p0, p1, p2, or a number such as 0" >&2
+    exit 1
+  fi
+  echo "$value"
+}
+
+grid_tag_for_case() {
+  local ncells="$1"
+  local curvature="$2"
+  if [[ "$curvature" == "q1" ]]; then
+    echo "$ncells"
+  else
+    echo "${ncells}_${curvature}"
+  fi
+}
+
+prefix_for_case() {
+  local ncells="$1"
+  local curvature="$2"
+  local order_tag="$3"
+  local grid_tag
+  grid_tag="$(grid_tag_for_case "$ncells" "$curvature")"
+  echo "steady_${grid_tag}_${order_tag}_"
+}
+
+export_final_grids() {
+  local ncells="$1"
+  local curvature="$2"
+  local order_tag="$3"
+  local prefix="$4"
+  local final_dir="final_grids/${ncells}/${curvature}/${order_tag}"
+  local count=0
+
+  mkdir -p "$final_dir"
+  if [[ "${PRESERVE_FINAL_GRIDS:-0}" != "1" ]]; then
+    rm -f "${final_dir}"/iter*.gri "${final_dir}/latest_accepted.gri"
+  fi
+  shopt -s nullglob
+  local mesh_files=("${OUTDIR}/${prefix}"adjoint_mesh_cycle*.bin)
+  shopt -u nullglob
+
+  if [[ ${#mesh_files[@]} -eq 0 ]]; then
+    echo "  [WARN] no mesh snapshots found for prefix ${prefix}"
+    return 0
+  fi
+
+  while IFS= read -r mesh_file; do
+    local base cycle out_file
+    base="$(basename "$mesh_file")"
+    if [[ ! "$base" =~ cycle([0-9]+)\.bin$ ]]; then
+      continue
+    fi
+    cycle="${BASH_REMATCH[1]}"
+    out_file="${final_dir}/iter${cycle}.gri"
+    echo "  exporting ${mesh_file} -> ${out_file}"
+    "$PYTHON" postproc/export_adapted_mesh_gri.py "$mesh_file" "$out_file"
+    count=$((count + 1))
+  done < <("$PYTHON" - "${mesh_files[@]}" <<'PY'
+import re
+import sys
+
+def key(path):
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", path)]
+
+for item in sorted(sys.argv[1:], key=key):
+    print(item)
+PY
+)
+
+  local latest_bin="${OUTDIR}/${prefix}adjoint_mesh_latest_accepted.bin"
+  if [[ -f "$latest_bin" ]]; then
+    echo "  exporting ${latest_bin} -> ${final_dir}/latest_accepted.gri"
+    "$PYTHON" postproc/export_adapted_mesh_gri.py "$latest_bin" "${final_dir}/latest_accepted.gri"
+  fi
+
+  echo "  exported ${count} iter mesh(es) for ${ncells}/${curvature}/${order_tag}"
+}
+
+run_case() {
+  local ncells="$1"
+  local curvature="$2"
+  local order_tag="$3"
+  curvature="$(normalize_curvature "$curvature")"
+  order_tag="$(normalize_solver_order "$order_tag")"
+  local order="${order_tag#p}"
+  local grid_tag grid_file prefix final_dir marker log_file
+
+  if [[ "$order_tag" != "p0" ]]; then
+    echo "Warning: this pipeline is intended for p0 adaptation; running ${order_tag} because it was requested."
+  fi
+
+  grid_tag="$(grid_tag_for_case "$ncells" "$curvature")"
+  grid_file="grids/${grid_tag}.gri"
+  prefix="$(prefix_for_case "$ncells" "$curvature" "$order_tag")"
+  final_dir="final_grids/${ncells}/${curvature}/${order_tag}"
+  marker="${final_dir}/iter${ADAPT_CYCLES}.gri"
+  log_file="${OUTDIR}/adapt_${grid_tag}_${order_tag}_run.log"
+
+  if [[ ! -f "$grid_file" ]]; then
+    echo "Error: grid file not found: $grid_file"
+    return 1
+  fi
+
+  echo ""
+  echo "================================================================"
+  echo "  Adjoint adaptation: ${ncells}/${curvature}/${order_tag}"
+  echo "  grid=${grid_file}, cycles=${ADAPT_CYCLES}, fraction=${ADAPT_FRACTION}"
+  echo "================================================================"
+
+  mkdir -p "$OUTDIR"
+
+  if $EXPORT_ONLY; then
+    echo "  export-only mode: skipping solver"
+  elif $SKIP_EXISTING && [[ -f "$marker" ]]; then
+    echo "  [SKIP] ${marker} already exists"
+  else
+    "$SOLVER" "$grid_file" "$order" "$CFL" "$FLUX" "$ITERCAP" steady \
+      --adjoint-adapt "$ADAPT_TOL" "$ADAPT_CYCLES" "$ADAPT_FRACTION" \
+      --final-ar-cleanup "$AR_CLEANUP" \
+      --smooth-iters "$SMOOTH_ITERS" \
+      --wall-geom-tol "$WALL_GEOM_TOL" \
+      2>&1 | tee "$log_file"
+  fi
+
+  export_final_grids "$ncells" "$curvature" "$order_tag" "$prefix"
+}
+
+CASES=()
+if [[ ${#POSITIONAL[@]} -eq 0 || "${POSITIONAL[0]:-}" == "all" ]]; then
+  CASES=("2k q1 p0" "8k q1 p0")
+else
+  NCELLS="${POSITIONAL[0]}"
+  CURVATURE="$(normalize_curvature "${POSITIONAL[1]:-q1}")"
+  ORDER_TAG="$(normalize_solver_order "${POSITIONAL[2]:-p0}")"
+  CASES=("${NCELLS} ${CURVATURE} ${ORDER_TAG}")
+fi
+
+for case_spec in "${CASES[@]}"; do
+  read -r ncells curvature order_tag <<< "$case_spec"
+  run_case "$ncells" "$curvature" "$order_tag"
+done
+
 echo ""
 echo "================================================================"
-echo "  All data generation complete."
-echo "  Results in: $OUTDIR/"
+echo "  Data generation complete."
+echo "  Adaptation data: ${OUTDIR}/"
+echo "  Final grids    : final_grids/"
 echo "================================================================"

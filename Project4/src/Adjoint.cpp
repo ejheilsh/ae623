@@ -241,9 +241,9 @@ void AdjointSolver::solve() {
   //    Minimises ||b - A x||_2 over successive Krylov subspaces K_m(A, r0).
   //    Unlike BiCGSTAB, the residual is monotonically non-increasing and
   //    there is no breakdown.  Memory: (m+1)*N doubles per restart.
-  const int    m            = 50;   // Krylov dimension per restart
+  const int    m            = 100;   // Krylov dimension per restart
   const double gmres_tol    = 1e-5; // relative residual tolerance
-  const int    max_restarts = 30;
+  const int    max_restarts = 100;
 
   std::cerr << "  GMRES(" << m << ")  tol=" << gmres_tol
             << "  max_restarts=" << max_restarts << "\n";

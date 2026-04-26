@@ -432,6 +432,14 @@ void FiniteVolumeSolver::loadMappedInitialCondition(
   }
 
   U0 = U;
+  if (static_cast<int>(U_dg.size()) == n_fine) {
+    for (int i = 0; i < n_fine; ++i) {
+      for (int j = 0; j < ndof_per_elem; ++j) {
+        U_dg[i][j] = U[i];
+      }
+    }
+    U0_dg = U_dg;
+  }
   std::cout << "Mapped IC loaded from coarse solution: " << coarse_statefile
             << " onto mesh with " << n_fine << " cells (coarse cells: "
             << n_coarse << ", hash_fallbacks: " << hash_fallback_count

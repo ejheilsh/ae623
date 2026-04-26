@@ -926,6 +926,7 @@ int main(int argc, char **argv) {
               << "\n  --final-ar-cleanup : After adjoint adaptation, do one extra refinement pass for cells above a max aspect ratio and re-solve"
               << "\n  --smooth-iters : Set post-refinement mesh smoothing iterations"
               << "\n  --wall-geom-tol : Force wall-edge refinement when blade chord error exceeds this tolerance"
+              << "\n  --write-adjoint-indicators : Solve adjoint on the current fixed mesh and write element indicators to the given file"
               << "\n\nNotes:"
               << "\n  - For p>0 steady runs without ic_file: automatically converges p=0 first"
               << "\n  - Output files tagged by order: steady_<mesh>_p<order>_results.bin"
@@ -958,6 +959,8 @@ int main(int argc, char **argv) {
   double final_ar_cleanup = 0.0;
   int smooth_iters = 0;
   double wall_geom_tol = 0.15;
+  bool write_adjoint_indicators = false;
+  std::string adjoint_indicators_file = "";
 
   auto is_flag_token = [](const char *s) {
     return std::string(s).rfind("--", 0) == 0;
@@ -1083,6 +1086,14 @@ int main(int argc, char **argv) {
         return 1;
       }
       wall_geom_tol = std::stod(argv[i + 1]);
+      i += 1;
+    } else if (arg == "--write-adjoint-indicators") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --write-adjoint-indicators requires <output_file>" << std::endl;
+        return 1;
+      }
+      write_adjoint_indicators = true;
+      adjoint_indicators_file = argv[i + 1];
       i += 1;
     } else if (is_flag_token(argv[i])) {
       std::cerr << "Error: Unknown option " << arg << std::endl;
@@ -1909,6 +1920,27 @@ int main(int argc, char **argv) {
       solver.solveSteady(itercap);
       std::cerr << "  Cl = " << std::setprecision(6) << solver.integrateCl()
                 << "  (" << solver.mesh.E.size() << " elements)" << std::endl;
+      if (write_adjoint_indicators) {
+        std::cerr << "  Solving adjoint on fixed mesh for indicators..." << std::endl;
+        AdjointSolver adj(solver);
+        adj.solve();
+        FiniteVolumeSolver fine_solver(solver.mesh);
+        fine_solver.fluxname = solver.fluxname;
+        fine_solver.CFL = solver.CFL;
+        auto indicators = adj.errorIndicators(fine_solver);
+
+        std::filesystem::path out_path(adjoint_indicators_file);
+        if (out_path.has_parent_path()) {
+          std::filesystem::create_directories(out_path.parent_path());
+        }
+        std::ofstream ind_out(adjoint_indicators_file, std::ios::binary);
+        int Ne_i = static_cast<int>(indicators.size());
+        ind_out.write((char *)&Ne_i, sizeof(int));
+        ind_out.write((char *)indicators.data(), sizeof(double) * Ne_i);
+        ind_out.close();
+        std::cerr << "  Fixed-mesh adjoint indicators saved to "
+                  << adjoint_indicators_file << std::endl;
+      }
     }
 
     if (adjoint_adapt) {

@@ -229,6 +229,56 @@ int q1PatchRepairRings() {
   }
 }
 
+bool q1SplitQualityGuardEnabled() {
+  const char *env = std::getenv("AMR_Q1_SPLIT_QUALITY_GUARD");
+  return !(env != nullptr && std::string(env) == "0");
+}
+
+double q1SplitQualityGuardMinAngleDeg() {
+  const char *env = std::getenv("AMR_Q1_SPLIT_MIN_ANGLE");
+  return env != nullptr ? std::atof(env) : 5.0;
+}
+
+double q1SplitQualityGuardMinQuality() {
+  const char *env = std::getenv("AMR_Q1_SPLIT_MIN_QUALITY");
+  return env != nullptr ? std::atof(env) : 0.10;
+}
+
+bool q1GlobalQualityCleanupEnabled() {
+  const char *env = std::getenv("AMR_Q1_GLOBAL_CLEANUP");
+  return !(env != nullptr && std::string(env) == "0");
+}
+
+double q1GlobalCleanupMinAngleDeg() {
+  const char *env = std::getenv("AMR_Q1_GLOBAL_CLEANUP_MIN_ANGLE");
+  return env != nullptr ? std::atof(env) : 5.0;
+}
+
+double q1GlobalCleanupMinQuality() {
+  const char *env = std::getenv("AMR_Q1_GLOBAL_CLEANUP_MIN_QUALITY");
+  return env != nullptr ? std::atof(env) : 0.10;
+}
+
+int q1GlobalCleanupMaxSeeds() {
+  const char *env = std::getenv("AMR_Q1_GLOBAL_CLEANUP_MAX_SEEDS");
+  if (env == nullptr) return 12;
+  try {
+    return std::max(0, std::stoi(env));
+  } catch (...) {
+    return 12;
+  }
+}
+
+int q1GlobalCleanupPasses() {
+  const char *env = std::getenv("AMR_Q1_GLOBAL_CLEANUP_PASSES");
+  if (env == nullptr) return 2;
+  try {
+    return std::max(0, std::stoi(env));
+  } catch (...) {
+    return 2;
+  }
+}
+
 double q1EndpointOverrideMinAngleDeg() {
   const char *env = std::getenv("AMR_Q1_ENDPOINT_OVERRIDE_MIN_ANGLE");
   return env != nullptr ? std::atof(env) : 8.0;
@@ -2247,6 +2297,79 @@ int smoothQ1PatchVertices(Mesh &mesh,
       q1ExtensionPatchMinQuality(), false);
 }
 
+struct Q1QualitySeed {
+  int elem = -1;
+  double min_angle_deg = 180.0;
+  double quality = 1.0;
+  double score = 0.0;
+};
+
+int applyGlobalQ1QualityCleanup(Mesh &mesh) {
+  if (!q1GlobalQualityCleanupEnabled()) return 0;
+  if (mesh.q_order_global > 1 || mesh.E.empty()) return 0;
+
+  const double min_angle_floor = q1GlobalCleanupMinAngleDeg();
+  const double min_quality_floor = q1GlobalCleanupMinQuality();
+  const int max_seeds = q1GlobalCleanupMaxSeeds();
+  const int max_passes = q1GlobalCleanupPasses();
+  if (max_seeds <= 0 || max_passes <= 0) return 0;
+
+  int total_repaired = 0;
+  for (int pass = 0; pass < max_passes; ++pass) {
+    std::vector<Q1QualitySeed> seeds;
+    seeds.reserve(mesh.E.size());
+    for (int e = 0; e < static_cast<int>(mesh.E.size()); ++e) {
+      if (mesh.E[e].q_order != 1) continue;
+      const double min_angle = triangleMinAngleDeg(mesh.E[e], mesh.V);
+      const double quality = triangleQuality(mesh.E[e], mesh.V);
+      if (min_angle >= min_angle_floor && quality >= min_quality_floor) {
+        continue;
+      }
+
+      Q1QualitySeed seed;
+      seed.elem = e;
+      seed.min_angle_deg = min_angle;
+      seed.quality = quality;
+      seed.score = 2.0 * std::max(0.0, min_angle_floor - min_angle) +
+                   80.0 * std::max(0.0, min_quality_floor - quality);
+      seeds.push_back(seed);
+    }
+
+    if (seeds.empty()) break;
+    std::sort(seeds.begin(), seeds.end(),
+              [](const Q1QualitySeed &a, const Q1QualitySeed &b) {
+                if (a.score != b.score) return a.score > b.score;
+                if (a.min_angle_deg != b.min_angle_deg) {
+                  return a.min_angle_deg < b.min_angle_deg;
+                }
+                if (a.quality != b.quality) return a.quality < b.quality;
+                return a.elem < b.elem;
+              });
+
+    int repaired_this_pass = 0;
+    const int nseed = std::min(max_seeds, static_cast<int>(seeds.size()));
+    for (int i = 0; i < nseed; ++i) {
+      const int elem_idx = seeds[i].elem;
+      if (elem_idx < 0 || elem_idx >= static_cast<int>(mesh.E.size())) {
+        continue;
+      }
+      if (mesh.E[elem_idx].q_order != 1) continue;
+      if (repairLowQualityQ1Patch(mesh, elem_idx, true)) {
+        ++repaired_this_pass;
+      }
+    }
+
+    if (repaired_this_pass == 0) break;
+    total_repaired += repaired_this_pass;
+  }
+
+  if (total_repaired > 0) {
+    std::cerr << "    global q1 quality cleanup: repaired_patches="
+              << total_repaired << std::endl;
+  }
+  return total_repaired;
+}
+
 RefinementMap bisectMarkedElementsImpl(
     Mesh &mesh, const std::vector<bool> &marked_in,
     const std::vector<int> &fallback_priority = {}, int target_adj_splits = 0) {
@@ -4157,14 +4280,22 @@ RefinementMap bisectMarkedElementsImpl(
                 use_minimal_q1_rules ? classifyAcceptedSplitReason(false) : 0;
             const bool enforce_q1_local_quality_gate =
                 use_minimal_q1_rules &&
+                !edge_midpoint_preexisting &&
                 (selected_edge_is_wall ||
                  endpoint_related_edge ||
+                 q1SplitQualityGuardEnabled() ||
                  q1_reason_preview == kSplitWallCavity ||
                  q1_reason_preview == kSplitEndpointFan ||
                  q1_reason_preview == kSplitPeriodic);
             if (enforce_q1_local_quality_gate) {
-              const double min_angle_floor = q1ClosureSplitMinAngleDeg();
-              const double min_quality_floor = q1ClosureSplitMinQuality();
+              double min_angle_floor = q1ClosureSplitMinAngleDeg();
+              double min_quality_floor = q1ClosureSplitMinQuality();
+              if (q1SplitQualityGuardEnabled()) {
+                min_angle_floor =
+                    std::max(min_angle_floor, q1SplitQualityGuardMinAngleDeg());
+                min_quality_floor =
+                    std::max(min_quality_floor, q1SplitQualityGuardMinQuality());
+              }
               bool closure_quality_ok = true;
               std::ostringstream closure_reason;
               if (selected_edge_is_wall) {
@@ -4212,7 +4343,8 @@ RefinementMap bisectMarkedElementsImpl(
               if (!closure_quality_ok) {
                 std::cerr << "    warning: skipped refinement on edge ("
                           << ee[t].first << ", " << ee[t].second
-                          << ") because " << closure_reason.str() << std::endl;
+                          << ") because q1 split quality gate rejected it: "
+                          << closure_reason.str() << std::endl;
                 rollbackCreatedMidpoints(created_midpoints);
                 e2b.erase(ee[t]);
                 rejected_edges.insert(ee[t]);
@@ -4344,6 +4476,9 @@ RefinementMap bisectMarkedElementsImpl(
       mesh, old_boundary_edge, rmap, special_cleanup_parents,
       "targeted q1 cleanup", q1EndpointOverrideMinAngleDeg(),
       q1EndpointOverrideMinQuality(), true);
+  if (use_minimal_q1_rules) {
+    applyGlobalQ1QualityCleanup(mesh);
+  }
   smoothRefinedCurvedMesh(mesh, old_boundary_edge, old_Nv);
   rebuildMeshEdgeConnectivity(mesh, old_boundary_edge);
   mesh.appendPeriodicToIE();

@@ -5,6 +5,8 @@ import numpy as np
 
 
 GAMMA = 1.4
+HO_MAGIC = 0x484F3031  # "HO01"
+PG_MAGIC = 0x50473031  # "PG01"
 
 _GRI_TO_SHAPE = {
     1: [0, 1, 2],
@@ -93,6 +95,71 @@ def read_gri_mesh(filename):
         "elements": elements,
         "boundary_groups": boundary_groups,
     }
+
+
+def read_companion_mesh(filename):
+    with open(filename, "rb") as f:
+        data = f.read()
+
+    offset = 0
+    nn = struct.unpack_from("i", data, offset)[0]
+    offset += 4
+    nodes = np.frombuffer(data[offset : offset + 16 * nn], dtype=np.float64).reshape(nn, 2).copy()
+    offset += 16 * nn
+
+    ne = struct.unpack_from("i", data, offset)[0]
+    offset += 4
+    elements = []
+    for _ in range(ne):
+        q, v0, v1, v2 = struct.unpack_from("4i", data, offset)
+        offset += 16
+        elements.append({"q": q, "corners": [v0, v1, v2], "row": [v0, v1, v2]})
+
+    boundary_edges = []
+    nb = struct.unpack_from("i", data, offset)[0]
+    offset += 4
+    for _ in range(nb):
+        v0, v1, bidx = struct.unpack_from("3i", data, offset)
+        offset += 12
+        boundary_edges.append((v0, v1, bidx))
+
+    boundary_names = {}
+    nnames = struct.unpack_from("i", data, offset)[0]
+    offset += 4
+    for i in range(nnames):
+        slen = struct.unpack_from("i", data, offset)[0]
+        offset += 4
+        boundary_names[i] = data[offset : offset + slen].decode("utf-8")
+        offset += slen
+
+    if offset + 4 <= len(data):
+        marker = struct.unpack_from("I", data, offset)[0]
+        if marker == HO_MAGIC:
+            offset += 4
+            for elem in elements:
+                nrow = struct.unpack_from("i", data, offset)[0]
+                offset += 4
+                row = list(struct.unpack_from(f"{nrow}i", data, offset))
+                offset += 4 * nrow
+                elem["row"] = row
+                elem["corners"] = [row[0], row[elem["q"]], row[-1]]
+
+    boundary_groups = {}
+    for v0, v1, bidx in boundary_edges:
+        name = boundary_names.get(bidx, f"boundary_{bidx}")
+        boundary_groups.setdefault(name, []).append((v0, v1))
+
+    return {
+        "nodes": nodes,
+        "elements": elements,
+        "boundary_groups": boundary_groups,
+    }
+
+
+def read_mesh(filename):
+    if str(filename).endswith(".bin"):
+        return read_companion_mesh(filename)
+    return read_gri_mesh(filename)
 
 
 def evaluate_basis(xi, eta, p):

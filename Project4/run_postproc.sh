@@ -1,275 +1,434 @@
 #!/bin/bash
 # ============================================================================
-# run_postproc.sh — Generate all figures and tables for the Project 4 report
+# run_postproc.sh - Generate P4final-style final postprocessing outputs
 # ============================================================================
-# Prerequisites: run run_data.sh first to populate data_steady/
+# Inputs:
+#   final_grids/<ncells>/<curvature>/<solver_order>/iter<N>.gri
+#   final_solutions/<ncells>/<curvature>/<solver_order>/iter<N>_*.bin
+#   data_steady/*adjoint_indicators_cycle<N>.bin, when available
 #
-# Usage:  bash run_postproc.sh
+# Outputs:
+#   final_cases/cl_values.csv
+#   final_cases/cl_convergence.png
+#   final_cases/cl_vs_cells.png
+#   final_cases/cl_error.png
+#   final_cases/indicators/*adjoint_indicators_cycle<N>.bin
+#   final_figures/cp_*.png
+#   final_figures/mach_*.png
+#   final_figures/aspect_ratio_*.png
+#   final_figures/adjoint_indicator_*.png
+#   final_figures/cl_convergence.png              copied from final_cases/cl_vs_cells.png
+#   final_figures/cl_convergence_by_iteration.png copied from final_cases/cl_convergence.png
+#   final_figures/cl_error.png                    copied from final_cases/cl_error.png
+#   final_figures/cl_error_by_iteration.png       copied from final_cases/cl_error_by_iteration.png
 #
-# Outputs go to report_figures/<section>/
+# Examples:
+#   bash run_postproc.sh
+#   bash run_postproc.sh --case 8k/q2/p0
+#   bash run_postproc.sh 2k q1 p0
 # ============================================================================
-set -e
+set -euo pipefail
 
-OUTDIR="report_figures"
-DATADIR="data_steady"
-POSTPROC="postproc"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
 
-# Use Windows Python (has matplotlib/numpy); MSYS2 Python does not
-PYTHON="/c/Users/William Zhang/AppData/Local/Programs/Python/Python313/python.exe"
-if [[ ! -x "$PYTHON" ]]; then
-  echo "Warning: Windows Python not found at $PYTHON, falling back to 'python'"
-  PYTHON=python
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+  echo "Error: python executable not found: $PYTHON"
+  exit 1
 fi
 
-# Allow postproc scripts to import dg_utils, plot_cp, etc. without cd
-export PYTHONPATH="$POSTPROC${PYTHONPATH:+:$PYTHONPATH}"
+export MPLBACKEND="${MPLBACKEND:-Agg}"
+export PYTHONPATH="${ROOT_DIR}/postproc${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Section subdirectories
-DIR_SUMMARY="$OUTDIR/01_solution_summaries"
-DIR_PROCESSED="$OUTDIR/02_processed_cases"
-DIR_MACH="$OUTDIR/03_mach_contours"
-DIR_ENTROPY="$OUTDIR/04_entropy_contours"
-DIR_CP="$OUTDIR/05_cp_overlays"
-DIR_CONVERGENCE="$OUTDIR/06_convergence"
-DIR_CL="$OUTDIR/07_cl_convergence"
-DIR_ADJOINT="$OUTDIR/08_adjoint"
+FINAL_GRIDS="${FINAL_GRIDS:-final_grids}"
+FINAL_SOLUTIONS="${FINAL_SOLUTIONS:-final_solutions}"
+FINAL_CASES="${FINAL_CASES:-final_cases}"
+FINAL_FIGURES="${FINAL_FIGURES:-final_figures}"
+REFERENCE_MESH="${REFERENCE_MESH:-/Users/eheilshorn/Courses/AE623/Code/ae623/Project3/grids/128k_q3.gri}"
+REFERENCE_RESULTS="${REFERENCE_RESULTS:-/Users/eheilshorn/Courses/AE623/Code/ae623/Project3/data_steady/steady_128k_q3_p0_results.bin}"
+REFERENCE_LABEL="${REFERENCE_LABEL:-Project3/128k/q3/p0}"
+CP_REFERENCE_LABEL="${CP_REFERENCE_LABEL:-reference}"
+UNIFORM_CURVATURE="${UNIFORM_CURVATURE:-q3}"
+UNIFORM_ORDER="${UNIFORM_ORDER:-p0}"
+UNIFORM_GRIDS="${UNIFORM_GRIDS:-2k,8k,32k,128k}"
 
-mkdir -p "$DIR_SUMMARY" "$DIR_PROCESSED" "$DIR_MACH" "$DIR_ENTROPY" \
-         "$DIR_CP" "$DIR_CONVERGENCE" "$DIR_CL" "$DIR_ADJOINT"
+CASE_FILTER=""
+CURVATURE_FILTER=""
+SKIP_EXISTING=false
+NO_UNIFORM=false
+DO_CL=true
+DO_CP=true
+DO_CONTOURS=true
+DO_INDICATORS=true
+INDICATOR_ALL_ITERATIONS=false
+RECOMPUTE_INDICATORS=false
+POSITIONAL=()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. SOLUTION SUMMARIES — 4-panel plots (Mach, entropy, cell res, convergence)
-# ──────────────────────────────────────────────────────────────────────────────
-echo "================================================================"
-echo "  SECTION 1: Solution summary plots → $DIR_SUMMARY"
-echo "================================================================"
+usage() {
+  sed -n '1,23p' "$0"
+  cat <<'EOF'
 
-for grid in 2k 8k 32k 128k; do
-  for p in 0 1 2; do
-    RES="${DATADIR}/steady_${grid}_p${p}_results.bin"
-    RESID="${DATADIR}/steady_${grid}_p${p}_residual.bin"
-    CELLRES="${DATADIR}/steady_${grid}_p${p}_cell_res.bin"
-    GRIDFILE="grids/${grid}.gri"
+Options:
+  --case A/B/C              Process one case, e.g. --case 8k/q2/p0
+  --curvature qN            Process only one geometry curvature, e.g. q1
+  --skip-existing           Skip existing fixed-grid indicator files
+  --no-uniform              Do not add uniform-grid comparison rows to CL plots
+  --no-cl                   Skip CL tables/convergence plots
+  --no-cp                   Skip Cp distribution plots
+  --no-contours             Skip Mach/aspect-ratio/indicator contour plots
+  --no-indicators           Skip fixed-grid indicator computation and indicator contours
+  --indicator-all-iterations Compute fixed-grid indicators for all solved iterations
+  --recompute-indicators    Recompute fixed-grid indicators even if reusable ones exist
+  --reference-mesh PATH     Reference mesh for CL/Cp overlays
+  --reference-results PATH  Reference solution for CL/Cp overlays
+  --reference-label TEXT    Reference label for plot legends
+  -h, --help                Show this help
 
-    if [[ ! -f "$RES" ]] || [[ ! -f "$RESID" ]]; then continue; fi
+Positional form:
+  <ncells> [q] [p]          Same as --case <ncells>/<q>/<p>
+EOF
+}
 
-    OUTFILE="${DIR_SUMMARY}/summary_${grid}_p${p}.png"
-    echo "--- Solution summary: ${grid} p=${p} → $OUTFILE ---"
-    "$PYTHON" -c "
-from plot_results import plot_results
-plot_results('$GRIDFILE', '$RES', '$RESID', '$CELLRES',
-             show_plot=False, output_file='$OUTFILE')
-" 2>/dev/null || true
-  done
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. PROCESS STEADY CASES — JSON summaries + Cp + solution plots
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 2: Process steady cases → $DIR_PROCESSED"
-echo "================================================================"
-
-for grid in 2k 8k 32k 128k; do
-  for p in 0 1 2; do
-    RES="${DATADIR}/steady_${grid}_p${p}_results.bin"
-    RESID="${DATADIR}/steady_${grid}_p${p}_residual.bin"
-    CELLRES="${DATADIR}/steady_${grid}_p${p}_cell_res.bin"
-    GRIDFILE="grids/${grid}.gri"
-
-    if [[ ! -f "$RES" ]] || [[ ! -f "$RESID" ]]; then continue; fi
-
-    CASEDIR="${DIR_PROCESSED}/steady_${grid}_p${p}"
-    echo "--- Processing: ${grid} p=${p} → $CASEDIR ---"
-    "$PYTHON" "$POSTPROC/process_steady_case.py" \
-      "$GRIDFILE" "$RES" "$RESID" "$CELLRES" \
-      --outdir "$CASEDIR" 2>/dev/null || true
-  done
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. MACH CONTOUR COMPARISON
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 3: Mach contour plots → $DIR_MACH"
-echo "================================================================"
-
-for grid in 2k 8k; do
-  for p in 0 1 2; do
-    RES="${DATADIR}/steady_${grid}_p${p}_results.bin"
-    GRIDFILE="grids/${grid}.gri"
-
-    if [[ ! -f "$RES" ]]; then continue; fi
-
-    OUTFILE="${DIR_MACH}/mach_${grid}_p${p}.png"
-    echo "--- Mach contour: ${grid} p=${p} → $OUTFILE ---"
-    "$PYTHON" "$POSTPROC/plot_mach_contour.py" \
-      "$GRIDFILE" "$RES" \
-      --output "$OUTFILE" \
-      --title "${grid} mesh, p=${p}" \
-      --no-show 2>/dev/null || true
-  done
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4. ENTROPY CONTOUR COMPARISON
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 4: Entropy contour plots → $DIR_ENTROPY"
-echo "================================================================"
-
-for grid in 2k 8k; do
-  for p in 0 1 2; do
-    RES="${DATADIR}/steady_${grid}_p${p}_results.bin"
-    GRIDFILE="grids/${grid}.gri"
-
-    if [[ ! -f "$RES" ]]; then continue; fi
-
-    OUTFILE="${DIR_ENTROPY}/entropy_${grid}_p${p}.png"
-    echo "--- Entropy contour: ${grid} p=${p} → $OUTFILE ---"
-    "$PYTHON" "$POSTPROC/plot_entropy_contour.py" \
-      "$GRIDFILE" "$RES" \
-      --output "$OUTFILE" \
-      --title "${grid} mesh, p=${p}" \
-      --no-show 2>/dev/null || true
-  done
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 5. Cp OVERLAY — compare p=0, p=1, p=2 on same mesh
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 5: Cp overlay plots → $DIR_CP"
-echo "================================================================"
-
-for grid in 2k 8k; do
-  GRIDFILE="grids/${grid}.gri"
-  ARGS=""
-  HAVE_ANY=false
-
-  for p in 0 1 2; do
-    RES="${DATADIR}/steady_${grid}_p${p}_results.bin"
-    if [[ -f "$RES" ]]; then
-      ARGS="$ARGS $RES p=${p}"
-      HAVE_ANY=true
-    fi
-  done
-
-  if $HAVE_ANY; then
-    OUTFILE="${DIR_CP}/cp_overlay_${grid}.png"
-    echo "--- Cp overlay: ${grid} → $OUTFILE ---"
-    "$PYTHON" "$POSTPROC/plot_cp_overlay.py" \
-      "$GRIDFILE" "$OUTFILE" \
-      $ARGS 2>/dev/null || true
+normalize_curvature() {
+  local value="$1"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    value="q${value}"
   fi
-done
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 6. CONVERGENCE OVERLAY — residual histories for all orders on each mesh
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 6: Convergence history overlay → $DIR_CONVERGENCE"
-echo "================================================================"
-
-for grid in 2k 8k; do
-  INPUTS=""
-  for p in 0 1 2; do
-    RESID="${DATADIR}/steady_${grid}_p${p}_residual.bin"
-    if [[ -f "$RESID" ]]; then
-      INPUTS="$INPUTS $RESID"
-    fi
-  done
-
-  if [[ -n "$INPUTS" ]]; then
-    OUTFILE="${DIR_CONVERGENCE}/convergence_${grid}.png"
-    echo "--- Convergence overlay: ${grid} → $OUTFILE ---"
-    "$PYTHON" "$POSTPROC/plot_convergence_overlay.py" \
-      $INPUTS \
-      -o "$OUTFILE" \
-      --title "${grid} mesh convergence" \
-      --trim-shared-prefix 2>/dev/null || true
+  if [[ ! "$value" =~ ^q[0-9]+$ ]]; then
+    echo "Error: curvature must look like q1, q2, q3, or a number such as 1" >&2
+    exit 1
   fi
-done
+  echo "$value"
+}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 7. Cl CONVERGENCE — adjoint-adapted vs uniform refinement
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 7: Cl convergence — adjoint vs uniform → $DIR_CL"
-echo "================================================================"
-
-echo "--- Cl convergence plot ---"
-"$PYTHON" "$POSTPROC/plot_cl_convergence.py" \
-  --adapt  "${DATADIR}/adapt_run.log" \
-  --uniform "${DATADIR}/uniform_run.log" \
-  --out     "${DIR_CL}/cl_convergence.png" \
-  --effectivity-out "${DIR_CL}/cl_effectivity.png" \
-  2>/dev/null || true
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 8. ADJOINT VISUALIZATION — psi field + error indicators per cycle
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 8: Adjoint field + error indicator plots → $DIR_ADJOINT"
-echo "================================================================"
-
-for cycle in 0 1 2 3 4 5; do
-  IND="${DATADIR}/steady_base_p0_adjoint_indicators_cycle${cycle}.bin"
-  if [[ ! -f "$IND" ]]; then continue; fi
-
-  echo "--- Adjoint cycle ${cycle} ---"
-  # plot_adjoint.py saves to <output_dir>/adjoint_cycle<N>.png
-  # Run it pointing at DATADIR, then copy result to report subfolder
-  "$PYTHON" "$POSTPROC/plot_adjoint.py" "$DATADIR" "$cycle" 2>/dev/null || true
-  if [[ -f "${DATADIR}/adjoint_cycle${cycle}.png" ]]; then
-    cp "${DATADIR}/adjoint_cycle${cycle}.png" "${DIR_ADJOINT}/"
+normalize_solver_order() {
+  local value="$1"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    value="p${value}"
   fi
+  if [[ ! "$value" =~ ^p[0-9]+$ ]]; then
+    echo "Error: solver_order must look like p0, p1, p2, or a number such as 0" >&2
+    exit 1
+  fi
+  echo "$value"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --case)
+      CASE_FILTER="${2#/}"
+      CASE_FILTER="${CASE_FILTER%/}"
+      shift 2
+      ;;
+    --curvature)
+      CURVATURE_FILTER="$(normalize_curvature "$2")"
+      shift 2
+      ;;
+    --skip-existing)
+      SKIP_EXISTING=true
+      shift
+      ;;
+    --no-uniform)
+      NO_UNIFORM=true
+      shift
+      ;;
+    --no-cl)
+      DO_CL=false
+      shift
+      ;;
+    --no-cp)
+      DO_CP=false
+      shift
+      ;;
+    --no-contours)
+      DO_CONTOURS=false
+      shift
+      ;;
+    --no-indicators)
+      DO_INDICATORS=false
+      shift
+      ;;
+    --indicator-all-iterations)
+      INDICATOR_ALL_ITERATIONS=true
+      shift
+      ;;
+    --recompute-indicators)
+      RECOMPUTE_INDICATORS=true
+      shift
+      ;;
+    --reference-mesh)
+      REFERENCE_MESH="$2"
+      shift 2
+      ;;
+    --reference-results)
+      REFERENCE_RESULTS="$2"
+      shift 2
+      ;;
+    --reference-label)
+      REFERENCE_LABEL="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "Error: unknown option: $1"
+      usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
 done
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 9. PRINT Cl SUMMARY TABLE
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "================================================================"
-echo "  SECTION 9: Cl summary table (from solver logs)"
-echo "================================================================"
+if [[ ${#POSITIONAL[@]} -gt 3 ]]; then
+  echo "Error: expected at most 3 positional arguments: [ncells] [curvature] [solver_order]"
+  exit 1
+fi
 
-echo ""
-echo "UNIFORM REFINEMENT Cl VALUES:"
-echo "Grid    | p=0         | p=1         | p=2"
-echo "--------+-------------+-------------+-------------"
-for grid in 2k 8k 32k 128k; do
-  LINE="${grid}"
-  for p in 0 1 2; do
-    LOG="${DATADIR}/${grid}_p${p}_run.log"
-    if [[ -f "$LOG" ]]; then
-      CL=$(grep -oP 'Cl = \K[0-9.e+-]+' "$LOG" | tail -1)
-      LINE="${LINE}    | ${CL:-n/a}"
-    else
-      LINE="${LINE}    | n/a"
+if [[ ${#POSITIONAL[@]} -gt 0 ]]; then
+  NCELLS="${POSITIONAL[0]}"
+  CURVATURE="$(normalize_curvature "${POSITIONAL[1]:-q1}")"
+  ORDER_TAG="$(normalize_solver_order "${POSITIONAL[2]:-p0}")"
+  CASE_FILTER="${NCELLS}/${CURVATURE}/${ORDER_TAG}"
+fi
+
+if [[ -n "$CASE_FILTER" && -n "$CURVATURE_FILTER" ]]; then
+  IFS=/ read -r _case_ncells case_curvature _case_order <<< "$CASE_FILTER"
+  if [[ "$case_curvature" != "$CURVATURE_FILTER" ]]; then
+    echo "Error: --case ${CASE_FILTER} conflicts with --curvature ${CURVATURE_FILTER}" >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$FINAL_CASES" "$FINAL_FIGURES"
+
+if [[ ! -d "$FINAL_GRIDS" ]]; then
+  echo "Error: missing ${FINAL_GRIDS}/. Run run_data.sh first."
+  exit 1
+fi
+
+if [[ ! -d "$FINAL_SOLUTIONS" ]]; then
+  echo "Error: missing ${FINAL_SOLUTIONS}/. Run solve_final_grids.sh first."
+  exit 1
+fi
+
+if $DO_CL; then
+  echo ""
+  echo "================================================================"
+  echo "  CL tables and convergence plots"
+  echo "================================================================"
+
+  cl_args=(
+    --final-grids "$FINAL_GRIDS"
+    --final-solutions "$FINAL_SOLUTIONS"
+    --outdir "$FINAL_CASES"
+    --reference-mesh "$REFERENCE_MESH"
+    --reference-results "$REFERENCE_RESULTS"
+    --reference-label "$REFERENCE_LABEL"
+    --uniform-curvature "$UNIFORM_CURVATURE"
+    --uniform-order "$UNIFORM_ORDER"
+    --uniform-grids "$UNIFORM_GRIDS"
+  )
+  if [[ -n "$CASE_FILTER" ]]; then
+    cl_args+=(--case "$CASE_FILTER")
+  fi
+  if [[ -n "$CURVATURE_FILTER" ]]; then
+    cl_args+=(--curvature "$CURVATURE_FILTER")
+  fi
+  if $NO_UNIFORM; then
+    cl_args+=(--no-uniform)
+  fi
+
+  "$PYTHON" postproc/process_final_cases.py "${cl_args[@]}"
+
+  "$PYTHON" - "$FINAL_CASES" "$FINAL_FIGURES" "$CASE_FILTER" "$CURVATURE_FILTER" <<'PY'
+import csv
+import shutil
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+final_cases = Path(sys.argv[1])
+final_figures = Path(sys.argv[2])
+case_filter = sys.argv[3] or None
+curvature_filter = sys.argv[4] or None
+final_figures.mkdir(parents=True, exist_ok=True)
+
+copies = [
+    ("cl_vs_cells.png", "cl_convergence.png"),
+    ("cl_convergence.png", "cl_convergence_by_iteration.png"),
+    ("cl_error.png", "cl_error.png"),
+    ("cl_error_by_iteration.png", "cl_error_by_iteration.png"),
+    ("cl_vs_logh.png", "cl_vs_log_cells.png"),
+]
+for src_name, dst_name in copies:
+    src = final_cases / src_name
+    if src.exists():
+        dst = final_figures / dst_name
+        shutil.copy2(src, dst)
+        print(f"CL figure: {dst}  (from {src})")
+
+csv_path = final_cases / "cl_values.csv"
+if not csv_path.exists():
+    raise SystemExit
+
+with csv_path.open(newline="") as f:
+    rows = list(csv.DictReader(f))
+
+by_case = defaultdict(list)
+for row in rows:
+    if case_filter and row["case"] != case_filter:
+        continue
+    if curvature_filter and row["curvature"] != curvature_filter:
+        continue
+    by_case[row["case"]].append(row)
+
+if not by_case:
+    print("Warning: no CL rows matched the requested case.")
+else:
+    for case, case_rows in sorted(by_case.items()):
+        iters = sorted({int(row["iteration"]) for row in case_rows if row["iteration"] != ""})
+        elems = [int(row["n_elements"]) for row in case_rows if row["n_elements"] != ""]
+        if len(iters) < 2:
+            print(
+                f"Warning: {case} has only {len(iters)} solved adaptation iteration(s): {iters}. "
+                "The P4final-style CL convergence plot will be a single adapted point plus uniform data. "
+                "Run solve_final_grids.sh on more iter*.gri snapshots after adaptation produces them."
+            )
+        else:
+            print(
+                f"CL data: {case} has {len(iters)} solved iterations "
+                f"({min(elems)} to {max(elems)} elements)."
+            )
+PY
+fi
+
+if $DO_INDICATORS; then
+  echo ""
+  echo "================================================================"
+  echo "  Fixed-grid adjoint-weighted error indicators"
+  echo "================================================================"
+
+  indicator_args=(
+    --solver ./euler_solver
+    --final-grids "$FINAL_GRIDS"
+    --final-solutions "$FINAL_SOLUTIONS"
+    --outdir "${FINAL_CASES}/indicators"
+  )
+  if [[ -n "$CASE_FILTER" ]]; then
+    indicator_args+=(--case "$CASE_FILTER")
+  fi
+  if [[ -n "$CURVATURE_FILTER" ]]; then
+    indicator_args+=(--curvature "$CURVATURE_FILTER")
+  fi
+  if ! $RECOMPUTE_INDICATORS || $SKIP_EXISTING; then
+    indicator_args+=(--skip-existing)
+  fi
+  if ! $RECOMPUTE_INDICATORS && ! $INDICATOR_ALL_ITERATIONS; then
+    indicator_args+=(--skip-if-any-indicator-root data_steady)
+  fi
+  if $INDICATOR_ALL_ITERATIONS; then
+    indicator_args+=(--all-iterations)
+  fi
+
+  "$PYTHON" postproc/compute_final_indicators.py "${indicator_args[@]}"
+fi
+
+if $DO_CONTOURS; then
+  echo ""
+  echo "================================================================"
+  echo "  Mach contours"
+  echo "================================================================"
+  contour_args=(
+    --final-grids "$FINAL_GRIDS"
+    --final-solutions "$FINAL_SOLUTIONS"
+    --outdir "$FINAL_FIGURES"
+    --field mach
+  )
+  if [[ -n "$CASE_FILTER" ]]; then
+    contour_args+=(--case "$CASE_FILTER")
+  fi
+  if [[ -n "$CURVATURE_FILTER" ]]; then
+    contour_args+=(--curvature "$CURVATURE_FILTER")
+  fi
+  "$PYTHON" postproc/plot_final_contours.py "${contour_args[@]}"
+
+  echo ""
+  echo "================================================================"
+  echo "  Aspect-ratio contours"
+  echo "================================================================"
+  contour_args=(
+    --final-grids "$FINAL_GRIDS"
+    --final-solutions "$FINAL_SOLUTIONS"
+    --outdir "$FINAL_FIGURES"
+    --field aspect_ratio
+    --vmin 1
+    --vmax 10
+    --cmap viridis
+  )
+  if [[ -n "$CASE_FILTER" ]]; then
+    contour_args+=(--case "$CASE_FILTER")
+  fi
+  if [[ -n "$CURVATURE_FILTER" ]]; then
+    contour_args+=(--curvature "$CURVATURE_FILTER")
+  fi
+  "$PYTHON" postproc/plot_final_contours.py "${contour_args[@]}"
+
+  if $DO_INDICATORS; then
+    echo ""
+    echo "================================================================"
+    echo "  Adjoint-weighted error indicator contours"
+    echo "================================================================"
+    contour_args=(
+      --final-grids "$FINAL_GRIDS"
+      --final-solutions "$FINAL_SOLUTIONS"
+      --indicator-root "${FINAL_CASES}/indicators"
+      --indicator-root data_steady
+      --outdir "$FINAL_FIGURES"
+      --field adjoint_indicator
+    )
+    if [[ -n "$CASE_FILTER" ]]; then
+      contour_args+=(--case "$CASE_FILTER")
     fi
-  done
-  echo "$LINE"
-done
+    if [[ -n "$CURVATURE_FILTER" ]]; then
+      contour_args+=(--curvature "$CURVATURE_FILTER")
+    fi
+    "$PYTHON" postproc/plot_final_contours.py "${contour_args[@]}"
+  fi
+fi
 
-echo ""
-echo "ADJOINT-ADAPTED Cl VALUES:"
-if [[ -f "${DATADIR}/adapt_run.log" ]]; then
-  grep -E 'Cl = ' "${DATADIR}/adapt_run.log" || true
+if $DO_CP; then
+  echo ""
+  echo "================================================================"
+  echo "  Cp distributions"
+  echo "================================================================"
+
+  cp_args=(
+    --final-grids "$FINAL_GRIDS"
+    --final-solutions "$FINAL_SOLUTIONS"
+    --outdir "$FINAL_FIGURES"
+    --reference-mesh "$REFERENCE_MESH"
+    --reference-results "$REFERENCE_RESULTS"
+    --reference-label "$CP_REFERENCE_LABEL"
+  )
+  if [[ -n "$CASE_FILTER" ]]; then
+    cp_args+=(--case "$CASE_FILTER")
+  fi
+  if [[ -n "$CURVATURE_FILTER" ]]; then
+    cp_args+=(--curvature "$CURVATURE_FILTER")
+  fi
+
+  "$PYTHON" postproc/plot_final_cp.py "${cp_args[@]}"
 fi
 
 echo ""
 echo "================================================================"
-echo "  All postprocessing complete."
-echo "  Figures saved to: $OUTDIR/"
+echo "  P4final-style postprocessing complete."
+echo "  Cases  : ${FINAL_CASES}/"
+echo "  Figures: ${FINAL_FIGURES}/"
 echo "================================================================"
-echo ""
-echo "Directory structure:"
-find "$OUTDIR" -type f -name '*.png' -o -name '*.json' -o -name '*.csv' | sort
