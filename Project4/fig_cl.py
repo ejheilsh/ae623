@@ -9,20 +9,42 @@ import numpy as np
 x_u0 = np.array([2000, 8000, 32000, 128000])
 y_u0 = np.array([0.694549, 0.724121, 0.740194, 0.751011])
 
+"""
+sorry, use this value of cl at p=0, q=1 for the 2k base run instead for the below to correct
+
+\begin{table}[h!]
+\centering
+\caption{Mesh adaptation progression using adjoint-based indicators, impact of solution order.}
+\label{tab:mesh_adaptation}
+
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{ccccc}
+\toprule
+Cycle & Elem ($p=0$) & $C_l$ ($p=0, q=1$) & $C_l$ ($p=1, q=3$) \\
+\midrule
+0 & 1989  & 0.694549 & 0.755684 \\
+1 & 2407  & 0.703027 & 0.755384 \\
+2 & 3313  & 0.710215 & 0.755347 \\
+3 & 5175  & 0.718072 & 0.755489 \\
+4 & 9077  & 0.725317 & 0.755692 \\
+5 & 16587 & 0.731905 & 0.755721 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+"""
+
+
 # Adjoint p=0 (UPDATED: 2k, 5% adapt run)
-x_a0 = np.array([1989, 2079, 2171, 2263, 2364, 2472, 2579, 2699, 2816, 2946, 3072])
+x_a0 = np.array([1989, 2398, 3271, 5170, 8949, 16468])
 y_a0 = np.array([
-    0.694548970,
-    0.700022995,
-    0.702936375,
-    0.704844044,
-    0.706772931,
-    0.708681276,
-    0.709920438,
-    0.711026161,
-    0.711971213,
-    0.713213010,
-    0.714309284
+    0.694549,
+    0.703027,
+    0.710215,
+    0.718072,
+    0.725317,
+    0.731905
 ])
 
 # Adjoint p=1 (UPDATED: 2k p=1, q=3 run)
